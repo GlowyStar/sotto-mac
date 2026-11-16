@@ -1,12 +1,12 @@
 # Sotto for macOS: interface design spec
 
-Build target: SwiftUI, macOS 14+. This file is the single source for the interface. Every number is in points (pt, 1pt = 1px of the reference at 100% scale). A value marked `(estimate)` was not found in the reference and is our best value; everything else comes from the reference style files named in section 9.
+Build target: SwiftUI, macOS 14+. This file is the single source for the interface. Every number is in points (pt, 1pt = 1px of the reference at 100% scale). A value marked `(estimate)` was not found in the reference and is the best value available; everything else comes from the reference style files named in section 9.
 
 ## 1. Reference and limits
 
-The layout, sizes, colours and conventions follow Telegram Desktop 7.x (the open source Qt client, GPLv3). Sotto is Apache-2.0, so only facts are taken: sizes, colour values and layout conventions, restated here in our own words.
+The layout, sizes, colours and conventions follow Telegram Desktop 7.x (the open source Qt client, GPLv3). Sotto is Apache-2.0, so only facts are taken: sizes, colour values and layout conventions, restated here in new words.
 
-Not taken, and never to be added: any code or style-file text, any icon or image asset, the wallpaper patterns, sounds, the logo, the name or the brand. Icons are SF Symbols (section 8). The chat background is a flat colour or a simple two-stop gradient of our own. Avatars are coloured circles with initials. The look will be adjusted later; build every value from the tokens below so a later change is a token edit.
+Not taken, and never to be added: any code or style-file text, any icon or image asset, the wallpaper patterns, sounds, the logo, the name or the brand. Icons are SF Symbols (section 8). The chat background is a flat colour or a simple two-stop gradient made for Sotto. Avatars are coloured circles with initials. The look will be adjusted later; build every value from the tokens below so a later change is a token edit.
 
 Product scope (do not design anything else): one-to-one text chats, all end-to-end encrypted; contacts added by a 64-hex-character id under a local name; an identity is a key pair made on the device (no phone, no photo, no username); a message is either waiting in the outbox or stored by the relay (no delivery or read receipts, no typing, no online status); the app is connected to a relay or reconnecting; a session with a contact can be reset. No groups, channels, media, stickers, calls, folders or stories.
 
@@ -62,8 +62,8 @@ Colours are sRGB hex; an 8-digit value is `#RRGGBBAA` (alpha last). Build them a
 | `badgeFg` | #ffffff | #ffffff | unread badge number |
 | `badgeBgActive` | #ffffff | #ffffff | badge in the active row |
 | `badgeFgActive` | #419fd9 | #2a5378 | badge number in the active row |
-| `chatBgTop` | #dfe7d6 (estimate, ours) | #0e1621 (estimate) | chat area background, top stop |
-| `chatBgBottom` | #cfdcc3 (estimate, ours) | #0e1621 (estimate) | chat area background, bottom stop |
+| `chatBgTop` | #dfe7d6 (estimate, Sotto's own) | #0e1621 (estimate) | chat area background, top stop |
+| `chatBgBottom` | #cfdcc3 (estimate, Sotto's own) | #0e1621 (estimate) | chat area background, bottom stop |
 | `msgInBg` | #ffffff | #182533 | incoming bubble |
 | `msgOutBg` | #effdde | #2b5278 | outgoing bubble |
 | `msgInFg` | #000000 | #f5f5f5 | incoming text |
@@ -229,13 +229,13 @@ A click on the avatar or the title also opens the contact panel (7.4).
 | Space above a message inside a group | 0 (so 2 inside a group, 8 between groups) |
 | Large / small corner radius | 16 / 6 |
 | Shadow | a 2pt solid band under the bubble, `msgInShadow` / `msgOutShadow`, no blur |
-| Time placement | trailing bottom, right inset 9, bottom inset 3 from the bubble edge |
+| Time placement | trailing bottom, right inset 9, bottom inset 8 from the bubble edge (the content padding, so the time shares the baseline of the last text line at size 13) |
 | Space reserved before the time | 12 |
 | Outgoing status mark | after the time, 24 reserved, symbol 12pt |
 
 A group is consecutive messages of one sender with less than 5 minutes (estimate) between them and no date separator in between. Corners: on the sender's side (left for incoming, right for outgoing) a corner that touches another bubble of the group uses the small radius, the group's outer ends use the large radius; the opposite side always uses the large radius.
 
-Tail: only on the last bubble of a group, at the bottom corner on the sender's side. That corner becomes square and a curved horn of 8 wide x 12 high (estimate) extends outward along the bottom edge, same fill, the shadow following its outline. Draw it as one `Shape` path with the bubble; our own curve, no image.
+Tail: only on the last bubble of a group, at the bottom corner on the sender's side. That corner becomes square and a curved horn of 8 wide x 12 high (estimate) extends outward along the bottom edge, same fill, the shadow following its outline. Draw it as one `Shape` path with the bubble; an original curve, no image.
 
 Time and text flow: if the last text line plus the time (and mark) fits in the maximum width, the time sits on that line; otherwise the bubble grows by one line and the time sits alone at the trailing bottom. Implement with a transparent spacer of the time's width appended to the text.
 
@@ -339,7 +339,7 @@ Scroll bars: system overlay bars (`.scrollIndicators(.automatic)`); the referenc
 
 Hover fades in and out in 120ms. The active row changes instantly.
 
-List order: rows sort by the time of the last message, newest first; a contact without messages sorts by its add time. A new message (incoming or sent) moves its row to the top. The reference moves rows without animation; we animate the move with the default spring, and the badge number changes with `.contentTransition(.numericText())`.
+List order: rows sort by the time of the last message, newest first; a contact without messages sorts by its add time. A new message (incoming or sent) moves its row to the top. The reference moves rows without animation; Sotto animates the move with the default spring, and the badge number changes with `.contentTransition(.numericText())`.
 
 | Element | Reference | SwiftUI |
 |---|---|---|
@@ -421,7 +421,7 @@ Buttons: "Cancel", "Save" (enabled only when the relay field changed).
 ### 7.6 Connection, outbox, unknown senders, encryption
 
 - Connection: shown only in the connection bar under the list search (5.2). The chat area does not change; a message sent while disconnected waits in the outbox.
-- Outbox state, on every outgoing bubble after the time: `clock` 12pt `msgSendingIconFg` while waiting in the outbox; `checkmark` 12pt `msgStoredIconFg` once the relay stored it. Never a double check: there are no receipts. The same marks stand before the time in a list row whose last message is our own (check `rowSentIconFg`, clock `windowSubFg`, both `rowFgActive` in the active row).
+- Outbox state, on every outgoing bubble after the time: `clock` 12pt `msgSendingIconFg` while waiting in the outbox; `checkmark` 12pt `msgStoredIconFg` once the relay stored it. Never a double check: there are no receipts. The same marks stand before the time in a list row whose last message is the user's own (check `rowSentIconFg`, clock `windowSubFg`, both `rowFgActive` in the active row).
 - A message from a sender who is not in the contacts is not shown anywhere: no row, no badge, no notification.
 - "End-to-end encrypted" is stated, not decorated: the header subtitle with a small lock (5.3), the contact panel under the name (7.4) and the first-launch text. No green titles, no locks in list rows, no special bubble colours, no "secret chat" banner: the normal chat look is the encrypted look.
 
@@ -459,11 +459,11 @@ Sources read: tdesktop `dialogs/dialogs.style`, `ui/chat/chat.style`, `window/wi
 Estimated, worth a look by the owner:
 - Default list width 320, title strip 28, list top bar 54, chat header inner layout (avatar 40, title 14, offsets): not found as named values. The header height 54 comes from the info section's top bar.
 - Fonts: list name weight, header title size, all line heights, avatar initials sizes.
-- The chat background is ours: a light green gradient #dfe7d6 to #cfdcc3, picked to suit the reference `serviceBg`, which is tuned to a green wallpaper; dark #0e1621 flat. If the background changes, retune `serviceBg`.
+- The chat background is Sotto's own: a light green gradient #dfe7d6 to #cfdcc3, picked to suit the reference `serviceBg`, which is tuned to a green wallpaper; dark #0e1621 flat. If the background changes, retune `serviceBg`.
 - Dark values missing in the night palette: `titleFgInactive`, `composeIconFgOver`, `lightButtonBgOver`, `dangerBgOver`; the avatar gradient bottoms reuse the light values.
 - `menuBgOver` in the night palette reads #ffffff, likely meant for another surface; #232e3c (dark `windowBgOver`) is used instead.
 - Tail shape and size, the 5-minute grouping gap, toast hold time, the scroll-to-bottom circle, menu and box shadows, first-launch sizes.
-- First launch, my id, contact panel and settings are ours, drawn in the same language; the reference has no equivalent screens.
+- First launch, my id, contact panel and settings are Sotto's own, drawn in the same language; the reference has no equivalent screens.
 
 Decisions for the owner:
 - The send button hides when the field is empty (the reference shows a microphone there; Sotto has no voice).

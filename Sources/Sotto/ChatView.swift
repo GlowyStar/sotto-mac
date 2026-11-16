@@ -1,0 +1,339 @@
+import AppKit
+import SwiftUI
+
+/// The open chat: header, messages, compose bar and, when it fits, the contact panel.
+struct ChatScreen: View {
+    @Bindable var model: AppModel
+    let contact: Contact
+    let singleColumn: Bool
+    let width: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var panelFits: Bool { width - Metrics.panelWidth - 1 >= Metrics.chatMin }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ChatHeader(model: model, contact: contact, singleColumn: singleColumn) {
+                if panelFits {
+                    withAnimation(Motion.pick(Motion.column, reduce: reduceMotion)) { model.panelOpen.toggle() }
+                } else {
+                    model.modal = .contactInfo(contact.id)
+                }
+            }
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    MessageList(model: model, contact: contact)
+                    ComposeBar(model: model, chatID: contact.id)
+                }
+                if model.panelOpen && panelFits {
+                    Rectangle().fill(Color.divider).frame(width: 1)
+                    ContactPanel(model: model, contact: contact, asBox: false)
+                        .frame(width: Metrics.panelWidth)
+                        .transition(reduceMotion ? .opacity : .move(edge: .trailing))
+                }
+            }
+        }
+    }
+}
+
+struct ChatHeader: View {
+    let model: AppModel
+    let contact: Contact
+    let singleColumn: Bool
+    let togglePanel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            if singleColumn {
+                IconButton(symbol: "chevron.left", size: 17, label: "Back to chats") { model.closeChat() }
+                    .padding(.leading, 6)
+            }
+            Button(action: togglePanel) {
+                HStack(spacing: Metrics.headerTitleGap) {
+                    Avatar(id: contact.id, name: contact.name, size: Metrics.headerAvatar)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(contact.name)
+                            .font(Fonts.headerTitle)
+                            .foregroundStyle(Color.windowBoldFg)
+                            .lineLimit(1)
+                        EncryptedLine()
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, singleColumn ? 0 : Metrics.headerAvatarLeft)
+            .accessibilityLabel("\(contact.name), contact info")
+            Spacer(minLength: 8)
+            IconButton(symbol: "sidebar.right", size: 18, label: "Contact info", action: togglePanel)
+                .padding(.trailing, 8)
+        }
+        .frame(height: Metrics.topBarHeight)
+        .background(Color.topBarBg)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.divider).frame(height: 1) }
+    }
+}
+
+/// One line of the message list.
+enum ChatItem: Identifiable {
+    case date(Date)
+    case unread
+    case message(Message, top: Bool, bottom: Bool)
+
+    var id: String {
+        switch self {
+        case .date(let date): "date-\(date.timeIntervalSinceReferenceDate)"
+        case .unread: "unread"
+        case .message(let message, _, _): message.id.uuidString
+        }
+    }
+
+    /// Splits messages into days and groups (DESIGN.md 5.4 to 5.6).
+    static func build(_ messages: [Message], unreadAnchor: UUID?) -> [ChatItem] {
+        let calendar = Calendar.current
+        var items: [ChatItem] = []
+        for (index, message) in messages.enumerated() {
+            let previous = index > 0 ? messages[index - 1] : nil
+            let next = index + 1 < messages.count ? messages[index + 1] : nil
+            let newDay = previous.map { !calendar.isDate($0.date, inSameDayAs: message.date) } ?? true
+            if newDay { items.append(.date(message.date)) }
+            if message.id == unreadAnchor { items.append(.unread) }
+            func joins(_ a: Message?, _ b: Message?) -> Bool {
+                guard let a, let b else { return false }
+                return a.outgoing == b.outgoing && calendar.isDate(a.date, inSameDayAs: b.date)
+                    && b.date.timeIntervalSince(a.date) < Metrics.groupGap && b.id != unreadAnchor
+            }
+            items.append(.message(message, top: !joins(previous, message), bottom: !joins(message, next)))
+        }
+        return items
+    }
+}
+
+struct MessageList: View {
+    let model: AppModel
+    let contact: Contact
+    @State private var distanceFromBottom: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private struct BottomKey: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+    }
+
+    var body: some View {
+        let messages = model.messages[contact.id] ?? []
+        let items = ChatItem.build(messages, unreadAnchor: model.unreadAnchor)
+        GeometryReader { outer in
+            let maxBubble = min(Metrics.bubbleMaxWidth, outer.size.width - Metrics.bubbleNear - Metrics.bubbleFar)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(items) { item in
+                            row(item, maxBubble: maxBubble)
+                                .id(item.id)
+                        }
+                        Color.clear.frame(height: Metrics.listToCompose).id("bottom")
+                    }
+                    .background(
+                        GeometryReader { inner in
+                            Color.clear.preference(
+                                key: BottomKey.self, value: inner.frame(in: .named("messages")).maxY - outer.size.height)
+                        })
+                }
+                .coordinateSpace(name: "messages")
+                .defaultScrollAnchor(.bottom)
+                .scrollIndicators(.automatic)
+                .onPreferenceChange(BottomKey.self) { value in
+                    Task { @MainActor in distanceFromBottom = value }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if distanceFromBottom > Metrics.toDownThreshold {
+                        ScrollDownButton {
+                            let far = distanceFromBottom > outer.size.height * 2
+                            withAnimation(far || reduceMotion ? nil : Motion.newMessage) {
+                                proxy.scrollTo("bottom", anchor: .bottom)
+                            }
+                        }
+                        .padding(.trailing, Metrics.toDownRight)
+                        .padding(.bottom, Metrics.toDownBottom)
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 10)))
+                    }
+                }
+                .animation(Motion.pick(Motion.toDown, reduce: reduceMotion), value: distanceFromBottom > Metrics.toDownThreshold)
+                .onAppear {
+                    guard model.unreadAnchor != nil else { return }
+                    // After the first layout, which the bottom anchor would override.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        proxy.scrollTo("unread", anchor: .top)
+                    }
+                }
+                .onChange(of: messages.last?.id) { _, _ in
+                    withAnimation(reduceMotion ? nil : Motion.newMessage) { proxy.scrollTo("bottom", anchor: .bottom) }
+                }
+            }
+        }
+        .id(contact.id)
+    }
+
+    @ViewBuilder
+    private func row(_ item: ChatItem, maxBubble: CGFloat) -> some View {
+        switch item {
+        case .date(let date):
+            ServicePill(text: Formats.separator(date))
+                .padding(.top, Metrics.dateTop)
+                .padding(.bottom, Metrics.dateBottom)
+        case .unread:
+            Text("Unread messages")
+                .font(Fonts.service)
+                .foregroundStyle(Color.unreadBarFg)
+                .frame(maxWidth: .infinity, minHeight: Metrics.unreadBand, maxHeight: Metrics.unreadBand)
+                .background(Color.unreadBarBg)
+                .overlay(alignment: .top) { Rectangle().fill(Color.unreadBarBorder).frame(height: 1) }
+                .overlay(alignment: .bottom) { Rectangle().fill(Color.unreadBarBorder).frame(height: 1) }
+                .padding(.vertical, Metrics.unreadMargin)
+        case .message(let message, let top, let bottom):
+            MessageRow(message: message, top: top, bottom: bottom, maxWidth: maxBubble) {
+                model.deleteMessage(message.id, in: contact.id)
+            }
+            .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
+        }
+    }
+}
+
+struct ScrollDownButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 18))
+                .foregroundStyle(Color.toDownFg)
+                .frame(width: Metrics.toDownCircle, height: Metrics.toDownCircle)
+                .background(Circle().fill(Color.toDownBg).shadow(color: .shadow, radius: 2, y: 1))
+                .frame(width: 52, height: 62)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Scroll to the newest message")
+    }
+}
+
+/// A message with its margins, bubble, tail and time (DESIGN.md 5.4).
+struct MessageRow: View {
+    let message: Message
+    let top: Bool
+    let bottom: Bool
+    let maxWidth: CGFloat
+    let delete: () -> Void
+
+    var body: some View {
+        let out = message.outgoing
+        HStack(spacing: 0) {
+            if out { Spacer(minLength: Metrics.bubbleFar) }
+            bubble
+                .frame(maxWidth: maxWidth, alignment: out ? .trailing : .leading)
+            if !out { Spacer(minLength: Metrics.bubbleFar) }
+        }
+        .padding(out ? .trailing : .leading, Metrics.bubbleNear)
+        .padding(.top, top ? Metrics.groupTopSpace : 0)
+        .padding(.bottom, Metrics.messageBottomSpace)
+    }
+
+    private var bubble: some View {
+        let out = message.outgoing
+        let shape = BubbleShape(
+            senderTop: top ? Metrics.radiusLarge : Metrics.radiusSmall,
+            senderBottom: bottom ? 0 : Metrics.radiusSmall,
+            tail: bottom, mirrored: out)
+        let time = Formats.clock(message.date)
+        // A transparent copy of the time keeps room for it on the last line.
+        let reserve = Text(" \u{2007}" + time + (out ? "\u{2007}\u{2007}\u{2007}" : "")).foregroundColor(.clear)
+        return (Text(Self.attributed(message.text, out: out)) + reserve)
+            .font(Fonts.message)
+            .lineSpacing(Fonts.messageLineSpacing)
+            .foregroundStyle(out ? Color.msgOutFg : Color.msgInFg)
+            .tint(out ? Color.msgOutLinkFg : Color.msgInLinkFg)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, Metrics.bubblePadH)
+            .padding(.vertical, Metrics.bubblePadV)
+            .overlay(alignment: .bottomTrailing) {
+                HStack(spacing: 3) {
+                    Text(time)
+                        .font(Fonts.time)
+                        .foregroundStyle(out ? Color.msgOutDateFg : Color.msgInDateFg)
+                    if out {
+                        StatusMark(state: message.state, waitingColor: .msgSendingIconFg, storedColor: .msgStoredIconFg)
+                    }
+                }
+                .padding(.trailing, Metrics.timeRight)
+                .padding(.bottom, Metrics.timeBottom)
+                .accessibilityElement(children: .combine)
+            }
+            .background {
+                ZStack {
+                    shape.fill(out ? Color.msgOutShadow : Color.msgInShadow).offset(y: Metrics.bubbleShadow)
+                    shape.fill(out ? Color.msgOutBg : Color.msgInBg)
+                }
+            }
+            .contextMenu {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(message.text, forType: .string)
+                } label: {
+                    Label("Copy text", systemImage: "doc.on.doc")
+                }
+                Button(role: .destructive, action: delete) {
+                    Label("Delete for me", systemImage: "trash")
+                }
+            }
+    }
+
+    /// The text with its links detected and coloured.
+    static func attributed(_ text: String, out: Bool) -> AttributedString {
+        var result = AttributedString(text)
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+            return result
+        }
+        let nsText = text as NSString
+        for match in detector.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
+            guard let url = match.url, let range = Range(match.range, in: result) else { continue }
+            result[range].link = url
+            result[range].foregroundColor = out ? Color.msgOutLinkFg : Color.msgInLinkFg
+        }
+        return result
+    }
+}
+
+/// A bubble with per-corner radii and an optional tail at the bottom corner on the sender's
+/// side, drawn for an incoming message and mirrored for an outgoing one.
+struct BubbleShape: Shape {
+    let senderTop: CGFloat
+    let senderBottom: CGFloat
+    let tail: Bool
+    let mirrored: Bool
+    var otherTop = Metrics.radiusLarge
+    var otherBottom = Metrics.radiusLarge
+
+    func path(in rect: CGRect) -> Path {
+        let minX = rect.minX, maxX = rect.maxX, minY = rect.minY, maxY = rect.maxY
+        var path = Path()
+        path.move(to: CGPoint(x: minX + senderTop, y: minY))
+        path.addArc(tangent1End: CGPoint(x: maxX, y: minY), tangent2End: CGPoint(x: maxX, y: maxY), radius: otherTop)
+        path.addArc(tangent1End: CGPoint(x: maxX, y: maxY), tangent2End: CGPoint(x: minX, y: maxY), radius: otherBottom)
+        if tail {
+            let w = Metrics.tailWidth, h = Metrics.tailHeight
+            path.addLine(to: CGPoint(x: minX - w, y: maxY))
+            path.addCurve(
+                to: CGPoint(x: minX, y: maxY - h),
+                control1: CGPoint(x: minX - w * 0.35, y: maxY - h * 0.15),
+                control2: CGPoint(x: minX, y: maxY - h * 0.45))
+        } else {
+            path.addArc(tangent1End: CGPoint(x: minX, y: maxY), tangent2End: CGPoint(x: minX, y: minY), radius: senderBottom)
+        }
+        path.addArc(tangent1End: CGPoint(x: minX, y: minY), tangent2End: CGPoint(x: maxX, y: minY), radius: senderTop)
+        path.closeSubpath()
+        guard mirrored else { return path }
+        return path.applying(CGAffineTransform(translationX: minX + maxX, y: 0).scaledBy(x: -1, y: 1))
+    }
+}
