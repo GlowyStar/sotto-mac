@@ -1,0 +1,144 @@
+// The frames of the sotto relay protocol. docs/protocol.md, section 7, lists this file
+// and states the rules that a schema cannot express. The number and the type of a field
+// never change once they are merged (section 7.2).
+syntax = "proto3";
+
+package sotto;
+
+// Client to relay: one frame is one ClientFrame.
+message ClientFrame {
+  oneof frame {
+    Login login = 1;
+    UploadBundle upload_bundle = 2;
+    FetchBundle fetch_bundle = 3;
+    Send send = 4;
+    Ack ack = 5;
+  }
+}
+
+// Relay to client: one frame is one ServerFrame.
+message ServerFrame {
+  oneof frame {
+    Hello hello = 1;
+    LoggedIn logged_in = 2;
+    BundleStored bundle_stored = 3;
+    Bundle bundle = 4;
+    Stored stored = 5;
+    Deliver deliver = 6;
+    Error error = 7;
+  }
+}
+
+message Hello {
+  uint32 version = 1;
+  bytes nonce = 2;
+}
+
+message Login {
+  bytes identity_key = 1;
+  bytes client_nonce = 2;
+  bytes signature = 3;
+}
+
+message LoggedIn {
+  uint32 one_time_prekey_count = 1;
+}
+
+message SignedPrekey {
+  uint32 id = 1;
+  bytes key = 2;
+  bytes signature = 3;
+}
+
+message OneTimePrekey {
+  uint32 id = 1;
+  bytes key = 2;
+}
+
+message UploadBundle {
+  bytes identity_dh_key = 1;
+  bytes identity_dh_signature = 2;
+  SignedPrekey signed_prekey = 3;
+  repeated OneTimePrekey one_time_prekeys = 4;
+}
+
+message BundleStored {
+  uint32 one_time_prekey_count = 1;
+}
+
+message FetchBundle {
+  bytes identity = 1;
+}
+
+message Bundle {
+  bytes identity = 1;
+  bytes identity_dh_key = 2;
+  bytes identity_dh_signature = 3;
+  SignedPrekey signed_prekey = 4;
+  OneTimePrekey one_time_prekey = 5;
+}
+
+message Send {
+  bytes message_id = 1;
+  bytes recipient = 2;
+  bytes payload = 3;
+}
+
+message Stored {
+  bytes message_id = 1;
+}
+
+message Deliver {
+  bytes message_id = 1;
+  bytes sender = 2;
+  bytes payload = 3;
+}
+
+message MessageRef {
+  bytes message_id = 1;
+  bytes sender = 2;
+}
+
+message Ack {
+  repeated MessageRef messages = 1;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  UNKNOWN_RECIPIENT = 1;
+  QUEUE_FULL = 2;
+  STORAGE_FULL = 3;
+  RATE_LIMITED = 4;
+  NOT_FOUND = 5;
+  BAD_BUNDLE = 6;
+  IDENTITY_KEY_MISMATCH = 7;
+}
+
+message Error {
+  ErrorCode code = 1;
+  bytes message_id = 2;
+  bytes identity = 3;
+}
+
+// The payload of a Send and of a Deliver: one PeerMessage.
+message PeerMessage {
+  uint32 version = 1;
+  InitialHeader initial_header = 2;
+  bytes header = 3;
+  bytes ciphertext = 4;
+}
+
+message InitialHeader {
+  bytes identity_dh_key = 1;
+  bytes identity_dh_signature = 2;
+  bytes ephemeral_key = 3;
+  uint32 signed_prekey_id = 4;
+  optional uint32 one_time_prekey_id = 5;
+}
+
+// The plaintext of a message before padding.
+message Content {
+  oneof body {
+    string text = 1;
+  }
+}
