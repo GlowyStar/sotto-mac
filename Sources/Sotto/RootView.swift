@@ -71,7 +71,7 @@ struct RootView: View {
     private var modalLayer: some View {
         if let modal = model.modal {
             ZStack {
-                (reduceTransparency ? Color.layerBgOpaque : Color.layerBg)
+                Color.layerBg
                     .ignoresSafeArea()
                     .onTapGesture { model.modal = nil }
                     .accessibilityHidden(true)

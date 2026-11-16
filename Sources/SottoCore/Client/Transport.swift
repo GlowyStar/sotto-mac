@@ -290,16 +290,19 @@ public actor Transport {
     /// - Throws: `EnvelopeError.textTooLong` before any frame; `RefusedError` when the relay
     ///   refused the FetchBundle with a Stop; `CryptoError` or `SessionError` when
     ///   `Client.sendText` failed with the result that it names.
-    public func sendText(_ contact: Data, _ text: String) async throws {
+    /// - Returns: The message id.
+    @discardableResult
+    public func sendText(_ contact: Data, _ text: String, pending: Int64? = nil) async throws -> Data {
         _ = try Envelope.encodeText(text)
         var bundle: PrekeyBundle?
         if try !client.hasSession(contact) {
             bundle = try await fetchBundle(contact)
         }
-        let outgoing = try client.sendText(contact, text, bundle: bundle)
+        let outgoing = try client.sendText(contact, text, bundle: bundle, pending: pending)
         if ready {
             await request(Request(frame: Self.sendFrame(outgoing)))
         }
+        return outgoing.messageID
     }
 
     /// L2 of section 20.6 with a fresh bundle; returns the GAP of the session that left.
@@ -482,7 +485,7 @@ public actor Transport {
         } else if request.upload != nil {
             eventSink.yield(.refused(result: result, contact: nil))
         } else {
-            try client.dropRefusedSend(reference)
+            try client.dropRefusedSend(reference, result: result)
             eventSink.yield(.refused(result: result, contact: request.frame.send.recipient))
         }
     }

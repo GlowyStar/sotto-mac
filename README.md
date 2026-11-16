@@ -10,7 +10,7 @@ interoperate with sotto's command-line client byte for byte.
   rules and the transport to a relay; the command-line tool `sotto-mac` chats with
   sotto's own command-line client through a sotto relay (`scripts/interop.py` checks it).
   The app `Sotto` runs on the same core: it chats with sotto's command-line client through
-  a relay (`scripts/app-interop.py` checks the receiving side).
+  a relay in both directions (`scripts/app-interop.py` checks it with the built app).
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
 
@@ -42,7 +42,7 @@ tests starts the relay of a sotto checkout at `../../python/sotto` (they are ski
 it is missing), and so does the interoperability check:
 
 ```sh
-../../python/sotto/.venv/bin/python scripts/interop.py
+../../python/sotto/.venv/bin/python scripts/interop.py [--keep DIR]
 ```
 
 The protocol files in `Protocol/` come from a sotto checkout and are pinned by
@@ -112,17 +112,27 @@ Launch arguments of the app:
 | `--snapshot <folder>` | draws the window into PNG files and exits; with `--data-dir` from that store, without a connection, otherwise from mock data |
 | `--dump` | with `--data-dir`: prints the chats of that store as JSON and exits |
 | `--demo` | mock data and no store, with a "Mock" menu; `--first-launch` adds the first-launch screen |
+| `--send <name> <text>` | a scripting aid, any number of times: once connected, sends the text to the contact of that local name through the same action as the compose bar |
+
+A text sent to a contact without a session (nobody has written yet) waits in the store
+with a clock until a connection fetches the contact's keys, also across a restart. A
+message that the relay refuses ends as not sent, with a red mark and the reason on hover.
 
 Next to the store, `app.json` keeps what the store has no place for: the relay address
 saved in Settings, how far each chat was read, and when each contact and message was
 first seen by the app.
 
-The end-to-end check of the app (a relay on a free port, the Python client writing to the
-app while it runs and while it is closed, then a dump and a snapshot of its store):
+The end-to-end check of the app (a relay on a free port; the Python client writing to the
+app while it runs and while it is closed; the app sending with `--send` to the running
+Python client, right after a restart, and while the Python client is away; then a dump and
+a snapshot of its store):
 
 ```sh
-../../python/sotto/.venv/bin/python scripts/app-interop.py
+../../python/sotto/.venv/bin/python scripts/app-interop.py [--keep DIR]
 ```
+
+Both checks keep their data in a temporary directory that they remove at the end;
+`--keep DIR` leaves the stores, the relay database and the pictures in DIR.
 
 Limits as they are:
 

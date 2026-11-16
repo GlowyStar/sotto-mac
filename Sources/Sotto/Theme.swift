@@ -83,8 +83,7 @@ extension Color {
     static let shadow = token("00000018", "04080e56")
     static let toastBg = token("2c3033e5", "000000b2")
     static let toastFg = token("ffffff", "ffffff")
-    // Reduced transparency: the same colours with full alpha.
-    static let layerBgOpaque = token("000000", "000000")
+    // Reduced transparency: the toast with full alpha; the dim behind a box stays a dim.
     static let toastBgOpaque = token("2c3033", "000000")
     static let avatarFg = token("ffffff", "ffffff")
 }
@@ -186,6 +185,9 @@ enum Metrics {
     static let toDownRight: CGFloat = 12
     static let toDownBottom: CGFloat = 10
     static let toDownThreshold: CGFloat = 480
+    static let toDownBadge: CGFloat = 22
+    static let floatingDateTop: CGFloat = 8
+    static let floatingDateHold = Duration.milliseconds(200)
 
     // Compose
     static let composeHeight: CGFloat = 46
@@ -257,6 +259,7 @@ enum Motion {
     static let connection = Animation.smooth(duration: 0.2)
     static let reorder = Animation.spring(response: 0.3, dampingFraction: 1.0)
     static let newMessage = Animation.smooth(duration: 0.2)
+    static let floatingDate = Animation.easeOut(duration: 0.2)
     static let reduced = Animation.easeInOut(duration: 0.15)
 
     static func pick(_ animation: Animation, reduce: Bool) -> Animation { reduce ? reduced : animation }

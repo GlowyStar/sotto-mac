@@ -165,6 +165,87 @@ struct MessengerRelayTests {
         await peer.stop()
     }
 
+    @Test func aTextWithoutASessionWaitsOfflineAcrossARestartAndLeavesOnceConnected() async throws {
+        let relay = try await RealRelay()
+        defer { relay.stop() }
+        var messenger = try Messenger(directory: appDirectory, relay: deadRelay)
+        await messenger.start()
+        let appID = try await messenger.createIdentity()
+        let appKey = try Identity.decodeUserID(appID)
+        try folder.open("peer").addContact(appID)
+        let peerID = try folder.userID("peer")
+        try await messenger.addContact(name: "peer", userID: peerID)
+        let peer = try await run(folder.open("peer"), URLSessionDialer(), url: relay.url)
+        try await until { try await isRegistered(peer.transport) }
+
+        try await messenger.send("typed while offline", to: peerID)
+        let typed = try #require(try await chat(messenger)?.messages.last)
+        #expect(typed.text == "typed while offline")
+        #expect(typed.outgoing && typed.waiting && typed.failure == nil)
+        #expect(typed.id < 0)
+
+        await messenger.close()
+        #expect(try Messenger.peek(directory: appDirectory, relay: deadRelay).chats.first?.messages == [typed])
+        messenger = try Messenger(directory: appDirectory, relay: deadRelay)
+        await messenger.start()
+        #expect(try await chat(messenger)?.messages == [typed])
+
+        try await messenger.setRelay(relay.url)
+        #expect(try await nextText(peer.transport) == (appKey, "typed while offline"))
+        try await waitFor(messenger) { $0.chats.first?.messages.last?.waiting == false }
+        let sent = try #require(try await chat(messenger)?.messages)
+        #expect(sent.count == 1)
+        #expect(sent[0].id > 0 && sent[0].text == typed.text && sent[0].date == typed.date)
+        #expect(sent[0].failure == nil)
+        await messenger.close()
+        await peer.stop()
+    }
+
+    @Test func refusedTextsEndAsNotSentWithTheReasonAcrossARestart() async throws {
+        let relay = try await RealRelay()
+        defer { relay.stop() }
+        let other = try await RealRelay()
+        defer { other.stop() }
+        let messenger = try Messenger(directory: appDirectory, relay: relay.url)
+        await messenger.start()
+        let appID = try await messenger.createIdentity()
+        try folder.open("peer").addContact(appID)
+        _ = try folder.open("ghost")
+        let peerID = try folder.userID("peer")
+        let ghostID = try folder.userID("ghost")
+        try await messenger.addContact(name: "peer", userID: peerID)
+        try await messenger.addContact(name: "ghost", userID: ghostID)
+        let peer = try await run(folder.open("peer"), URLSessionDialer(), url: relay.url)
+        try await until { try await isRegistered(peer.transport) }
+        try await waitFor(messenger) { $0.link == .connected }
+
+        @Sendable func last(_ userID: String) async throws -> ChatMessage? {
+            try await messenger.state().chats.first { $0.userID == userID }?.messages.last
+        }
+
+        try await messenger.send("to nobody", to: ghostID)
+        try await until { try await last(ghostID)?.failure != nil }
+        #expect(try await last(ghostID)?.failure == "The relay refused it (NOT_FOUND).")
+        #expect(try await last(ghostID)?.waiting == false)
+
+        try await messenger.send("over the first relay", to: peerID)
+        try await waitFor(messenger) { $0.chats.first { $0.userID == peerID }?.messages.last?.waiting == false }
+        try await messenger.setRelay(other.url)
+        try await waitFor(messenger) { $0.link == .connected }
+        try await messenger.send("over a relay that does not know peer", to: peerID)
+        try await until { try await last(peerID)?.failure != nil }
+        let refused = try #require(try await last(peerID))
+        #expect(refused.failure == "The relay refused it (UNKNOWN_RECIPIENT).")
+        #expect(refused.id > 0 && !refused.waiting)
+
+        let before = try await messenger.state().chats
+        await messenger.close()
+        let reopened = try Messenger(directory: appDirectory, relay: deadRelay)
+        #expect(try await reopened.state().chats == before)
+        await reopened.close()
+        await peer.stop()
+    }
+
     @Test func aLoginOfTheSameIdentityElsewhereStopsWithAnExplanation() async throws {
         let relay = try await RealRelay()
         defer { relay.stop() }

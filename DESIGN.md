@@ -8,7 +8,7 @@ The layout, sizes, colours and conventions follow Telegram Desktop 7.x (the open
 
 Not taken, and never to be added: any code or style-file text, any icon or image asset, the wallpaper patterns, sounds, the logo, the name or the brand. Icons are SF Symbols (section 8). The chat background is a flat colour or a simple two-stop gradient made for Sotto. Avatars are coloured circles with initials. The look will be adjusted later; build every value from the tokens below so a later change is a token edit.
 
-Product scope (do not design anything else): one-to-one text chats, all end-to-end encrypted; contacts added by a 64-hex-character id under a local name; an identity is a key pair made on the device (no phone, no photo, no username); a message is either waiting in the outbox or stored by the relay (no delivery or read receipts, no typing, no online status); the app is connected to a relay or reconnecting; a session with a contact can be reset. No groups, channels, media, stickers, calls, folders or stories.
+Product scope (do not design anything else): one-to-one text chats, all end-to-end encrypted; contacts added by a 64-hex-character id under a local name; an identity is a key pair made on the device (no phone, no photo, no username); an outgoing message is waiting, stored by the relay, or not sent (no delivery or read receipts, no typing, no online status); the app is connected to a relay or reconnecting; a session with a contact can be reset. No groups, channels, media, stickers, calls, folders or stories.
 
 ## 2. Window and layout
 
@@ -243,7 +243,7 @@ Text is selectable (`.textSelection(.enabled)`); links are detected, coloured `m
 
 ### 5.5 Date separator
 
-A pill centered above the first message of each day: "Today", "Yesterday", or the date ("12 March", with the year when not the current year). Paddings left 12, top 3, right 12, bottom 4; margin top 10, bottom 2; fully rounded; background `serviceBg`, text 13 semibold `serviceFg`. While scrolling, the pill of the topmost visible day floats at top 8 and fades out 200ms after scrolling stops (optional, see 9).
+A pill centered above the first message of each day: "Today", "Yesterday", or the date ("12 March", with the year when not the current year). Paddings left 12, top 3, right 12, bottom 4; margin top 10, bottom 2; fully rounded; background `serviceBg`, text 13 semibold `serviceFg`. While scrolling, the pill of the topmost visible day floats at top 8 and fades out 200ms after scrolling stops. It is drawn only while the topmost visible line is not that day's own pill in full view.
 
 ### 5.6 Unread separator
 
@@ -358,7 +358,7 @@ List order: rows sort by the time of the last message, newest first; a contact w
 
 Motion rules: every movement is a spring without bounce (`.smooth`, or `dampingFraction: 1.0`); bounce belongs only to a gesture that ends with momentum, and the app has none. Animations start from the current on-screen value and can be interrupted: drive them with `withAnimation` on state, never with chained timers. No animation blocks input.
 
-Reduced motion (`@Environment(\.accessibilityReduceMotion)`): every move and scale becomes a 150ms opacity cross-fade, colour and opacity changes stay, animated scrolls become jumps. Reduced transparency: `layerBg` and `toastBg` become opaque in the same colour.
+Reduced motion (`@Environment(\.accessibilityReduceMotion)`): every move and scale becomes a 150ms opacity cross-fade, colour and opacity changes stay, animated scrolls become jumps. Reduced transparency: `toastBg` becomes opaque in the same colour; `layerBg` stays as it is, because the dim behind a box is a dim, not a material, and an opaque one would hide the window it belongs to.
 
 ## 7. Screens of this product
 
@@ -421,7 +421,7 @@ Buttons: "Cancel", "Save" (enabled only when the relay field changed).
 ### 7.6 Connection, outbox, unknown senders, encryption
 
 - Connection: shown only in the connection bar under the list search (5.2). The chat area does not change; a message sent while disconnected waits in the outbox.
-- Outbox state, on every outgoing bubble after the time: `clock` 12pt `msgSendingIconFg` while waiting in the outbox; `checkmark` 12pt `msgStoredIconFg` once the relay stored it. Never a double check: there are no receipts. The same marks stand before the time in a list row whose last message is the user's own (check `rowSentIconFg`, clock `windowSubFg`, both `rowFgActive` in the active row).
+- Outbox state, on every outgoing bubble after the time: `clock` 12pt `msgSendingIconFg` while waiting in the outbox; `checkmark` 12pt `msgStoredIconFg` once the relay stored it; `exclamationmark.circle.fill` 12pt `danger` when it is not sent (the relay refused it, or the contact's keys could not be had), with "Not sent." and the reason as the hover help and in the accessibility label. A text to a contact without a session waits with the clock from the moment it is sent, also across a restart, until a connection gives the session. A message that is not sent stays not sent; it can be deleted. Never a double check: there are no receipts. The same marks stand before the time in a list row whose last message is the user's own (check `rowSentIconFg`, clock `windowSubFg`, both `rowFgActive` in the active row).
 - A message from a sender who is not in the contacts is not shown anywhere: no row, no badge, no notification.
 - "End-to-end encrypted" is stated, not decorated: the header subtitle with a small lock (5.3), the contact panel under the name (7.4) and the first-launch text. No green titles, no locks in list rows, no special bubble colours, no "secret chat" banner: the normal chat look is the encrypted look.
 
@@ -443,6 +443,7 @@ Buttons: "Cancel", "Save" (enabled only when the relay field changed).
 | Send | `paperplane.fill` | 22 |
 | Waiting in the outbox | `clock` | 12 |
 | Stored by the relay | `checkmark` | 12 |
+| Not sent | `exclamationmark.circle.fill` | 12 |
 | Scroll to bottom | `chevron.down` | 18 |
 | Copy id, copy text | `doc.on.doc` | 14 / 16 |
 | Rename | `pencil` | 18 |
@@ -467,6 +468,6 @@ Estimated, worth a look by the owner:
 
 Decisions for the owner:
 - The send button hides when the field is empty (the reference shows a microphone there; Sotto has no voice).
-- The floating date pill (5.5) adds work and can be left out of the first build.
 - Row reorder is animated here, instant in the reference.
+- Not built yet: the selection colours and the link underline on hover of 5.4. SwiftUI `Text` has no hook for either; both need the bubble text drawn by an AppKit text view, with the context menu of 5.9 kept.
 - Context menus: system `.contextMenu` first, the custom look later.

@@ -58,18 +58,29 @@ struct Badge: View {
     }
 }
 
-/// The outbox mark of an own message: a clock while waiting, a check once stored.
+/// The outbox mark of an own message: a clock while waiting, a check once stored, a danger
+/// mark with the reason on hover when it is not sent.
 struct StatusMark: View {
     let state: MessageState
     let waitingColor: Color
     let storedColor: Color
 
     var body: some View {
-        Image(systemName: state == .waiting ? "clock" : "checkmark")
+        switch state {
+        case .waiting: mark("clock", waitingColor, label: "Waiting in the outbox")
+        case .stored: mark("checkmark", storedColor, label: "Stored by the relay")
+        case .failed(let reason):
+            mark("exclamationmark.circle.fill", .danger, label: "Not sent: \(reason)")
+                .help("Not sent. \(reason)")
+        }
+    }
+
+    private func mark(_ symbol: String, _ color: Color, label: String) -> some View {
+        Image(systemName: symbol)
             .font(.system(size: 12, weight: .regular))
-            .foregroundStyle(state == .waiting ? waitingColor : storedColor)
+            .foregroundStyle(color)
             .contentTransition(.symbolEffect(.replace))
-            .accessibilityLabel(state == .waiting ? "Waiting in the outbox" : "Stored by the relay")
+            .accessibilityLabel(label)
     }
 }
 

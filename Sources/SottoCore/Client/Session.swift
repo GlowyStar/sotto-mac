@@ -278,12 +278,13 @@ public final class Client {
     }
 
     /// L1 of section 20.2: the bytes of a Send, committed to the outbox first. A contact
-    /// without a session needs a fetched bundle.
-    public func sendText(_ contact: Data, _ text: String, bundle: PrekeyBundle? = nil) throws -> Outgoing {
-        try send(contact, paddedPlaintext: Envelope.encodeText(text), text: text, bundle: bundle)
+    /// without a session needs a fetched bundle. `pending` names a row of the pending texts
+    /// that the same commit removes.
+    public func sendText(_ contact: Data, _ text: String, bundle: PrekeyBundle? = nil, pending: Int64? = nil) throws -> Outgoing {
+        try send(contact, paddedPlaintext: Envelope.encodeText(text), text: text, bundle: bundle, pending: pending)
     }
 
-    func send(_ contact: Data, paddedPlaintext: Data, text: String, bundle: PrekeyBundle?) throws -> Outgoing {
+    func send(_ contact: Data, paddedPlaintext: Data, text: String, bundle: PrekeyBundle?, pending: Int64? = nil) throws -> Outgoing {
         guard try store.isContact(contact) else {
             throw SessionError.notAContact
         }
@@ -315,6 +316,9 @@ public final class Client {
             try store.advanceSession(session.sessionID, state: encrypted.state)
             try store.addToOutbox(OutboxRow(messageID: messageID, recipient: contact, payload: outgoing.payload))
             try store.logMessage(contact, direction: .outgoing, messageID: messageID, text: text)
+            if let pending {
+                try store.removePending(pending)
+            }
         }
         return outgoing
     }
@@ -329,9 +333,13 @@ public final class Client {
         try store.transaction { try store.removeFromOutbox(messageID) }
     }
 
-    /// Removes the outbox row of a Send that the relay refused with an action Stop.
-    public func dropRefusedSend(_ messageID: Data) throws {
-        try store.transaction { try store.removeFromOutbox(messageID) }
+    /// Removes the outbox row of a Send that the relay refused with an action Stop and notes
+    /// the result next to the logged message.
+    public func dropRefusedSend(_ messageID: Data, result: String) throws {
+        try store.transaction {
+            try store.removeFromOutbox(messageID)
+            try store.addRefusal(messageID, result: result)
+        }
     }
 
     /// Runs the row of section 20.2 that a Deliver falls into. Every named result is

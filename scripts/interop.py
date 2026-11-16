@@ -3,21 +3,23 @@
 Run with the interpreter of the sotto project's environment, which holds `sotto` and
 `sotto-relay` next to it:
 
-    ../../python/sotto/.venv/bin/python scripts/interop.py
+    ../../python/sotto/.venv/bin/python scripts/interop.py [--keep DIR]
 
-Starts the relay on a free port with its database in a temporary directory, builds
-`sotto-mac`, makes one identity with each client and drives both `chat` commands through
-pipes. Exits 0 only if every message arrived as text; stops everything it started.
+Starts the relay on a free port, builds `sotto-mac`, makes one identity with each client and
+drives both `chat` commands through pipes. Exits 0 only if every message arrived as text;
+stops everything it started. The data lives in a temporary directory that is removed at the
+end; `--keep DIR` keeps the stores and the relay database in DIR instead.
 """
 
+import argparse
 import asyncio
 import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 PATIENCE_SECONDS = 20
@@ -91,6 +93,18 @@ class Chat:
             self.process.kill()
 
 
+@contextmanager
+def work_folder(keep: Path | None, prefix: str) -> Iterator[Path]:
+    """`keep`, made when missing and left in place, or a temporary directory removed at the end."""
+    if keep is not None:
+        keep.mkdir(parents=True, exist_ok=True)
+        yield keep.resolve()
+        print(f"kept {keep.resolve()}")
+        return
+    with tempfile.TemporaryDirectory(prefix=prefix) as temporary:
+        yield Path(temporary)
+
+
 @asynccontextmanager
 async def relay(database: Path) -> AsyncIterator[str]:
     port = free_port()
@@ -118,6 +132,9 @@ async def relay(database: Path) -> AsyncIterator[str]:
 
 
 async def main() -> int:
+    parser = argparse.ArgumentParser(description="sotto-mac and the Python client through a real relay.")
+    parser.add_argument("--keep", type=Path, metavar="DIR", help="keep the data in DIR")
+    arguments = parser.parse_args()
     subprocess.run(["swift", "build", "--product", "sotto-mac"], cwd=REPOSITORY, check=True)
     binary_path = await command("swift", "build", "--show-bin-path")
     sotto_mac = Path(binary_path) / "sotto-mac"
@@ -134,8 +151,7 @@ async def main() -> int:
         await chat.expect("connected")
         return chat
 
-    with tempfile.TemporaryDirectory(prefix="sotto-interop-") as temporary:
-        folder = Path(temporary)
+    with work_folder(arguments.keep, "sotto-interop-") as folder:
         python_dir, swift_dir = folder / "python", folder / "swift"
         try:
             async with relay(folder / "relay.db") as url:

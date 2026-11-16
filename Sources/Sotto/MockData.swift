@@ -67,7 +67,7 @@ enum MockData {
                 out("Yes, it's in", ago(290)),
                 out("Tests are green", ago(289)),
                 inc("Nice", ago(120)),
-                out("Sending the build tonight", ago(12)),
+                out("Sending the build tonight", ago(12), .failed("The relay refused it (UNKNOWN_RECIPIENT).")),
             ])
         add(
             "Lena Smirnova",

@@ -16,6 +16,16 @@ enum MessageState: Hashable {
     case waiting
     /// Stored by the relay.
     case stored
+    /// Not sent, with the reason for a person.
+    case failed(String)
+
+    init(_ message: ChatMessage) {
+        if let failure = message.failure {
+            self = .failed(failure)
+        } else {
+            self = message.waiting ? .waiting : .stored
+        }
+    }
 }
 
 struct Message: Identifiable, Hashable {
@@ -97,10 +107,16 @@ struct Launch {
     var relay = defaultRelay
     var snapshot: URL?
     var dump = false
+    /// `--send NAME TEXT`, any number of times: texts sent to the contacts of those names once
+    /// the app is connected, through the action of the compose bar.
+    var sends: [(name: String, text: String)] = []
 
     static let current = Launch(CommandLine.arguments)
 
     init(_ arguments: [String]) {
+        for (index, argument) in arguments.enumerated() where argument == "--send" && index + 2 < arguments.count {
+            sends.append((arguments[index + 1], arguments[index + 2]))
+        }
         func value(after flag: String) -> String? {
             guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
             return arguments[index + 1]
@@ -157,6 +173,7 @@ final class AppModel {
     var searchFocusTick = 0
 
     private var toastTask: Task<Void, Never>?
+    private var scriptedSends: [(name: String, text: String)] = []
 
     init(mock: Bool = true) {
         messenger = nil
@@ -173,6 +190,7 @@ final class AppModel {
         connection = .idle
         welcome = messenger.hadIdentity ? nil : .start
         theme = ThemeChoice(rawValue: UserDefaults.standard.string(forKey: "theme") ?? "") ?? .system
+        scriptedSends = Launch.current.sends
         Task { [weak self] in
             for await state in messenger.changes { self?.apply(state) }
         }
@@ -206,11 +224,21 @@ final class AppModel {
         }
         messages = Dictionary(uniqueKeysWithValues: state.chats.map { chat in
             (chat.userID, chat.messages.map {
-                Message(id: String($0.id), outgoing: $0.outgoing, text: $0.text, date: $0.date, state: $0.waiting ? .waiting : .stored)
+                Message(id: String($0.id), outgoing: $0.outgoing, text: $0.text, date: $0.date, state: MessageState($0))
             })
         })
         if let open = openChatID, state.chats.contains(where: { $0.userID == open && $0.unread > 0 }) {
             run { try await $0.markRead(open) }
+        }
+        if connection == .connected, !scriptedSends.isEmpty {
+            for (name, text) in scriptedSends {
+                if let contact = contacts.first(where: { $0.name == name }) {
+                    send(text, to: contact.id)
+                } else {
+                    FileHandle.standardError.write(Data("--send: no contact named \(name)\n".utf8))
+                }
+            }
+            scriptedSends = []
         }
     }
 

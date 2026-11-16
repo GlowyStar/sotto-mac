@@ -71,6 +71,17 @@ public struct StoredMessage: Equatable, Sendable {
     public var text: String
 }
 
+/// A text typed to a contact without a session, kept until the session exists and the text
+/// is committed to the outbox, or until it fails with `failure`.
+public struct PendingText: Equatable, Sendable {
+    public var position: Int64
+    public var contact: Data
+    public var text: String
+    /// Milliseconds since 1970.
+    public var madeAt: Int64
+    public var failure: String?
+}
+
 /// The client store of docs/protocol.md, section 22: the one connection to the SQLite file
 /// of one identity. Every write runs inside `transaction`.
 public final class ClientStore {
@@ -239,6 +250,22 @@ public final class ClientStore {
         }
     }
 
+    /// The texts that wait for a session, oldest first.
+    public func pending() throws -> [PendingText] {
+        try query("SELECT position, contact, text, made_at, failure FROM pending ORDER BY position").map {
+            PendingText(position: $0[0].integer!, contact: $0[1].data!, text: $0[2].text!, madeAt: $0[3].integer!, failure: $0[4].text)
+        }
+    }
+
+    /// The result of the refusal of each refused Send, by message id.
+    public func refusals() throws -> [Data: String] {
+        var refusals: [Data: String] = [:]
+        for row in try query("SELECT message_id, result FROM refusals") {
+            refusals[row[0].data!] = row[1].text!
+        }
+        return refusals
+    }
+
     // MARK: Writes
 
     public func saveIdentity(_ identity: StoredIdentity) throws {
@@ -312,12 +339,46 @@ public final class ClientStore {
         try change("UPDATE contacts SET name = ? WHERE identity_key = ?", [.text(name), .blob(contact)])
     }
 
+    /// Deletes the logged and the pending messages of a contact.
     public func deleteMessages(_ contact: Data) throws {
+        try change(
+            "DELETE FROM refusals WHERE message_id IN (SELECT message_id FROM messages WHERE contact = ?)",
+            [.blob(contact)]
+        )
         try change("DELETE FROM messages WHERE contact = ?", [.blob(contact)])
+        try change("DELETE FROM pending WHERE contact = ?", [.blob(contact)])
     }
 
     public func deleteMessage(_ position: Int64) throws {
+        try change(
+            "DELETE FROM refusals WHERE message_id IN (SELECT message_id FROM messages WHERE position = ?)",
+            [.integer(position)]
+        )
         try change("DELETE FROM messages WHERE position = ?", [.integer(position)])
+    }
+
+    /// Keeps a text that waits for a session before it can be encrypted; returns its position.
+    public func addPending(_ contact: Data, text: String, madeAt: Int64) throws -> Int64 {
+        try change(
+            "INSERT INTO pending (contact, text, made_at) VALUES (?, ?, ?) RETURNING position",
+            [.blob(contact), .text(text), .integer(madeAt)]
+        )[0][0].integer!
+    }
+
+    public func removePending(_ position: Int64) throws {
+        try change("DELETE FROM pending WHERE position = ?", [.integer(position)])
+    }
+
+    /// Marks a pending text as one that is not sent, with a reason for a person.
+    public func failPending(_ position: Int64, reason: String) throws {
+        try change("UPDATE pending SET failure = ? WHERE position = ?", [.text(reason), .integer(position)])
+    }
+
+    /// Notes the result of an Error that refused the Send of a logged message.
+    public func addRefusal(_ messageID: Data, result: String) throws {
+        try change(
+            "INSERT OR REPLACE INTO refusals (message_id, result) VALUES (?, ?)", [.blob(messageID), .text(result)]
+        )
     }
 
     public func setPin(_ contact: Data, identityDHKey: Data) throws {
@@ -626,6 +687,22 @@ private enum Schema {
             message_id BLOB NOT NULL,
             text TEXT NOT NULL
         ) STRICT
+        """,
+        // The two tables below are this client's own, beyond section 22.1 (section 22.4).
+        """
+        CREATE TABLE IF NOT EXISTS pending (
+            position INTEGER PRIMARY KEY,
+            contact BLOB NOT NULL,
+            text TEXT NOT NULL,
+            made_at INTEGER NOT NULL,
+            failure TEXT
+        ) STRICT
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS refusals (
+            message_id BLOB PRIMARY KEY,
+            result TEXT NOT NULL
+        ) STRICT, WITHOUT ROWID
         """,
     ]
 

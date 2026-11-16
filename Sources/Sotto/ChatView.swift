@@ -88,6 +88,15 @@ enum ChatItem: Identifiable {
         }
     }
 
+    /// The day of a date pill or a message.
+    var day: Date? {
+        switch self {
+        case .date(let date): date
+        case .unread: nil
+        case .message(let message, _, _): message.date
+        }
+    }
+
     /// Splits messages into days and groups (DESIGN.md 5.4 to 5.6).
     static func build(_ messages: [Message], unreadAnchor: String?) -> [ChatItem] {
         let calendar = Calendar.current
@@ -112,12 +121,31 @@ enum ChatItem: Identifiable {
 struct MessageList: View {
     let model: AppModel
     let contact: Contact
+    @State private var content = CGRect.zero
     @State private var distanceFromBottom: CGFloat = 0
+    /// Incoming messages that arrived while the list was scrolled away from the bottom.
+    @State private var unseen = 0
+    /// The day of the topmost visible line, while its own date pill is out of view.
+    @State private var topDay: Date?
+    @State private var pillShown = false
+    @State private var pillHide: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private struct BottomKey: PreferenceKey {
-        static let defaultValue: CGFloat = 0
-        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+    private struct ContentKey: PreferenceKey {
+        static let defaultValue = CGRect.zero
+        static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+    }
+
+    private struct Line: Equatable {
+        let day: Date
+        let isDate: Bool
+        let minY: CGFloat
+        let maxY: CGFloat
+    }
+
+    private struct LinesKey: PreferenceKey {
+        static let defaultValue: [Line] = []
+        static func reduce(value: inout [Line], nextValue: () -> [Line]) { value += nextValue() }
     }
 
     var body: some View {
@@ -131,24 +159,35 @@ struct MessageList: View {
                         ForEach(items) { item in
                             row(item, maxBubble: maxBubble)
                                 .id(item.id)
+                                .background { lineFrame(item) }
                         }
                         Color.clear.frame(height: Metrics.listToCompose).id("bottom")
                     }
                     .background(
                         GeometryReader { inner in
-                            Color.clear.preference(
-                                key: BottomKey.self, value: inner.frame(in: .named("messages")).maxY - outer.size.height)
+                            Color.clear.preference(key: ContentKey.self, value: inner.frame(in: .named("messages")))
                         })
                 }
                 .coordinateSpace(name: "messages")
                 .defaultScrollAnchor(.bottom)
                 .scrollIndicators(.automatic)
-                .onPreferenceChange(BottomKey.self) { value in
-                    Task { @MainActor in distanceFromBottom = value }
+                .onPreferenceChange(ContentKey.self) { frame in
+                    Task { @MainActor in moved(frame, height: outer.size.height) }
+                }
+                .onPreferenceChange(LinesKey.self) { lines in
+                    Task { @MainActor in topDay = Self.topDay(lines) }
+                }
+                .overlay(alignment: .top) {
+                    if pillShown, let topDay {
+                        ServicePill(text: Formats.separator(topDay))
+                            .padding(.top, Metrics.floatingDateTop)
+                            .transition(.opacity)
+                            .allowsHitTesting(false)
+                    }
                 }
                 .overlay(alignment: .bottomTrailing) {
                     if distanceFromBottom > Metrics.toDownThreshold {
-                        ScrollDownButton {
+                        ScrollDownButton(unseen: unseen) {
                             let far = distanceFromBottom > outer.size.height * 2
                             withAnimation(far || reduceMotion ? nil : Motion.newMessage) {
                                 proxy.scrollTo("bottom", anchor: .bottom)
@@ -167,12 +206,50 @@ struct MessageList: View {
                         proxy.scrollTo("unread", anchor: .top)
                     }
                 }
-                .onChange(of: messages.last?.id) { _, _ in
+                .onChange(of: messages.last?.id) { old, _ in
+                    let start = messages.firstIndex { $0.id == old }.map { $0 + 1 } ?? max(messages.count - 1, 0)
+                    let arrived = messages[start...].filter { !$0.outgoing }.count
+                    if distanceFromBottom > Metrics.toDownThreshold, arrived > 0, messages.last?.outgoing == false {
+                        unseen += arrived
+                        return
+                    }
                     withAnimation(reduceMotion ? nil : Motion.newMessage) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
         }
         .id(contact.id)
+    }
+
+    private func lineFrame(_ item: ChatItem) -> some View {
+        GeometryReader { line in
+            let frame = line.frame(in: .named("messages"))
+            Color.clear.preference(
+                key: LinesKey.self,
+                value: item.day.map { [Line(day: $0, isDate: { if case .date = item { true } else { false } }(), minY: frame.minY, maxY: frame.maxY)] } ?? [])
+        }
+    }
+
+    /// The day of the topmost visible line, or nil while that line is a date pill in full view.
+    private static func topDay(_ lines: [Line]) -> Date? {
+        guard let top = lines.filter({ $0.maxY > 0 }).min(by: { $0.minY < $1.minY }) else { return nil }
+        return top.isDate && top.minY >= 0 ? nil : top.day
+    }
+
+    /// A scroll moves the content without changing its height; it shows the floating date pill
+    /// until the scrolling has stopped for a moment (DESIGN.md 5.5).
+    private func moved(_ frame: CGRect, height: CGFloat) {
+        let scrolled = frame.height == content.height && frame.minY != content.minY
+        content = frame
+        distanceFromBottom = frame.maxY - height
+        if distanceFromBottom <= Metrics.toDownThreshold { unseen = 0 }
+        guard scrolled else { return }
+        pillShown = true
+        pillHide?.cancel()
+        pillHide = Task { @MainActor in
+            try? await Task.sleep(for: Metrics.floatingDateHold)
+            guard !Task.isCancelled else { return }
+            withAnimation(Motion.floatingDate) { pillShown = false }
+        }
     }
 
     @ViewBuilder
@@ -201,6 +278,7 @@ struct MessageList: View {
 }
 
 struct ScrollDownButton: View {
+    let unseen: Int
     let action: () -> Void
 
     var body: some View {
@@ -210,11 +288,17 @@ struct ScrollDownButton: View {
                 .foregroundStyle(Color.toDownFg)
                 .frame(width: Metrics.toDownCircle, height: Metrics.toDownCircle)
                 .background(Circle().fill(Color.toDownBg).shadow(color: .shadow, radius: 2, y: 1))
+                .overlay(alignment: .top) {
+                    if unseen > 0 {
+                        Badge(count: unseen, height: Metrics.toDownBadge)
+                            .offset(y: -Metrics.toDownBadge / 2)
+                    }
+                }
                 .frame(width: 52, height: 62)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Scroll to the newest message")
+        .accessibilityLabel(unseen > 0 ? "Scroll to the newest message, \(unseen) new" : "Scroll to the newest message")
     }
 }
 

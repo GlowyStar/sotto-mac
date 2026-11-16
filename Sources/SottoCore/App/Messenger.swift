@@ -1,13 +1,17 @@
 import Foundation
 
 public struct ChatMessage: Codable, Equatable, Sendable, Identifiable {
-    /// The position of the row in the message log.
+    /// The position of the row in the message log; for a text that waits for a session, the
+    /// position of its row among the pending texts, negated.
     public let id: Int64
     public let outgoing: Bool
     public let text: String
     public let date: Date
-    /// An outgoing message that waits in the outbox; false once the relay stored it.
+    /// An outgoing message that waits for a session or in the outbox; false once the relay
+    /// stored it or once it failed.
     public let waiting: Bool
+    /// Why an outgoing message is not sent: the relay refused it, or it could not be made.
+    public var failure: String?
 }
 
 public struct Chat: Codable, Equatable, Sendable {
@@ -89,6 +93,9 @@ public actor Messenger {
     private var runner: Task<Void, Never>?
     private var listener: Task<Void, Never>?
     private var poller: Task<Void, Never>?
+    /// Commits the pending texts through the transport, one at a time.
+    private var flusher: Task<Void, Never>?
+    private var flushAgain = false
     private var last: MessengerState?
 
     /// Opens the store in `directory`, creating it when it is missing; `relay` is used until
@@ -168,14 +175,18 @@ public actor Messenger {
 
     // MARK: Actions
 
-    /// Commits a text to the outbox and sends it. A contact without a session waits for a
-    /// connection, which fetches its bundle, before the text is committed.
+    /// Keeps the text in the store at once, then commits it to the outbox and sends it. A
+    /// contact without a session waits for a connection, which fetches its bundle; until then
+    /// the text waits among the pending texts, also across a restart.
     public func send(_ text: String, to userID: String) async throws {
-        guard let transport else {
-            throw NotConnectedError()
+        _ = try Envelope.encodeText(text)
+        let contact = try Identity.decodeUserID(userID)
+        let madeAt = Self.milliseconds(Date())
+        try await withClient { client in
+            try client.store.transaction { _ = try client.store.addPending(contact, text: text, madeAt: madeAt) }
         }
-        try await transport.sendText(Identity.decodeUserID(userID), text)
         await publish()
+        flush()
     }
 
     public func addContact(name rawName: String, userID rawID: String) async throws {
@@ -240,8 +251,17 @@ public actor Messenger {
         await publish()
     }
 
+    /// Deletes a logged message, or a pending text when `position` is negative.
     public func deleteMessage(_ position: Int64) async throws {
-        try await withClient { client in try client.store.transaction { try client.store.deleteMessage(position) } }
+        try await withClient { client in
+            try client.store.transaction {
+                if position < 0 {
+                    try client.store.removePending(-position)
+                } else {
+                    try client.store.deleteMessage(position)
+                }
+            }
+        }
         notes.times[String(position)] = nil
         try notes.save(directory)
         await publish()
@@ -312,6 +332,11 @@ public actor Messenger {
         }
     }
 
+    /// The failure of a message that the relay refused with `result`.
+    static func refusal(_ result: String) -> String {
+        "The relay refused it (\(result))."
+    }
+
     static func explain(_ reason: String) -> String {
         if reason.hasSuffix(" 4001") {
             return "This id is in use on another device: the relay closed this connection."
@@ -340,6 +365,7 @@ public actor Messenger {
                     await self?.handle(event)
                 }
             }
+            flush()
         } catch let refused as URLRefusedError {
             link = .stopped("The relay address is refused: \(refused.message).")
             client = try? Client(store: ClientStore(directory: directory))
@@ -355,6 +381,9 @@ public actor Messenger {
             await runner?.value
             await listener?.value
         }
+        flusher?.cancel()
+        await flusher?.value
+        flusher = nil
         transport = nil
         client = nil
         link = .idle
@@ -380,6 +409,53 @@ public actor Messenger {
         if last?.chats.contains(where: { $0.messages.contains(where: \.waiting) }) == true {
             await publish()
         }
+    }
+
+    private func flush() {
+        guard let transport else {
+            return
+        }
+        if flusher != nil {
+            flushAgain = true
+            return
+        }
+        flusher = Task { [weak self] in await self?.drain(transport) }
+    }
+
+    /// Commits the pending texts that have not failed, oldest first; the time a text was typed
+    /// becomes the time of its logged message.
+    private func drain(_ transport: Transport) async {
+        while !Task.isCancelled {
+            guard let rows = try? await transport.withClient({ try $0.store.pending() }) else {
+                break
+            }
+            guard let row = rows.first(where: { $0.failure == nil }) else {
+                if flushAgain {
+                    flushAgain = false
+                    continue
+                }
+                break
+            }
+            do {
+                let messageID = try await transport.sendText(row.contact, row.text, pending: row.position)
+                let logged = try await transport.withClient {
+                    try $0.store.messages(row.contact).last { $0.messageID == messageID }
+                }
+                if let logged {
+                    notes.times[String(logged.position)] = row.madeAt
+                    try notes.save(directory)
+                }
+            } catch is CancellationError {
+                break
+            } catch {
+                let reason = (error as? RefusedError).map { Self.refusal($0.result) } ?? Self.describe(error)
+                try? await transport.withClient { client in
+                    try client.store.transaction { try client.store.failPending(row.position, reason: reason) }
+                }
+            }
+            await publish()
+        }
+        flusher = nil
     }
 
     private func publish() async {
@@ -416,22 +492,33 @@ public actor Messenger {
     private static func build(
         _ rows: Rows, notes: inout Notes, relay: String, link: LinkState, now: Date
     ) throws -> MessengerState {
-        let milliseconds = Int64((now.timeIntervalSince1970 * 1000).rounded())
+        let milliseconds = Self.milliseconds(now)
         let chats = try rows.contacts.map { contact in
             let userID = try Identity.encodeUserID(contact.identityKey)
             let added = notes.added[userID] ?? milliseconds
             notes.added[userID] = added
-            let messages = rows.messages[contact.identityKey, default: []].map { row in
+            let logged = rows.messages[contact.identityKey, default: []].map { row in
                 let time = notes.times[String(row.position)] ?? milliseconds
                 notes.times[String(row.position)] = time
+                let refused = rows.refusals[row.messageID]
                 return ChatMessage(
                     id: row.position,
                     outgoing: row.direction == .outgoing,
                     text: row.text,
                     date: date(time),
-                    waiting: row.direction == .outgoing && rows.waiting.contains(row.messageID)
+                    waiting: row.direction == .outgoing && refused == nil && rows.waiting.contains(row.messageID),
+                    failure: refused.map(refusal)
                 )
             }
+            let pending = rows.pending[contact.identityKey, default: []].map {
+                ChatMessage(
+                    id: -$0.position, outgoing: true, text: $0.text, date: date($0.madeAt),
+                    waiting: $0.failure == nil, failure: $0.failure
+                )
+            }
+            let messages = (logged + pending).enumerated()
+                .sorted { ($0.element.date, $0.offset) < ($1.element.date, $1.offset) }
+                .map(\.element)
             let read = notes.read[userID] ?? 0
             return Chat(
                 userID: userID,
@@ -449,6 +536,10 @@ public actor Messenger {
         )
     }
 
+    private static func milliseconds(_ date: Date) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1000).rounded())
+    }
+
     private static func date(_ milliseconds: Int64) -> Date {
         Date(timeIntervalSince1970: Double(milliseconds) / 1000)
     }
@@ -459,7 +550,9 @@ struct Rows: Sendable {
     var identityKey: Data?
     var contacts: [Contact]
     var messages: [Data: [StoredMessage]] = [:]
+    var pending: [Data: [PendingText]] = [:]
     var waiting: Set<Data>
+    var refusals: [Data: String]
 
     init(store: ClientStore) throws {
         identityKey = try store.identity().map { try Identity.deriveIdentityKey(seed: $0.seed) }
@@ -467,7 +560,11 @@ struct Rows: Sendable {
         for contact in contacts {
             messages[contact.identityKey] = try store.messages(contact.identityKey)
         }
+        for row in try store.pending() {
+            pending[row.contact, default: []].append(row)
+        }
         waiting = Set(try store.outbox().map(\.messageID))
+        refusals = try store.refusals()
     }
 }
 
