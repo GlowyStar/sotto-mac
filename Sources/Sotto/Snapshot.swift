@@ -1,8 +1,11 @@
 import AppKit
+import SottoCore
 import SwiftUI
 
 /// `--snapshot <folder>`: draws the window content for a fixed set of states into PNG files at
 /// 2x, offscreen and without showing a window, then exits (0 when every file was written).
+/// With `--data-dir` the states come from that store, read without a connection; without it,
+/// from the mock data. `--dump` with `--data-dir` prints the state of the store as JSON.
 @MainActor
 enum Snapshot {
     private struct Shot {
@@ -43,15 +46,58 @@ enum Snapshot {
         Shot(name: "settings-dark", dark: true) { $0.modal = .settings },
     ]
 
+    /// The pictures of a real store: the list, and the chat of the latest activity opened.
+    private static let realShots: [Shot] = [
+        Shot(name: "real-list") { _ in },
+        Shot(name: "real-chat") { model in
+            if let latest = model.sortedContacts.first { model.openChat(latest.id) }
+        },
+        Shot(name: "real-chat-dark", dark: true) { model in
+            if let latest = model.sortedContacts.first { model.openChat(latest.id) }
+        },
+    ]
+
     static func runFromArguments() {
-        let arguments = CommandLine.arguments
-        guard let flag = arguments.firstIndex(of: "--snapshot") else { return }
-        guard flag + 1 < arguments.count else { exit(2) }
-        let folder = URL(fileURLWithPath: arguments[flag + 1], isDirectory: true)
+        let launch = Launch.current
+        if launch.dump {
+            guard let directory = launch.dataDirectory else { exit(2) }
+            do {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                encoder.dateEncodingStrategy = .millisecondsSince1970
+                let json = try encoder.encode(Messenger.peek(directory: directory, relay: launch.relay))
+                FileHandle.standardOutput.write(json + Data("\n".utf8))
+                exit(0)
+            } catch {
+                FileHandle.standardError.write(Data("dump failed: \(error)\n".utf8))
+                exit(1)
+            }
+        }
+        guard let folder = launch.snapshot else {
+            if CommandLine.arguments.contains("--snapshot") { exit(2) }
+            return
+        }
+        var shots = shots
+        var makeModel = { AppModel() }
+        if let directory = launch.dataDirectory {
+            do {
+                let state = try Messenger.peek(directory: directory, relay: launch.relay)
+                shots = realShots
+                makeModel = {
+                    let model = AppModel(mock: false)
+                    model.apply(state)
+                    if state.userID == nil { model.welcome = .start }
+                    return model
+                }
+            } catch {
+                FileHandle.standardError.write(Data("snapshot failed: \(error)\n".utf8))
+                exit(1)
+            }
+        }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var failed = false
         for shot in shots {
-            if !render(shot, to: folder.appendingPathComponent(shot.name + ".png")) {
+            if !render(shot, model: makeModel(), to: folder.appendingPathComponent(shot.name + ".png")) {
                 FileHandle.standardError.write(Data("snapshot failed: \(shot.name)\n".utf8))
                 failed = true
             }
@@ -59,8 +105,7 @@ enum Snapshot {
         exit(failed ? 1 : 0)
     }
 
-    private static func render(_ shot: Shot, to url: URL) -> Bool {
-        let model = AppModel()
+    private static func render(_ shot: Shot, model: AppModel, to url: URL) -> Bool {
         shot.setUp(model)
         let view = NSHostingView(rootView: RootView(model: model))
         view.appearance = NSAppearance(named: shot.dark ? .darkAqua : .aqua)

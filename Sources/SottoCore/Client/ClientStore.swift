@@ -63,6 +63,14 @@ public enum MessageDirection: String, Sendable {
     case outgoing = "out"
 }
 
+/// A row of the message log; `position` grows with every new row.
+public struct StoredMessage: Equatable, Sendable {
+    public var position: Int64
+    public var direction: MessageDirection
+    public var messageID: Data
+    public var text: String
+}
+
 /// The client store of docs/protocol.md, section 22: the one connection to the SQLite file
 /// of one identity. Every write runs inside `transaction`.
 public final class ClientStore {
@@ -72,6 +80,9 @@ public final class ClientStore {
     public static let widerThanOwner: mode_t = 0o077
     public static let maxSessions = 3
     public static let lastPrekeyID = UInt32.max
+    /// How long a statement waits for a lock that another connection holds, such as a reader
+    /// of the same file in another process, before it fails with SQLITE_BUSY.
+    public static let busyTimeoutMilliseconds: Int32 = 5000
 
     public let path: URL
     private var connection: OpaquePointer?
@@ -92,6 +103,7 @@ public final class ClientStore {
             connection = nil
             throw error
         }
+        sqlite3_busy_timeout(connection, Self.busyTimeoutMilliseconds)
         try query("PRAGMA journal_mode=DELETE")
         try query("PRAGMA secure_delete=ON")
         try transaction {
@@ -212,6 +224,21 @@ public final class ClientStore {
         }
     }
 
+    /// The logged messages of a contact, oldest first.
+    public func messages(_ contact: Data) throws -> [StoredMessage] {
+        try query(
+            "SELECT position, direction, message_id, text FROM messages WHERE contact = ? ORDER BY position",
+            [.blob(contact)]
+        ).map {
+            StoredMessage(
+                position: $0[0].integer!,
+                direction: MessageDirection(rawValue: $0[1].text!)!,
+                messageID: $0[2].data!,
+                text: $0[3].text!
+            )
+        }
+    }
+
     // MARK: Writes
 
     public func saveIdentity(_ identity: StoredIdentity) throws {
@@ -279,6 +306,18 @@ public final class ClientStore {
         try change("DELETE FROM sessions WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM contacts WHERE identity_key = ?", [.blob(contact)])
         try change(Schema.deleteOrphanRecords)
+    }
+
+    public func renameContact(_ contact: Data, name: String) throws {
+        try change("UPDATE contacts SET name = ? WHERE identity_key = ?", [.text(name), .blob(contact)])
+    }
+
+    public func deleteMessages(_ contact: Data) throws {
+        try change("DELETE FROM messages WHERE contact = ?", [.blob(contact)])
+    }
+
+    public func deleteMessage(_ position: Int64) throws {
+        try change("DELETE FROM messages WHERE position = ?", [.integer(position)])
     }
 
     public func setPin(_ contact: Data, identityDHKey: Data) throws {

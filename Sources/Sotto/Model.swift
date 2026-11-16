@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SottoCore
 import SwiftUI
 
 struct Contact: Identifiable, Hashable {
@@ -18,7 +19,7 @@ enum MessageState: Hashable {
 }
 
 struct Message: Identifiable, Hashable {
-    let id = UUID()
+    var id = UUID().uuidString
     let outgoing: Bool
     let text: String
     let date: Date
@@ -28,6 +29,28 @@ struct Message: Identifiable, Hashable {
 enum ConnectionState: Hashable {
     case connected
     case connecting
+    /// No transport runs.
+    case idle
+    /// The client does not reconnect by itself.
+    case stopped(String)
+
+    init(_ link: LinkState) {
+        switch link {
+        case .idle: self = .idle
+        case .connecting: self = .connecting
+        case .connected: self = .connected
+        case .stopped(let text): self = .stopped(text)
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .connected: "Connected"
+        case .connecting: "Connecting..."
+        case .idle: "Not connected"
+        case .stopped(let text): text
+        }
+    }
 }
 
 enum ThemeChoice: String, CaseIterable, Identifiable {
@@ -64,13 +87,47 @@ enum Welcome: Hashable {
     case start, creating, created
 }
 
-/// The whole state of the interface and the actions of its screens. The inside is mock data
-/// for now; the real core replaces it without changing what the views see.
+/// The launch arguments of the app.
+struct Launch {
+    static let defaultRelay = "ws://127.0.0.1:8765/ws"
+
+    var demo = false
+    var firstLaunch = false
+    var dataDirectory: URL?
+    var relay = defaultRelay
+    var snapshot: URL?
+    var dump = false
+
+    static let current = Launch(CommandLine.arguments)
+
+    init(_ arguments: [String]) {
+        func value(after flag: String) -> String? {
+            guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
+            return arguments[index + 1]
+        }
+        demo = arguments.contains("--demo")
+        firstLaunch = arguments.contains("--first-launch")
+        dump = arguments.contains("--dump")
+        dataDirectory = value(after: "--data-dir").map { URL(fileURLWithPath: $0, isDirectory: true) }
+        relay = value(after: "--relay") ?? Self.defaultRelay
+        snapshot = value(after: "--snapshot").map { URL(fileURLWithPath: $0, isDirectory: true) }
+    }
+
+    var directory: URL {
+        dataDirectory
+            ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Sotto", isDirectory: true)
+    }
+}
+
+/// The whole state of the interface and the actions of its screens: a thin wrapper over
+/// `Messenger`, or mock data when there is none (`--demo` and the snapshot pictures).
 @MainActor
 @Observable
 final class AppModel {
-    static let shared = AppModel()
+    static let shared = AppModel.launched()
 
+    let messenger: Messenger?
     var myID: String
     /// Set while the first-launch screen is shown.
     var welcome: Welcome?
@@ -79,7 +136,7 @@ final class AppModel {
     var drafts: [String: String] = [:]
     var openChatID: String?
     /// The first unread message of the open chat, kept until the chat is closed.
-    var unreadAnchor: UUID?
+    var unreadAnchor: String?
     var panelOpen = false
     var modal: Modal?
     var toast: String?
@@ -102,10 +159,72 @@ final class AppModel {
     private var toastTask: Task<Void, Never>?
 
     init(mock: Bool = true) {
+        messenger = nil
         myID = MockData.id(for: "me")
         relayAddress = "wss://relay.sotto.example"
         theme = ThemeChoice(rawValue: UserDefaults.standard.string(forKey: "theme") ?? "") ?? .system
         if mock { MockData.fill(self) }
+    }
+
+    init(messenger: Messenger) {
+        self.messenger = messenger
+        myID = ""
+        relayAddress = ""
+        connection = .idle
+        welcome = messenger.hadIdentity ? nil : .start
+        theme = ThemeChoice(rawValue: UserDefaults.standard.string(forKey: "theme") ?? "") ?? .system
+        Task { [weak self] in
+            for await state in messenger.changes { self?.apply(state) }
+        }
+        Task { await messenger.start() }
+    }
+
+    private static func launched() -> AppModel {
+        let launch = Launch.current
+        if launch.demo {
+            let model = AppModel()
+            if launch.firstLaunch { model.welcome = .start }
+            return model
+        }
+        do {
+            return AppModel(messenger: try Messenger(directory: launch.directory, relay: launch.relay))
+        } catch {
+            let model = AppModel(mock: false)
+            model.myID = ""
+            model.connection = .stopped("The store cannot be opened: \(error).")
+            return model
+        }
+    }
+
+    /// Takes over a state of the messenger; a chat that is open counts as read.
+    func apply(_ state: MessengerState) {
+        if let userID = state.userID { myID = userID }
+        relayAddress = state.relay
+        connection = ConnectionState(state.link)
+        contacts = state.chats.map {
+            Contact(id: $0.userID, name: $0.name, added: $0.added, unread: $0.userID == openChatID ? 0 : $0.unread)
+        }
+        messages = Dictionary(uniqueKeysWithValues: state.chats.map { chat in
+            (chat.userID, chat.messages.map {
+                Message(id: String($0.id), outgoing: $0.outgoing, text: $0.text, date: $0.date, state: $0.waiting ? .waiting : .stored)
+            })
+        })
+        if let open = openChatID, state.chats.contains(where: { $0.userID == open && $0.unread > 0 }) {
+            run { try await $0.markRead(open) }
+        }
+    }
+
+    /// Runs an action of the messenger; its error becomes a toast.
+    private func run(_ action: @escaping @Sendable (Messenger) async throws -> Void, failed: (@MainActor () -> Void)? = nil) {
+        guard let messenger else { return }
+        Task { [weak self] in
+            do {
+                try await action(messenger)
+            } catch {
+                failed?()
+                self?.showToast(Messenger.describe(error))
+            }
+        }
     }
 
     // MARK: Derived
@@ -158,22 +277,29 @@ final class AppModel {
 
     func markRead(_ id: String) {
         guard let index = contacts.firstIndex(where: { $0.id == id }) else { return }
+        if contacts[index].unread > 0 { run { try await $0.markRead(id) } }
         contacts[index].unread = 0
     }
 
     func send(_ text: String, to id: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        drafts[id] = nil
+        if messenger != nil {
+            run({ try await $0.send(trimmed, to: id) }, failed: { [weak self] in
+                if self?.drafts[id] == nil { self?.drafts[id] = trimmed }
+            })
+            return
+        }
         let message = Message(outgoing: true, text: trimmed, date: Date(), state: .waiting)
         withAnimation(Motion.reorder) {
             messages[id, default: []].append(message)
         }
-        drafts[id] = nil
         if connection == .connected { store(message.id, in: id) }
     }
 
     /// The mock relay stores a message about a second after it leaves the outbox.
-    private func store(_ messageID: UUID, in chat: String) {
+    private func store(_ messageID: String, in chat: String) {
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(1))
             guard let self, self.connection == .connected,
@@ -183,7 +309,10 @@ final class AppModel {
         }
     }
 
-    func deleteMessage(_ messageID: UUID, in chat: String) {
+    func deleteMessage(_ messageID: String, in chat: String) {
+        if let position = Int64(messageID), messenger != nil {
+            run { try await $0.deleteMessage(position) }
+        }
         messages[chat]?.removeAll { $0.id == messageID }
     }
 
@@ -191,40 +320,53 @@ final class AppModel {
     func addContact(name: String, id rawID: String) -> (name: String?, id: String?) {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let id = Self.normalizedID(rawID)
-        let nameError = name.isEmpty ? "Enter a name." : nil
+        let nameError = Messenger.nameProblem(name, saved: savedNames)?.message
         let idError = Self.idError(id, own: myID, existing: contacts)
         if nameError != nil || idError != nil { return (nameError, idError) }
-        contacts.append(Contact(id: id, name: name, added: Date()))
+        if messenger != nil {
+            run { try await $0.addContact(name: name, userID: id) }
+        } else {
+            contacts.append(Contact(id: id, name: name, added: Date()))
+        }
         modal = nil
         openChat(id)
         return (nil, nil)
     }
 
+    private var savedNames: [String: String] {
+        Dictionary(contacts.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+    }
+
     static func normalizedID(_ raw: String) -> String {
-        raw.filter { !$0.isWhitespace }.lowercased()
+        Messenger.normalizedID(raw)
     }
 
     static func idError(_ id: String, own: String, existing: [Contact]) -> String? {
-        if id.count != 64 { return "The id must be 64 characters long." }
-        if !id.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) {
-            return "The id may contain only 0-9 and a-f."
-        }
-        if id == own { return "This is your own id." }
-        if let saved = existing.first(where: { $0.id == id }) {
-            return "This contact is already saved as \(saved.name)."
-        }
-        return nil
+        let saved = Dictionary(existing.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        return Messenger.idProblem(id, own: own, saved: saved)?.message
     }
 
-    func rename(_ id: String, to name: String) {
-        guard let index = contacts.firstIndex(where: { $0.id == id }) else { return }
-        contacts[index].name = name
+    /// Returns the message for the field, or nil when the name is taken over.
+    func rename(_ id: String, to name: String) -> String? {
+        var saved = savedNames
+        saved[id] = nil
+        if let problem = Messenger.nameProblem(name, saved: saved) { return problem.message }
+        if messenger != nil {
+            run { try await $0.rename(id, to: name) }
+        } else if let index = contacts.firstIndex(where: { $0.id == id }) {
+            contacts[index].name = name
+        }
         modal = nil
+        return nil
     }
 
     func resetSession(_ id: String) {
         modal = nil
-        showToast("Session reset")
+        guard messenger != nil else { return showToast("Session reset") }
+        run { [weak self] messenger in
+            try await messenger.resetSession(id)
+            await self?.showToast("Session reset")
+        }
     }
 
     func deleteContact(_ id: String) {
@@ -233,19 +375,28 @@ final class AppModel {
             closeChat()
             panelOpen = false
         }
+        run { try await $0.deleteContact(id) }
         contacts.removeAll { $0.id == id }
         messages[id] = nil
         drafts[id] = nil
         showToast("Contact deleted")
     }
 
-    /// Returns false when the address is not a ws or wss URL with a host.
-    func setRelay(_ address: String) -> Bool {
+    /// Returns the message for the field, or nil when the address is taken over.
+    func setRelay(_ address: String) -> String? {
         let trimmed = address.trimmingCharacters(in: .whitespaces)
-        guard let url = URL(string: trimmed), ["ws", "wss"].contains(url.scheme ?? ""), url.host != nil
-        else { return false }
+        do {
+            _ = try Transport.serverName(of: trimmed, insecure: false)
+        } catch {
+            return Messenger.describe(error)
+        }
         relayAddress = trimmed
-        return true
+        run { try await $0.setRelay(trimmed) }
+        return nil
+    }
+
+    func reconnect() {
+        run { await $0.reconnect() }
     }
 
     func setConnection(_ state: ConnectionState) {
@@ -274,9 +425,22 @@ final class AppModel {
 
     func createIdentity() {
         welcome = .creating
+        guard let messenger else {
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(600))
+                withAnimation(Motion.box) { self?.welcome = .created }
+            }
+            return
+        }
         Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(600))
-            withAnimation(Motion.box) { self?.welcome = .created }
+            do {
+                let made = try await messenger.createIdentity()
+                self?.myID = made
+                withAnimation(Motion.box) { self?.welcome = .created }
+            } catch {
+                self?.welcome = .start
+                self?.showToast(Messenger.describe(error))
+            }
         }
     }
 

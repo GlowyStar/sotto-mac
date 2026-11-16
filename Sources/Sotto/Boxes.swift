@@ -1,3 +1,4 @@
+import SottoCore
 import SwiftUI
 
 /// The frame of every dialog: title, body and a right-aligned button row (DESIGN.md 5.10).
@@ -104,7 +105,8 @@ struct AddContactBox: View {
     }
 
     private func validate() {
-        nameError = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Enter a name." : nil
+        let saved = Dictionary(model.contacts.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        nameError = Messenger.nameProblem(name.trimmingCharacters(in: .whitespacesAndNewlines), saved: saved)?.message
         idError = AppModel.idError(AppModel.normalizedID(id), own: model.myID, existing: model.contacts)
     }
 
@@ -170,7 +172,7 @@ struct SettingsBox: View {
             VStack(alignment: .leading, spacing: 0) {
                 section("Relay")
                 BoxField(label: "", placeholder: "wss://relay.example", text: $relay, error: relayError)
-                Text(model.connection == .connected ? "Connected" : "Connecting...")
+                Text(model.connection.label)
                     .font(Fonts.label)
                     .foregroundStyle(model.connection == .connected ? Color.windowSubFg : Color.accentText)
                     .padding(.top, 6)
@@ -197,11 +199,8 @@ struct SettingsBox: View {
         } buttons: {
             BoxButton(title: "Cancel") { model.modal = nil }
             BoxButton(title: "Save", enabled: relay != model.relayAddress) {
-                if model.setRelay(relay) {
-                    model.modal = nil
-                } else {
-                    relayError = "Enter a valid address."
-                }
+                relayError = model.setRelay(relay)
+                if relayError == nil { model.modal = nil }
             }
             .keyboardShortcut(.defaultAction)
         }
@@ -251,7 +250,7 @@ struct RenameBox: View {
             BoxButton(title: "Cancel") { model.modal = nil }
             BoxButton(title: "Save") {
                 let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty { error = "Enter a name." } else { model.rename(contact.id, to: String(trimmed.prefix(64))) }
+                error = model.rename(contact.id, to: String(trimmed.prefix(64)))
             }
             .keyboardShortcut(.defaultAction)
         }

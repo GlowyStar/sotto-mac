@@ -84,12 +84,12 @@ enum ChatItem: Identifiable {
         switch self {
         case .date(let date): "date-\(date.timeIntervalSinceReferenceDate)"
         case .unread: "unread"
-        case .message(let message, _, _): message.id.uuidString
+        case .message(let message, _, _): message.id
         }
     }
 
     /// Splits messages into days and groups (DESIGN.md 5.4 to 5.6).
-    static func build(_ messages: [Message], unreadAnchor: UUID?) -> [ChatItem] {
+    static func build(_ messages: [Message], unreadAnchor: String?) -> [ChatItem] {
         let calendar = Calendar.current
         var items: [ChatItem] = []
         for (index, message) in messages.enumerated() {

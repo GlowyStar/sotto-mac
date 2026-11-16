@@ -9,8 +9,8 @@ struct ChatListColumn: View {
         let rows = model.visibleContacts
         VStack(spacing: 0) {
             ListTopBar(model: model)
-            if model.connection == .connecting {
-                ConnectionBar()
+            if model.connection != .connected && model.connection != .idle {
+                ConnectionBar(model: model)
                     .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
             }
             if rows.isEmpty && !model.search.isEmpty {
@@ -40,16 +40,32 @@ struct ChatListColumn: View {
     }
 }
 
-/// "Connecting..." under the search while the relay is unreachable (DESIGN.md 5.2).
+/// "Connecting..." under the search while the relay is unreachable (DESIGN.md 5.2); when the
+/// client stopped for good, the reason and a button that connects again.
 struct ConnectionBar: View {
+    let model: AppModel
+
     var body: some View {
         HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text("Connecting...").font(Fonts.rowText).foregroundStyle(Color.accentText)
-            Spacer(minLength: 0)
+            if case .stopped(let reason) = model.connection {
+                Text(reason)
+                    .font(Fonts.rowText)
+                    .foregroundStyle(Color.accentText)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Button("Retry") { model.reconnect() }
+                    .buttonStyle(.plain)
+                    .font(Fonts.rowText)
+                    .foregroundStyle(Color.accentText)
+            } else {
+                ProgressView().controlSize(.small)
+                Text("Connecting...").font(Fonts.rowText).foregroundStyle(Color.accentText)
+                Spacer(minLength: 0)
+            }
         }
-        .padding(.leading, 16)
-        .frame(height: Metrics.connectionBar)
+        .padding(.horizontal, 16)
+        .frame(minHeight: Metrics.connectionBar)
         .background(Color.windowBgOver)
     }
 }

@@ -4,11 +4,11 @@ import SwiftUI
 @main
 struct SottoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    private let model = AppModel.shared
+    /// Read after `init`: a snapshot or a dump exits before the shared model opens a store.
+    private var model: AppModel { AppModel.shared }
 
     init() {
         Snapshot.runFromArguments()
-        if CommandLine.arguments.contains("--first-launch") { AppModel.shared.welcome = .start }
     }
 
     var body: some Scene {
@@ -28,14 +28,20 @@ struct SottoApp: App {
             CommandGroup(after: .textEditing) {
                 Button("Search") { model.searchFocusTick += 1 }.keyboardShortcut("f")
             }
-            CommandMenu("Mock") {
-                Button("Show First Launch") {
-                    model.modal = nil
-                    model.welcome = .start
-                }
-                Button(model.connection == .connected ? "Drop Connection" : "Restore Connection") {
-                    model.setConnection(model.connection == .connected ? .connecting : .connected)
-                }
+            if model.messenger == nil {
+                mockMenu
+            }
+        }
+    }
+
+    private var mockMenu: some Commands {
+        CommandMenu("Mock") {
+            Button("Show First Launch") {
+                model.modal = nil
+                model.welcome = .start
+            }
+            Button(model.connection == .connected ? "Drop Connection" : "Restore Connection") {
+                model.setConnection(model.connection == .connected ? .connecting : .connected)
             }
         }
     }
