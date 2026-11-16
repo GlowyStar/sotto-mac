@@ -22,7 +22,8 @@ let package = Package(
         .testTarget(
             name: "SottoCoreTests",
             dependencies: ["SottoCore"],
-            path: "Tests/SottoCoreTests"
+            path: "Tests/SottoCoreTests",
+            exclude: ["Fixtures"]
         ),
     ]
 )
