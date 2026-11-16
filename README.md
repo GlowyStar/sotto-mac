@@ -6,9 +6,10 @@ interoperate with sotto's command-line client byte for byte.
 
 ## Status
 
-- Early. The repository holds the package layout, the protocol schema and test vectors
-  copied from sotto, the generated protobuf code and an empty app window. There is no
-  key agreement, no ratchet and no networking yet.
+- Early. The core holds the key agreement, the ratchet, the client store, the session
+  rules and the transport to a relay; the command-line tool `sotto-mac` chats with
+  sotto's own command-line client through a sotto relay (`scripts/interop.py` checks it).
+  The app window still shows mock data.
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
 
@@ -22,6 +23,25 @@ scripts/test.sh             # the tests (Swift Testing)
 scripts/build-app.sh        # build/Sotto.app, signed ad hoc
 open build/Sotto.app
 swift run sotto-mac         # the command-line tool
+```
+
+The command-line tool has the commands of sotto's `sotto`; its identity lives in
+`~/.sotto-mac` unless `--data-dir` names another directory:
+
+```sh
+sotto-mac init                      # make an identity, print its user id
+sotto-mac add bob <user id>         # add a contact under a local name
+sotto-mac contacts
+sotto-mac chat bob --relay ws://127.0.0.1:8765/ws   # /quit or end of input ends
+sotto-mac reset bob                 # start a new session with bob
+```
+
+A `ws://` URL is dialed only to a loopback host unless `--insecure` is given. Part of the
+tests starts the relay of a sotto checkout at `../../python/sotto` (they are skipped when
+it is missing), and so does the interoperability check:
+
+```sh
+../../python/sotto/.venv/bin/python scripts/interop.py
 ```
 
 The protocol files in `Protocol/` come from a sotto checkout and are pinned by
