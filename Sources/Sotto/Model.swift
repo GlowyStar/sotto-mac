@@ -9,6 +9,30 @@ struct Contact: Identifiable, Hashable {
     var name: String
     let added: Date
     var unread: Int = 0
+    /// The place among the pinned chats, 0 on top.
+    var pinned: Int?
+    var muted = false
+    var archived = false
+}
+
+/// A line of the list while it searches (DESIGN.md 5.2 and 19.4): a chat found by its name,
+/// or a message found by its text.
+enum SearchRow: Identifiable {
+    case chat(Contact)
+    case message(Contact, Message)
+
+    var id: String {
+        switch self {
+        case .chat(let contact): contact.id
+        case .message(let contact, let message): contact.id + "/" + message.id
+        }
+    }
+}
+
+/// A message to scroll to and highlight; `tick` repeats a request for the same message.
+struct FocusRequest: Equatable {
+    let messageID: String
+    let tick: Int
 }
 
 enum MessageState: Hashable {
@@ -160,8 +184,19 @@ final class AppModel {
     var welcome: Welcome?
     var contacts: [Contact] = []
     var messages: [String: [Message]] = [:]
-    var drafts: [String: String] = [:]
+    var drafts: [String: String] = [:] {
+        didSet { scheduleDraftSave() }
+    }
     var openChatID: String?
+    /// Set while the list shows the archived chats.
+    var archiveOpen = false
+    /// The query of the search in the open chat; nil while that search is closed.
+    var chatSearch: String?
+    /// The result of the search in the open chat that is shown, 0 the newest.
+    var chatSearchIndex = 0
+    var focusMessage: FocusRequest?
+    /// Set when macOS refused notifications to Sotto (DESIGN.md 11.3).
+    var notificationsDenied = false
     /// The first unread message of the open chat, kept until the chat is closed.
     var unreadAnchor: String?
     var panelOpen = false
@@ -176,6 +211,8 @@ final class AppModel {
         didSet {
             guard settings != oldValue else { return }
             if settings.theme != oldValue.theme { applyTheme() }
+            if settings.notifications, !oldValue.notifications { alerts?.refresh(ask: true) }
+            if settings.dockBadge != oldValue.dockBadge, let lastState { updateBadge(lastState) }
             let saved = settings
             run { try await $0.saveSettings(saved) }
         }
@@ -199,6 +236,16 @@ final class AppModel {
 
     private var toastTask: Task<Void, Never>?
     private var scriptedSends: [(name: String, text: String)] = []
+    @ObservationIgnored private var lastState: MessengerState?
+    @ObservationIgnored private var savedDrafts: [String: String] = [:]
+    @ObservationIgnored private var draftSave: Task<Void, Never>?
+    /// The last draft write; each write waits for the one before, so the newest text lands last.
+    @ObservationIgnored private var draftWrite: Task<Void, Never>?
+    @ObservationIgnored private var focusTick = 0
+    @ObservationIgnored private lazy var notifier = Notifier(model: self)
+    /// The notification poster, only over a real store: the mock data and the snapshots
+    /// never touch the notification center or the Dock.
+    var alerts: Notifier? { messenger == nil ? nil : notifier }
 
     init(mock: Bool = true) {
         messenger = nil
@@ -254,22 +301,38 @@ final class AppModel {
         }
     }
 
-    /// Takes over a state of the messenger; a chat that is open counts as read.
+    /// Takes over a state of the messenger; the chat open in the key window counts as read.
+    /// New incoming messages become notifications and the Dock badge follows the unread count.
     func apply(_ state: MessengerState) {
         if let userID = state.userID { myID = userID }
         relayAddress = state.relay
         connection = ConnectionState(state.link)
+        let quiet = quietChat
+        if lastState == nil {
+            let loaded = Dictionary(uniqueKeysWithValues: state.chats.compactMap { chat in chat.draft.map { (chat.userID, $0) } })
+            savedDrafts = loaded
+            drafts = loaded
+        }
         contacts = state.chats.map {
-            Contact(id: $0.userID, name: $0.name, added: $0.added, unread: $0.userID == openChatID ? 0 : $0.unread)
+            Contact(
+                id: $0.userID, name: $0.name, added: $0.added, unread: $0.userID == quiet ? 0 : $0.unread,
+                pinned: $0.pinned, muted: $0.muted, archived: $0.archived)
         }
         messages = Dictionary(uniqueKeysWithValues: state.chats.map { chat in
             (chat.userID, chat.messages.map {
                 Message(id: String($0.id), outgoing: $0.outgoing, text: $0.text, date: $0.date, state: MessageState($0))
             })
         })
-        if let open = openChatID, state.chats.contains(where: { $0.userID == open && $0.unread > 0 }) {
-            run { try await $0.markRead(open) }
+        if let quiet, state.chats.contains(where: { $0.userID == quiet && $0.unread > 0 }) {
+            run { try await $0.markRead(quiet) }
         }
+        if messenger != nil {
+            Alerts.make(old: lastState, new: state, settings: settings, quietChat: quiet, locked: locked)
+                .forEach { alerts?.post($0) }
+            updateBadge(state)
+        }
+        lastState = state
+        if archiveOpen, archivedContacts.isEmpty { archiveOpen = false }
         if connection == .connected, !scriptedSends.isEmpty {
             for (name, text) in scriptedSends {
                 if let contact = contacts.first(where: { $0.name == name }) {
@@ -297,14 +360,52 @@ final class AppModel {
 
     // MARK: Derived
 
+    /// Pinned chats first in their own order, then the others by their last activity.
     var sortedContacts: [Contact] {
-        contacts.sorted { lastActivity($0) > lastActivity($1) }
+        contacts.sorted {
+            switch ($0.pinned, $1.pinned) {
+            case let (a?, b?): a < b
+            case (.some, nil): true
+            case (nil, .some): false
+            case (nil, nil): lastActivity($0) > lastActivity($1)
+            }
+        }
     }
 
+    /// The rows of the list, or of the archive while it is open.
     var visibleContacts: [Contact] {
+        sortedContacts.filter { $0.archived == archiveOpen }
+    }
+
+    var archivedContacts: [Contact] {
+        sortedContacts.filter(\.archived)
+    }
+
+    /// Chats whose name holds the query, then messages whose text holds it, newest first;
+    /// archived chats included.
+    var searchRows: [SearchRow] {
         let query = search.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return sortedContacts }
-        return sortedContacts.filter { $0.name.localizedCaseInsensitiveContains(query) }
+        guard !query.isEmpty else { return [] }
+        let all = sortedContacts
+        let chats = all.filter { $0.name.localizedCaseInsensitiveContains(query) }.map(SearchRow.chat)
+        let found = all.flatMap { contact in
+            (messages[contact.id] ?? []).filter { $0.text.localizedCaseInsensitiveContains(query) }.map { (contact, $0) }
+        }
+        return chats + found.sorted { $0.1.date > $1.1.date }.map(SearchRow.message)
+    }
+
+    /// The messages of the open chat that hold the query of the chat search, newest first.
+    var chatSearchResults: [Message] {
+        guard let id = openChatID, let query = chatSearch?.trimmingCharacters(in: .whitespaces), !query.isEmpty else { return [] }
+        return (messages[id] ?? []).filter { $0.text.localizedCaseInsensitiveContains(query) }.reversed()
+    }
+
+    /// The open chat while the window is in front and unlocked: it gets no notification and
+    /// its messages count as read.
+    var quietChat: String? {
+        // The main window, not the key one: the character palette takes the key while it is open.
+        guard !locked, NSApp?.isActive == true, NSApp?.mainWindow?.isVisible == true else { return nil }
+        return openChatID
     }
 
     func lastActivity(_ contact: Contact) -> Date {
@@ -378,6 +479,7 @@ final class AppModel {
         guard settings.passcode?.matches(text) ?? true else { return false }
         locked = false
         lastActivity = Date()
+        windowBecameKey()
         return true
     }
 
@@ -387,6 +489,15 @@ final class AppModel {
             [weak self] event in
             self?.lastActivity = Date()
             return event
+        }
+        for name in [NSApplication.didBecomeActiveNotification, NSWindow.didBecomeKeyNotification] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.windowBecameKey() }
+            }
+        }
+        NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) {
+            [weak self] _ in
+            MainActor.assumeIsolated { self?.saveDrafts() }
         }
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
@@ -418,6 +529,10 @@ final class AppModel {
         contacts = []
         messages = [:]
         drafts = [:]
+        savedDrafts = [:]
+        lastState = nil
+        archiveOpen = false
+        if messenger != nil { notifier.setBadge(0) }
         myID = ""
         settings = AppSettings()
         locked = false
@@ -454,14 +569,137 @@ final class AppModel {
     }
 
     func closeChat() {
+        saveDrafts()
         openChatID = nil
         unreadAnchor = nil
+        chatSearch = nil
+        focusMessage = nil
     }
 
     func markRead(_ id: String) {
         guard let index = contacts.firstIndex(where: { $0.id == id }) else { return }
+        guard id == quietChat || messenger == nil else { return }
         if contacts[index].unread > 0 { run { try await $0.markRead(id) } }
         contacts[index].unread = 0
+        alerts?.clear(id)
+    }
+
+    /// The window came to the front or was unlocked: the open chat is read now.
+    func windowBecameKey() {
+        if let id = openChatID { markRead(id) }
+        if let lastState { updateBadge(lastState) }
+        alerts?.refresh(ask: false)
+    }
+
+    func openFromNotification(_ id: String) {
+        guard contact(id) != nil else { return }
+        modal = nil
+        archiveOpen = contact(id)?.archived ?? false
+        openChat(id)
+    }
+
+    private func updateBadge(_ state: MessengerState) {
+        alerts?.setBadge(Alerts.badge(state, settings: settings, quietChat: quietChat))
+    }
+
+    // MARK: Drafts, pins, mute, archive
+
+    private func scheduleDraftSave() {
+        guard messenger != nil else { return }
+        draftSave?.cancel()
+        draftSave = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            self?.saveDrafts()
+        }
+    }
+
+    /// Hands the drafts that changed to the messenger, in order; a failed write is tried
+    /// again with the next change.
+    func saveDrafts() {
+        guard let messenger else { return }
+        let changed = Set(drafts.keys).union(savedDrafts.keys).filter { drafts[$0] != savedDrafts[$0] }
+        guard !changed.isEmpty else { return }
+        let writes = changed.map { ($0, drafts[$0] ?? "") }
+        changed.forEach { savedDrafts[$0] = drafts[$0] }
+        let previous = draftWrite
+        draftWrite = Task { [weak self] in
+            await previous?.value
+            for (id, text) in writes {
+                do {
+                    try await messenger.setDraft(text, for: id)
+                } catch {
+                    self?.savedDrafts[id] = "\u{0}"
+                }
+            }
+        }
+    }
+
+    /// Saves the drafts and waits for the writes, before the app quits.
+    func saveDraftsNow() async {
+        saveDrafts()
+        await draftWrite?.value
+    }
+
+    func setPinned(_ id: String, _ on: Bool) {
+        guard let index = contacts.firstIndex(where: { $0.id == id }) else { return }
+        withAnimation(Motion.reorder) {
+            if on {
+                for other in contacts.indices where contacts[other].pinned != nil { contacts[other].pinned! += 1 }
+                contacts[index].pinned = 0
+            } else {
+                contacts[index].pinned = nil
+            }
+        }
+        run { try await $0.setPinned(id, on) }
+    }
+
+    func setMuted(_ id: String, _ on: Bool) {
+        guard let index = contacts.firstIndex(where: { $0.id == id }) else { return }
+        contacts[index].muted = on
+        run { try await $0.setMuted(id, on) }
+    }
+
+    func setArchived(_ id: String, _ on: Bool) {
+        guard let index = contacts.firstIndex(where: { $0.id == id }) else { return }
+        withAnimation(Motion.reorder) {
+            contacts[index].archived = on
+            if on { contacts[index].pinned = nil }
+            if archiveOpen, archivedContacts.isEmpty { archiveOpen = false }
+        }
+        run { try await $0.setArchived(id, on) }
+        if on { showToast("Chat archived") }
+    }
+
+    // MARK: Search
+
+    func open(_ row: SearchRow) {
+        switch row {
+        case .chat(let contact): openChat(contact.id)
+        case .message(let contact, let message): focus(message.id, in: contact.id)
+        }
+    }
+
+    /// Opens a chat at a message and highlights it.
+    func focus(_ messageID: String, in id: String) {
+        openChat(id)
+        focusTick += 1
+        focusMessage = FocusRequest(messageID: messageID, tick: focusTick)
+    }
+
+    func openChatSearch() {
+        guard openChatID != nil else { return searchFocusTick += 1 }
+        chatSearch = chatSearch ?? ""
+        chatSearchIndex = 0
+    }
+
+    /// Moves to an older (`by` 1) or newer (`by` -1) result of the chat search.
+    func stepChatSearch(_ by: Int) {
+        let results = chatSearchResults
+        guard !results.isEmpty else { return }
+        chatSearchIndex = min(max(chatSearchIndex + by, 0), results.count - 1)
+        focusTick += 1
+        focusMessage = FocusRequest(messageID: results[chatSearchIndex].id, tick: focusTick)
     }
 
     func send(_ text: String, to id: String) {
@@ -562,6 +800,7 @@ final class AppModel {
         contacts.removeAll { $0.id == id }
         messages[id] = nil
         drafts[id] = nil
+        if archiveOpen, archivedContacts.isEmpty { archiveOpen = false }
         showToast("Contact deleted")
     }
 
@@ -636,8 +875,12 @@ final class AppModel {
             settingsPage = nil
         } else if modal != nil {
             modal = nil
+        } else if chatSearch != nil {
+            chatSearch = nil
         } else if searchFocused {
             if search.isEmpty { searchFocused = false } else { search = "" }
+        } else if archiveOpen {
+            archiveOpen = false
         } else if openChatID != nil {
             closeChat()
         }

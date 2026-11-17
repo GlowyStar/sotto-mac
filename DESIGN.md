@@ -188,6 +188,8 @@ States: normal (`listBg`, name `rowNameFg`, preview `rowTextFg`, time `rowDateFg
 
 Time format: today "HH:mm" (per locale); within the week the short weekday ("Mon"); older the short date per locale.
 
+The draft line, the pin and mute marks and the muted badge are in 19.2.
+
 ### 5.2 List top bar and search field
 
 | Item | Value |
@@ -200,7 +202,7 @@ Time format: today "HH:mm" (per locale); within the week the short weekday ("Mon
 | Search focused | fill `searchBgActive`, 2pt border `searchBorderActive`, placeholder `placeholderFgActive` |
 | Clear button | `xmark.circle.fill` 14pt `placeholderFg` in the 30pt right margin, shown when text is not empty |
 
-Search filters the list by local name (case-insensitive substring) as the user types; no match shows "No contacts found", centered, 13 regular `windowSubFg`, 20 below the bar.
+Search filters the list by local name (case-insensitive substring) as the user types, and below the chats found it lists the messages whose text holds the query (19.4); no match shows "Nothing found", centered, 13 regular `windowSubFg`, 20 below the bar.
 
 Connection bar: while the app is not connected to the relay, a 37pt bar appears under the search row, full column width, background `windowBgOver`: a small `ProgressView` at left 16, then "Connecting..." 13 regular `accentText`, 8 after the spinner. It slides in when the connection drops and out when connected. Nothing is shown while connected.
 
@@ -278,7 +280,7 @@ A click scrolls to the newest message (animated under two screens of distance, o
 | Send button visibility | shown when the trimmed text is not empty, otherwise hidden |
 | Gap between message list and bar | 8 |
 
-The field grows one line at a time and the bar with it; the message list keeps its bottom anchored. Use an `NSTextView` representable to catch Enter. Each chat keeps its draft in memory; switching chats restores it.
+The field grows one line at a time and the bar with it; the message list keeps its bottom anchored. Use an `NSTextView` representable to catch Enter. Each chat keeps its draft across chat switches and restarts (19.2); a sent message clears it. The emoji button of 19.6 sits between the field and the send button.
 
 ### 5.9 Context menu
 
@@ -295,7 +297,7 @@ The system `.contextMenu` is acceptable for the first build; the custom look bel
 | Shadow | `shadow`, blur 12, y 2 (estimate) |
 | Minimum width | 200 (estimate) |
 
-Message menu: for a photo, Save as... and Copy image; for a file, Save as... and Show in Finder; then Copy text; Delete for me (danger). Chat row menu: Contact info; Delete contact (danger).
+Message menu: for a photo, Save as... and Copy image; for a file, Save as... and Show in Finder; then Copy text; Delete for me (danger). Chat row menu: Pin or Unpin (disabled for an archived chat); Mute notifications or Unmute; Archive or Unarchive; a separator; Contact info; Delete contact (danger).
 
 ### 5.10 Modal box
 
@@ -335,7 +337,8 @@ Scroll bars: system overlay bars (`.scrollIndicators(.automatic)`); the referenc
 | Shift+Enter | new line |
 | Escape in a chat | close the chat (empty state, or the list in single column) |
 | Escape in the search field | clear the search, then leave the field |
-| Cmd+F | focus the search field |
+| Cmd+F | search in the open chat (19.5); with no chat open, focus the list search field |
+| Cmd+Shift+F | focus the list search field |
 | Cmd+N | open "Add contact" |
 | Cmd+, | open settings |
 | Up / Down with search focused | move the selection; Enter opens the chat |
@@ -468,6 +471,12 @@ The settings are the panel of section 11. "Relay" is in 11.7, "Theme" in 11.4 an
 | Lock now | `lock.fill` | 16 |
 | Open System Settings | `arrow.up.forward.app` | 14 |
 | Folder row | `folder` | 16 |
+| Pinned mark (row), Pin / Unpin (row menu) | `pin.fill` / `pin`, `pin.slash` | 12 / 16 |
+| Muted mark (row), Mute / Unmute (row menu) | `speaker.slash.fill` / `speaker.slash`, `speaker.wave.2` | 12 / 16 |
+| Archive row avatar, Archive / Unarchive (row menu) | `archivebox.fill` / `archivebox`, `tray.and.arrow.up` | 20 / 16 |
+| Search in chat (header), archive bar search | `magnifyingglass` | 18 / 16 |
+| Chat search arrows | `chevron.up`, `chevron.down` | 18 |
+| Emoji button | `face.smiling` | 22 |
 
 Symbols use `.symbolRenderingMode(.monochrome)` in the colour token of their place.
 
@@ -526,7 +535,24 @@ Estimated in the build, worth a look by the owner:
 - The auto-lock box has one button, "Close"; a radio applies at once. The value on the row is the radio title ("1 hour").
 - The Connection value on the main page also reads "Not connected" (no identity yet) and "Can not connect" (stopped).
 - The storage block shows the real size of the data folder as the total; Photos, Files and Other are 0 until photos and files are kept on the Mac, so "Clear cache" stays disabled.
-- The macOS refusal state of 11.3 (disabled toggle, "Open System Settings") comes with the notifications card.
+- The macOS refusal state of 11.3 (disabled toggle, "Open System Settings") came with SOTTO-36; the hint and the button sit on one `windowBgOver` band above the preview hint, the button with the `arrow.up.forward.app` symbol.
+
+### Added with the local features (SOTTO-36, 2026-11-17)
+
+Found in the reference and stated in 19: the draft label and its colours, the muted badge colours, the pin and mute marks (place, colours, the 4 gap), the archive row name and preview colours and its avatar colour, the found-messages bar (28 high, text at 14, 5, its colours), the in-chat search bars (54 and 46 high, counter at 10, arrows at the right), the highlight colour and its 500 / 3000ms timings, the rule that a row shows its draft only without unread messages, the Dock badge count.
+
+Estimated or Sotto's own, worth a look by the owner:
+- Glyph sizes: the pin and mute marks 12pt, the archive avatar glyph 20pt, the chat search arrows 18pt in a 46 square.
+- The open chat's own row shows no draft (the field shows it); the reference may show it there after its save timer.
+- A draft has no time of its own here: the row keeps the time of the last message and the chat does not move up when a draft is saved, unlike the reference.
+- New pins go on top of the pinned ones; pinned chats are not reordered by dragging; there is no limit of pinned chats.
+- Mute has no durations (the reference offers several); a chat stays muted until it is unmuted.
+- Archiving a chat unpins it; an archived chat that is not muted comes back to the list when a message arrives (the reference does the same for unmuted chats).
+- The archive opens as the whole list column with a 54 bar (back, "Archived chats", a search button); the reference layout of that bar was not read.
+- The found-messages rows show the message without highlighting the query.
+- Notifications: one per chat for each batch of new messages, about the newest (so the messages that waited on the relay while the app was closed make one per chat, not a burst), grouped by chat; reading a chat removes its notifications; a click opens the chat; while the app is in front, a notification still shows for another chat.
+- The highlight fades in over 200ms and out over 500ms (the reference timings are the 500 and 3000ms of the hold).
+
 
 ## 10. Additions to tokens and existing sections
 
@@ -650,6 +676,8 @@ A row opens its page with the push of 11.1.
 | Section "Sound" | toggle "Play a sound" (default on) |
 | Section "Dock" | toggle "Show unread count on the Dock icon" (default on) |
 | Preview card | see below, at the end of the page |
+
+The Dock badge is the number of unread messages of all chats, muted and archived ones included (the reference counts messages and includes muted chats by default: `core/core_settings.h`, `_countUnreadMessages` and `_includeMutedCounter`); the chat open in the front window adds nothing. The rules of the notifications themselves are in 19.6.
 
 If macOS refuses notifications, the first toggle is disabled (50% opacity) and a hint under the first section reads "Notifications are turned off for Sotto in System Settings." with a text button "Open System Settings" (14 semibold `accentText`, left 22).
 
@@ -985,3 +1013,84 @@ The symbols of sections 11 to 16 are listed in the table of section 8, so a symb
 | Wrong passcode shake | 300ms, 4 left and right | a `GeometryEffect` or `keyframeAnimator`, 4 pt, three swings |
 
 Motion rules of section 6 apply. With reduced motion: the page push and the viewer grow become 150ms cross-fades, the shake becomes a color flash of the error line, the progress ring still advances (it is progress, not decoration) but without eased steps.
+
+## 19. Local features
+
+Notifications, the Dock badge, drafts, pinned, muted and archived chats, search and emoji. Everything here stays on the Mac: nothing new is sent to the relay. Sources: tdesktop `dialogs/dialogs.style`, `dialogs/ui/dialogs_layout.style`, `dialogs/ui/dialogs_layout.cpp`, `history/view/controls/history_view_compose_search.cpp`, `history/history_view_highlight_manager.cpp`, `chat_helpers/chat_helpers.style`, `info/info.style`, `core/core_settings.h`; lib_ui `ui/colors.palette`, `ui/basic.style`; the night palette of `Telegram/Resources/night.tdesktop-theme`.
+
+### 19.1 New colour tokens
+
+| Token | Light | Dark | Used for |
+|---|---|---|---|
+| `draftFg` | #dd4b39 | #ff525d | "Draft:" in a row |
+| `draftFgActive` | #c6e1f7 | #a9caf0 | the same in the active row |
+| `badgeBgMuted` | #bbbbbb | #3e546a | unread badge of a muted chat, pin and mute marks |
+| `badgeBgMutedActive` | #c6e1f7 | #7aa3ca | the same in the active row |
+| `archiveFg` | #525252 | #f5f5f5 | preview of the archive row |
+| `archiveAvatarBg` | #bbbbbb | #3e546a | circle of the archive row |
+| `searchedBarBg` | #f1f1f1 | #202b38 | "Found N messages" bar |
+| `searchedBarFg` | #919191 | #8c98a4 | its text |
+| `messageHighlight` | #358cd44c | #3585d44c | full-width band behind a message reached by a search |
+
+### 19.2 Chat list row: draft, pin, mute
+
+| Item | Value |
+|---|---|
+| Draft line | the preview line reads "Draft: " in `draftFg` (`draftFgActive` when active) followed by the draft as one line in `rowTextFg`; no status mark before the time |
+| When the draft shows | the chat has a draft that is not blank and no unread messages (with unread messages the last message shows); never in the row of the chat that is open |
+| Mute mark | `speaker.slash.fill` 12pt, 4 after the end of the name, vertically centered on the name; `badgeBgMuted` (`badgeBgMutedActive` when active) |
+| Muted badge | the badge of 5.1 filled `badgeBgMuted` (`badgeBgMutedActive` in the active row) |
+| Pin mark | `pin.fill` 12pt in the badge place at the right of the preview line, only when there is no unread badge; colours of the mute mark |
+| Order | pinned chats first, the one pinned last on top; then the others as in section 6 |
+
+Pin, mute and archive are changed from the row menu (5.9) and kept in `app.json`.
+
+### 19.3 Archive
+
+| Item | Value |
+|---|---|
+| Archive row | first row of the list while at least one chat is archived and the search is empty; the 62 row of 5.1: a 46 circle `archiveAvatarBg` with `archivebox.fill` 20pt `avatarFg`; name "Archived chats" in the row name style; preview: the names of the archived chats joined by ", " in `archiveFg`; a muted badge with the sum of their unread messages |
+| Archive view | a click on the row shows the archived chats in the list column; the top bar (54) holds the back button (`chevron.left` 17pt, 40 square, left 6), "Archived chats" 14 semibold `windowBoldFg` 6 after it, and a search button (`magnifyingglass` 16pt) at right 8, which leaves the archive and focuses the list search |
+| Leaving | the back button or Escape; the view closes by itself when its last chat is unarchived |
+| Rules | archiving unpins the chat and shows the toast "Chat archived"; an archived chat that is not muted returns to the list when a message arrives; archived chats count in the Dock badge and are found by the search |
+
+### 19.4 Search across chats
+
+| Item | Value |
+|---|---|
+| Chats found | the rows of 5.1 whose local name holds the query, in list order, archived chats included |
+| Bar | then a bar 28 high, full width, `searchedBarBg`, text "Found N messages" ("Found 1 message") 13 regular `searchedBarFg` at left 14, top 5 |
+| Messages found | every message whose text holds the query (case-insensitive), newest first, each as a row of 5.1 with the contact's avatar and name, the message as the preview line and its time; no badge, no pin mark |
+| Keyboard | Up and Down move over all the rows; Enter opens the selected one |
+| Click on a message | opens the chat scrolled to the message (centered) with the highlight of 19.7 |
+
+### 19.5 Search in a chat
+
+| Item | Value |
+|---|---|
+| Opening | Cmd+F in a chat, or the header search button (`magnifyingglass` 18pt, 40 square, before the contact panel button) |
+| Top bar | replaces the chat header: height 54, `topBarBg`, 1 `divider` bottom line; back button `chevron.left` 17pt (40 square, left 6) closes the search; the search field of 5.2 fills the rest with the outer padding 7, focused at once |
+| Bottom bar | replaces the compose bar: height 46, `composeBg`, 1 `divider` top line; the counter "N of M" or "No results" 14 regular `windowSubFg` at left 10; at the right edge two 46 square buttons, `chevron.up` (older) then `chevron.down` (newer), 18pt `composeIconFg`, `placeholderFgActive` when there is nothing further |
+| Results | messages of the chat whose text holds the query, newest first; typing jumps to the newest result; Enter and Up go to the older result, Down to the newer; each jump scrolls the message to the center and highlights it (19.7) |
+| Closing | the back button or Escape; the header and the compose bar with its draft come back |
+
+### 19.6 Notifications and emoji
+
+| Item | Value |
+|---|---|
+| When | one macOS notification per chat for each batch of incoming messages that arrived after the app started, about the newest of them; none while "Show notifications" is off, none for a muted chat, none for the chat that is open while the window is in front and unlocked; a message from an unknown sender never has a chat, so never a notification (7.6) |
+| Content | title: the contact's local name, or "Sotto" with "Show sender name" off; body: the text, or "New message" with "Show message preview" off; the default sound with "Play a sound" on |
+| Locked | while the lock screen is shown and "Hide contents while locked" is on, the title is "Sotto" and the body "New message" |
+| Grouping and click | notifications are grouped by chat; reading the chat removes its notifications; a click brings the window to the front and opens the chat |
+| Read state | the open chat counts as read only while the window is in front and unlocked; otherwise its row and the Dock badge count its new messages until the window comes back |
+| Emoji button | in the compose bar between the field and the send button: 44 x 46, `face.smiling` 22pt `composeIconFg` (hover `composeIconFgOver`); a click focuses the field and opens the macOS character palette, which types into it; no emoji images are bundled |
+
+### 19.7 Motion
+
+| Element | Reference | SwiftUI |
+|---|---|---|
+| Message highlight in / hold / out | 500ms / 3000ms (`activeFadeInDuration`, `activeFadeOutDuration`) | `.easeOut(duration: 0.2)`, a 3s hold, `.easeIn(duration: 0.5)` (estimate) |
+| Pin, unpin, archive, unarchive (row moves) | none | the row reorder of section 6 |
+| Archive view in and out | none | instant |
+
+Motion rules of section 6 apply; with reduced motion the scroll to a found message is a jump.

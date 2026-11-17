@@ -2,8 +2,8 @@ import CryptoKit
 import Foundation
 
 /// Mock contacts and chats that exercise the layout: short and long messages, several lines,
-/// a link, emoji, Russian and English, groups, several days, unread counts, an empty chat and
-/// outgoing messages in both states.
+/// a link, emoji, Russian and English, groups, several days, unread counts, an empty chat,
+/// outgoing messages in both states, pinned, muted and archived chats and a draft.
 @MainActor
 enum MockData {
     /// A stable 64-hex id made from a name.
@@ -118,7 +118,20 @@ enum MockData {
                 out("Жақсы, рахмет! All good", day(40, 9, 0)),
             ])
 
+        // Two pinned chats, a muted one, two in the archive (one of them muted) and a draft.
+        func set(_ name: String, _ change: (inout Contact) -> Void) {
+            if let index = contacts.firstIndex(where: { $0.name == name }) { change(&contacts[index]) }
+        }
+        set("Lena Smirnova") { $0.pinned = 0 }
+        set("Sam Carter") { $0.pinned = 1 }
+        set("Dmitry K") { $0.muted = true }
+        set("Arman") { $0.archived = true }
+        set("Pavel Orlov") {
+            $0.archived = true
+            $0.muted = true
+        }
         model.contacts = contacts
         model.messages = messages
+        model.drafts = [id(for: "Tom Becker"): "Let me check the schedule first"]
     }
 }

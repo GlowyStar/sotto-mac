@@ -500,9 +500,28 @@ struct NotificationsPage: View {
 
     var body: some View {
         SectionTitle(text: "macOS notifications")
-        SettingsToggle(title: "Show notifications", isOn: $model.settings.notifications)
+        SettingsToggle(title: "Show notifications", isOn: $model.settings.notifications, enabled: !model.notificationsDenied)
         SettingsToggle(title: "Show sender name", isOn: $model.settings.notificationSender)
         SettingsToggle(title: "Show message preview", isOn: $model.settings.notificationPreview)
+        if model.notificationsDenied {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Notifications are turned off for Sotto in System Settings.")
+                    .font(Fonts.hint)
+                    .foregroundStyle(Color.windowSubFg)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    Notifier.openSystemSettings()
+                } label: {
+                    Label("Open System Settings", systemImage: "arrow.up.forward.app")
+                        .font(Fonts.button)
+                        .foregroundStyle(Color.accentText)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(EdgeInsets(top: 8, leading: 22, bottom: 16, trailing: 22))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.windowBgOver)
+        }
         Hint(text: "Without a preview, a notification only says that a message arrived.")
         SectionTitle(text: "Sound")
         SettingsToggle(title: "Play a sound", isOn: $model.settings.sound)

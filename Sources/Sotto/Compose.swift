@@ -37,6 +37,12 @@ struct ComposeBar: View {
             }
             .padding(.leading, Metrics.fieldLeft)
             .padding(.vertical, Metrics.fieldPadV)
+            IconButton(symbol: "face.smiling", size: 22, label: "Emoji", side: Metrics.emojiWidth) {
+                // The system palette types into the first responder, so the field takes focus first.
+                model.composeFocusTick += 1
+                DispatchQueue.main.async { NSApp.orderFrontCharacterPalette(nil) }
+            }
+            .frame(height: Metrics.composeHeight)
             if canSend {
                 Button {
                     model.send(text.wrappedValue, to: chatID)

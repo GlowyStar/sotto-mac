@@ -102,6 +102,17 @@ extension Color {
     static let settingsIconBg8 = token("f2925b", "f2925b")
     /// The dim over the page below a pushed settings page (DESIGN.md 11.1).
     static let slideFadeOutBg = token("0000003c", "0000003c")
+
+    // DESIGN.md 19.1
+    static let draftFg = token("dd4b39", "ff525d")
+    static let draftFgActive = token("c6e1f7", "a9caf0")
+    static let badgeBgMuted = token("bbbbbb", "3e546a")
+    static let badgeBgMutedActive = token("c6e1f7", "7aa3ca")
+    static let archiveFg = token("525252", "f5f5f5")
+    static let archiveAvatarBg = token("bbbbbb", "3e546a")
+    static let searchedBarBg = token("f1f1f1", "202b38")
+    static let searchedBarFg = token("919191", "8c98a4")
+    static let messageHighlight = token("358cd44c", "3585d44c")
 }
 
 /// The chat background presets of DESIGN.md 11.4; `serviceBg` follows the preset.
@@ -260,6 +271,16 @@ enum Metrics {
     static let sendWidth: CGFloat = 44
     static let sendRight: CGFloat = 2
     static let listToCompose: CGFloat = 8
+    static let emojiWidth: CGFloat = 44
+
+    // DESIGN.md 19
+    static let rowMuteGap: CGFloat = 4
+    static let rowMarkSymbol: CGFloat = 12
+    static let searchedBar: CGFloat = 28
+    static let searchedBarText = EdgeInsets(top: 5, leading: 14, bottom: 0, trailing: 14)
+    static let chatSearchArrow: CGFloat = 46
+    static let chatSearchCounterLeft: CGFloat = 10
+    static let highlightHold = Duration.milliseconds(3000)
 
     // Boxes and toast
     static let boxWidth: CGFloat = 320
@@ -348,6 +369,9 @@ enum Motion {
     static let page = Animation.timingCurve(0, 0.55, 0.45, 1, duration: 0.24)
     static let toggle = Animation.easeOut(duration: 0.12)
     static let slider = Animation.smooth(duration: 0.15)
+    // DESIGN.md 19.7
+    static let highlightIn = Animation.easeOut(duration: 0.2)
+    static let highlightOut = Animation.easeIn(duration: 0.5)
 
     static func pick(_ animation: Animation, reduce: Bool) -> Animation { reduce ? reduced : animation }
 }

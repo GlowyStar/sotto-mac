@@ -97,6 +97,30 @@ enum Snapshot {
             model.settings.background = .rose
             openRich(model)
         },
+        // SOTTO-36: list marks, archive, search, notifications refused.
+        Shot(name: "list-marks", size: CGSize(width: 900, height: 900)) { _ in },
+        Shot(name: "list-marks-dark", size: CGSize(width: 900, height: 900), dark: true) { model in
+            if let lena = model.contacts.first(where: { $0.name == "Lena Smirnova" }) { model.openChat(lena.id) }
+        },
+        Shot(name: "archive") { $0.archiveOpen = true },
+        Shot(name: "search-messages", size: CGSize(width: 900, height: 900)) { $0.search = "an" },
+        Shot(name: "search-messages-dark", dark: true) { $0.search = "сообщение номер 1" },
+        Shot(name: "chat-search") { model in
+            openRich(model)
+            model.chatSearch = "да"
+            model.stepChatSearch(0)
+        },
+        Shot(name: "chat-search-dark", dark: true) { model in
+            openRich(model)
+            model.chatSearch = "nothing like this"
+        },
+        Shot(name: "chat-draft") { model in
+            if let tom = model.contacts.first(where: { $0.name == "Tom Becker" }) { model.openChat(tom.id) }
+        },
+        Shot(name: "settings-notifications-denied") { model in
+            model.notificationsDenied = true
+            page(model, .notifications)
+        },
     ]
 
     private static func page(_ model: AppModel, _ page: SettingsPage) {

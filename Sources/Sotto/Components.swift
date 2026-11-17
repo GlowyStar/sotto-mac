@@ -45,6 +45,7 @@ struct ServicePill: View {
 struct Badge: View {
     let count: Int
     var active = false
+    var muted = false
     var height = Metrics.badgeHeight
 
     var body: some View {
@@ -55,7 +56,16 @@ struct Badge: View {
             .foregroundStyle(active ? Color.badgeFgActive : Color.badgeFg)
             .padding(.horizontal, Metrics.badgePadding)
             .frame(minWidth: height, minHeight: height, maxHeight: height)
-            .background(Capsule().fill(active ? Color.badgeBgActive : Color.badgeBg))
+            .background(Capsule().fill(fill))
+    }
+
+    private var fill: Color {
+        switch (active, muted) {
+        case (true, true): .badgeBgMutedActive
+        case (true, false): .badgeBgActive
+        case (false, true): .badgeBgMuted
+        case (false, false): .badgeBg
+        }
     }
 }
 

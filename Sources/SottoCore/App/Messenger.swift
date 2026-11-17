@@ -20,6 +20,12 @@ public struct Chat: Codable, Equatable, Sendable {
     public let added: Date
     public let unread: Int
     public let messages: [ChatMessage]
+    /// The place among the pinned chats, 0 on top; nil when the chat is not pinned.
+    public var pinned: Int?
+    public var muted = false
+    public var archived = false
+    /// The text typed in the compose bar and not sent.
+    public var draft: String?
 }
 
 public enum LinkState: Codable, Equatable, Sendable {
@@ -73,7 +79,7 @@ public struct NotConnectedError: Error, Equatable, Sendable {}
 ///
 /// What the store does not hold is kept in `app.json` next to it: the relay address once it
 /// is set here, the last read position of each chat, when each contact and message was
-/// first seen, and the settings of the app.
+/// first seen, the drafts, pins, muted and archived chats, and the settings of the app.
 public actor Messenger {
     public static let notesFile = "app.json"
     static let pollSeconds = 0.5
@@ -188,6 +194,9 @@ public actor Messenger {
         try await withClient { client in
             try client.store.transaction { _ = try client.store.addPending(contact, text: text, madeAt: madeAt) }
         }
+        if notes.drafts.removeValue(forKey: userID) != nil {
+            try notes.save(directory)
+        }
         await publish()
         flush()
     }
@@ -249,6 +258,7 @@ public actor Messenger {
         }
         notes.read[userID] = nil
         notes.added[userID] = nil
+        notes.forget(userID)
         positions.forEach { notes.times[String($0)] = nil }
         try notes.save(directory)
         await publish()
@@ -278,6 +288,36 @@ public actor Messenger {
         notes.relay = address
         try notes.save(directory)
         await reconnect()
+    }
+
+    /// Keeps the unsent text of a chat; an empty or blank text removes the draft.
+    public func setDraft(_ text: String, for userID: String) throws {
+        let draft = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
+        guard notes.drafts[userID] != draft else {
+            return
+        }
+        notes.drafts[userID] = draft
+        try notes.save(directory)
+    }
+
+    /// Pins a chat on top of the pinned ones, or unpins it.
+    public func setPinned(_ userID: String, _ pinned: Bool) async throws {
+        notes.pin(userID, pinned)
+        try notes.save(directory)
+        await publish()
+    }
+
+    public func setMuted(_ userID: String, _ muted: Bool) async throws {
+        notes.mute(userID, muted)
+        try notes.save(directory)
+        await publish()
+    }
+
+    /// Moves a chat to the archive, which unpins it, or back to the list.
+    public func setArchived(_ userID: String, _ archived: Bool) async throws {
+        notes.archive(userID, archived)
+        try notes.save(directory)
+        await publish()
     }
 
     public func saveSettings(_ settings: AppSettings) throws {
@@ -417,7 +457,11 @@ public actor Messenger {
         case .connected: link = .connected
         case .retrying: link = .connecting
         case .stopped(let reason): link = .stopped(Self.explain(reason))
-        case .incoming, .refused: break
+        case .incoming(let sender, _):
+            if let userID = try? Identity.encodeUserID(sender), notes.arrived(userID) {
+                try? notes.save(directory)
+            }
+        case .refused: break
         }
         await publish()
     }
@@ -548,7 +592,11 @@ public actor Messenger {
                 name: contact.name ?? String(userID.prefix(8)),
                 added: date(added),
                 unread: messages.filter { !$0.outgoing && $0.id > read }.count,
-                messages: messages
+                messages: messages,
+                pinned: notes.pins.firstIndex(of: userID),
+                muted: notes.muted.contains(userID),
+                archived: notes.archived.contains(userID),
+                draft: notes.drafts[userID]
             )
         }
         return MessengerState(
@@ -598,6 +646,68 @@ struct Notes: Codable, Equatable {
     var added: [String: Int64] = [:]
     var times: [String: Int64] = [:]
     var settings: AppSettings?
+    /// Unsent texts by user id.
+    var drafts: [String: String] = [:]
+    /// Pinned user ids, the top one first.
+    var pins: [String] = []
+    var muted: Set<String> = []
+    var archived: Set<String> = []
+
+    init(relay: String? = nil, read: [String: Int64] = [:]) {
+        self.relay = relay
+        self.read = read
+    }
+
+    /// A key that is missing or unreadable takes its default, so an older file loads.
+    init(from decoder: Decoder) throws {
+        let keys = try decoder.container(keyedBy: CodingKeys.self)
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            ((try? keys.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
+        }
+        relay = value(.relay, nil)
+        read = value(.read, [:])
+        added = value(.added, [:])
+        times = value(.times, [:])
+        settings = value(.settings, nil)
+        drafts = value(.drafts, [:])
+        pins = value(.pins, [])
+        muted = value(.muted, [])
+        archived = value(.archived, [])
+    }
+
+    mutating func pin(_ userID: String, _ on: Bool) {
+        pins.removeAll { $0 == userID }
+        if on { pins.insert(userID, at: 0) }
+    }
+
+    mutating func mute(_ userID: String, _ on: Bool) {
+        if on { muted.insert(userID) } else { muted.remove(userID) }
+    }
+
+    mutating func archive(_ userID: String, _ on: Bool) {
+        if on {
+            archived.insert(userID)
+            pin(userID, false)
+        } else {
+            archived.remove(userID)
+        }
+    }
+
+    /// A message arrived from `userID`: an archived chat that is not muted comes back to the
+    /// list. Returns whether anything changed.
+    mutating func arrived(_ userID: String) -> Bool {
+        guard archived.contains(userID), !muted.contains(userID) else { return false }
+        archived.remove(userID)
+        return true
+    }
+
+    /// Drops what is kept for a deleted contact.
+    mutating func forget(_ userID: String) {
+        drafts[userID] = nil
+        pin(userID, false)
+        muted.remove(userID)
+        archived.remove(userID)
+    }
 
     static func load(_ directory: URL) -> Notes {
         let url = directory.appendingPathComponent(Messenger.notesFile)

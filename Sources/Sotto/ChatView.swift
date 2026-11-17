@@ -13,17 +13,25 @@ struct ChatScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ChatHeader(model: model, contact: contact, singleColumn: singleColumn) {
-                if panelFits {
-                    withAnimation(Motion.pick(Motion.column, reduce: reduceMotion)) { model.panelOpen.toggle() }
-                } else {
-                    model.modal = .contactInfo(contact.id)
+            if model.chatSearch != nil {
+                ChatSearchTopBar(model: model)
+            } else {
+                ChatHeader(model: model, contact: contact, singleColumn: singleColumn) {
+                    if panelFits {
+                        withAnimation(Motion.pick(Motion.column, reduce: reduceMotion)) { model.panelOpen.toggle() }
+                    } else {
+                        model.modal = .contactInfo(contact.id)
+                    }
                 }
             }
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
                     MessageList(model: model, contact: contact)
-                    ComposeBar(model: model, chatID: contact.id)
+                    if model.chatSearch != nil {
+                        ChatSearchBottomBar(model: model)
+                    } else {
+                        ComposeBar(model: model, chatID: contact.id)
+                    }
                 }
                 if model.panelOpen && panelFits {
                     Rectangle().fill(Color.divider).frame(width: 1)
@@ -65,6 +73,7 @@ struct ChatHeader: View {
             .padding(.leading, singleColumn ? 0 : Metrics.headerAvatarLeft)
             .accessibilityLabel("\(contact.name), contact info")
             Spacer(minLength: 8)
+            IconButton(symbol: "magnifyingglass", size: 18, label: "Search in chat") { model.openChatSearch() }
             IconButton(symbol: "sidebar.right", size: 18, label: "Contact info", action: togglePanel)
                 .padding(.trailing, 8)
         }
@@ -129,6 +138,9 @@ struct MessageList: View {
     @State private var topDay: Date?
     @State private var pillShown = false
     @State private var pillHide: Task<Void, Never>?
+    /// The message found by a search, highlighted for a moment (DESIGN.md 19.7).
+    @State private var highlighted: String?
+    @State private var highlightHide: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private struct ContentKey: PreferenceKey {
@@ -199,7 +211,15 @@ struct MessageList: View {
                     }
                 }
                 .animation(Motion.pick(Motion.toDown, reduce: reduceMotion), value: distanceFromBottom > Metrics.toDownThreshold)
+                .onChange(of: model.focusMessage) { _, request in
+                    guard let request else { return }
+                    show(request.messageID, proxy: proxy)
+                }
                 .onAppear {
+                    if let request = model.focusMessage {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { show(request.messageID, proxy: proxy) }
+                        return
+                    }
                     guard model.unreadAnchor != nil else { return }
                     // After the first layout, which the bottom anchor would override.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -218,6 +238,17 @@ struct MessageList: View {
             }
         }
         .id(contact.id)
+    }
+
+    private func show(_ messageID: String, proxy: ScrollViewProxy) {
+        withAnimation(reduceMotion ? nil : Motion.newMessage) { proxy.scrollTo(messageID, anchor: .center) }
+        withAnimation(Motion.highlightIn) { highlighted = messageID }
+        highlightHide?.cancel()
+        highlightHide = Task { @MainActor in
+            try? await Task.sleep(for: Metrics.highlightHold)
+            guard !Task.isCancelled else { return }
+            withAnimation(Motion.highlightOut) { highlighted = nil }
+        }
     }
 
     private func lineFrame(_ item: ChatItem) -> some View {
@@ -272,6 +303,7 @@ struct MessageList: View {
             MessageRow(message: message, top: top, bottom: bottom, maxWidth: maxBubble) {
                 model.deleteMessage(message.id, in: contact.id)
             }
+            .background { if highlighted == message.id { Color.messageHighlight } }
             .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
         }
     }
@@ -420,5 +452,99 @@ struct BubbleShape: Shape {
         path.closeSubpath()
         guard mirrored else { return path }
         return path.applying(CGAffineTransform(translationX: minX + maxX, y: 0).scaledBy(x: -1, y: 1))
+    }
+}
+
+/// The bar over the open chat while it is searched: back and the query field (DESIGN.md 19.5).
+struct ChatSearchTopBar: View {
+    @Bindable var model: AppModel
+    @FocusState private var focused: Bool
+
+    private var query: Binding<String> {
+        Binding(get: { model.chatSearch ?? "" }, set: { model.chatSearch = $0 })
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            IconButton(symbol: "chevron.left", size: 17, label: "Close search") { model.chatSearch = nil }
+                .padding(.leading, 6)
+            ZStack(alignment: .leading) {
+                if query.wrappedValue.isEmpty {
+                    Text("Search")
+                        .font(Fonts.rowText)
+                        .foregroundStyle(focused ? Color.placeholderFgActive : Color.placeholderFg)
+                        .padding(.leading, Metrics.searchTextLeft)
+                        .allowsHitTesting(false)
+                }
+                TextField("", text: query)
+                    .textFieldStyle(.plain)
+                    .font(Fonts.rowText)
+                    .foregroundStyle(Color.windowFg)
+                    .focused($focused)
+                    .padding(.leading, Metrics.searchTextLeft)
+                    .padding(.trailing, Metrics.searchTextRight)
+                    .accessibilityLabel("Search in chat")
+                    .onSubmit { model.stepChatSearch(1) }
+                    .onKeyPress(.upArrow) {
+                        model.stepChatSearch(1)
+                        return .handled
+                    }
+                    .onKeyPress(.downArrow) {
+                        model.stepChatSearch(-1)
+                        return .handled
+                    }
+            }
+            .frame(height: Metrics.searchHeight)
+            .background(RoundedRectangle(cornerRadius: Metrics.searchRadius).fill(focused ? Color.searchBgActive : Color.searchBg))
+            .overlay(
+                RoundedRectangle(cornerRadius: Metrics.searchRadius)
+                    .strokeBorder(focused ? Color.searchBorderActive : .clear, lineWidth: 2))
+            .padding(Metrics.searchOuter)
+        }
+        .frame(height: Metrics.topBarHeight)
+        .background(Color.topBarBg)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.divider).frame(height: 1) }
+        .onAppear { DispatchQueue.main.async { focused = true } }
+        .onChange(of: model.chatSearch) { old, new in
+            guard old != nil, let new, new != old else { return }
+            model.chatSearchIndex = 0
+            model.stepChatSearch(0)
+        }
+    }
+}
+
+/// The bar under the open chat while it is searched: "N of M" and the arrows (DESIGN.md 19.5).
+struct ChatSearchBottomBar: View {
+    let model: AppModel
+
+    var body: some View {
+        let results = model.chatSearchResults
+        let query = model.chatSearch?.trimmingCharacters(in: .whitespaces) ?? ""
+        HStack(spacing: 0) {
+            Group {
+                if results.isEmpty {
+                    Text(query.isEmpty ? "" : "No results")
+                } else {
+                    Text("\(model.chatSearchIndex + 1) of \(results.count)")
+                }
+            }
+            .font(Fonts.settingsRow)
+            .foregroundStyle(Color.windowSubFg)
+            .padding(.leading, Metrics.chatSearchCounterLeft)
+            Spacer()
+            IconButton(
+                symbol: "chevron.up", size: 18, label: "Older result",
+                color: model.chatSearchIndex + 1 < results.count ? .composeIconFg : .placeholderFgActive,
+                side: Metrics.chatSearchArrow
+            ) { model.stepChatSearch(1) }
+            IconButton(
+                symbol: "chevron.down", size: 18, label: "Newer result",
+                color: model.chatSearchIndex > 0 ? .composeIconFg : .placeholderFgActive,
+                side: Metrics.chatSearchArrow
+            ) { model.stepChatSearch(-1) }
+        }
+        .frame(height: Metrics.composeHeight)
+        .background(Color.composeBg)
+        .overlay(alignment: .top) { Rectangle().fill(Color.divider).frame(height: 1) }
     }
 }

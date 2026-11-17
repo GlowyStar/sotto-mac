@@ -120,10 +120,18 @@ message that the relay refuses ends as not sent, with a red mark and the reason 
 
 Next to the store, `app.json` keeps what the store has no place for: the relay address
 saved in Settings, how far each chat was read, when each contact and message was
-first seen by the app, and every other setting (theme, text size, chat background, send
-key, clock, the passcode check, auto-lock, notification and download choices). "Reset
+first seen by the app, the draft of each chat, the pinned, muted and archived chats, and
+every other setting (theme, text size, chat background, send key, clock, the passcode
+check, auto-lock, notification and download choices). "Reset
 Sotto..." in Settings, Advanced, deletes the store and `app.json` and then the data
 directory only if nothing else is left in it.
+
+A new message posts a macOS notification (not for the chat open in the front window, not
+for a muted chat; without its text while the passcode lock is shown, unless that is turned
+off) and the Dock icon shows the number of unread messages. Notifications need the bundled
+app: under `swift run` none are posted. Search finds chats by name and messages by text,
+across chats from the list and inside the open chat (Cmd+F); the emoji button opens the
+macOS character palette. All of this stays on the Mac: nothing new is sent to the relay.
 
 A local passcode locks the window at launch, after the auto-lock time, on Cmd+L and on
 sleep. It only hides the window: the store is not encrypted with it, and it cannot be
@@ -146,12 +154,15 @@ Limits as they are:
 - A plain `ws://` address is dialed only to a loopback host; a relay on another machine
   belongs behind TLS and is dialed as `wss://`.
 - The store and `app.json` are not encrypted: whoever can read the data directory holds the
-  identity, the keys and the messages.
+  identity, the keys and the messages. With message previews on, macOS also keeps the text
+  of each notification in its own notification database, outside the data directory.
 - One device per identity: when the same identity logs in elsewhere, the relay closes the
   older connection and the app says so instead of reconnecting.
-- One-to-one chats, text only. No notifications, no files, no groups. The notification,
-  Dock badge, auto-download, download folder and cache settings are saved and shown but
-  take effect only with the cards that bring those features.
+- One-to-one chats, text only. No files, no groups. The auto-download, download folder
+  and cache settings are saved and shown but take effect only with the cards that bring
+  those features.
+- A chat is muted until it is unmuted: there are no timed mutes. Pinned chats keep the
+  order in which they were pinned; they are not reordered by dragging.
 - No security audit.
 
 ## License

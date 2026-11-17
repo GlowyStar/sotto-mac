@@ -31,7 +31,8 @@ struct SottoApp: App {
                 Button("Add Contact...") { model.modal = .addContact }.keyboardShortcut("n")
             }
             CommandGroup(after: .textEditing) {
-                Button("Search") { model.searchFocusTick += 1 }.keyboardShortcut("f")
+                Button("Search") { model.searchFocusTick += 1 }.keyboardShortcut("f", modifiers: [.command, .shift])
+                Button("Search in Chat") { model.openChatSearch() }.keyboardShortcut("f")
             }
             if model.messenger == nil {
                 mockMenu
@@ -57,7 +58,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated {
             AppModel.shared.applyTheme()
             AppModel.shared.watchActivity()
+            AppModel.shared.alerts?.refresh(ask: AppModel.shared.settings.notifications)
         }
+    }
+
+    /// The drafts typed in the last moment are written before the app quits.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            _ = Task {
+                await AppModel.shared.saveDraftsNow()
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
