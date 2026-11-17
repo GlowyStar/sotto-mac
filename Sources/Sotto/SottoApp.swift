@@ -33,6 +33,9 @@ struct SottoApp: App {
             CommandGroup(after: .textEditing) {
                 Button("Search") { model.searchFocusTick += 1 }.keyboardShortcut("f", modifiers: [.command, .shift])
                 Button("Search in Chat") { model.openChatSearch() }.keyboardShortcut("f")
+                Button("Attach...") { model.attachMenuOpen = true }
+                    .keyboardShortcut("a", modifiers: [.command, .shift])
+                    .disabled(model.openChatID == nil)
             }
             if model.messenger == nil {
                 mockMenu

@@ -204,6 +204,53 @@ struct MessengerRelayTests {
         await peer.stop()
     }
 
+    @Test func aFileAboveItsSizeWaitsForDownloadAndANotSentFileIsSentAgain() async throws {
+        let relay = try await RealRelay()
+        defer { relay.stop() }
+        let received = folder.url.appendingPathComponent("received")
+        let messenger = try Messenger(directory: appDirectory, relay: relay.url, receivedFiles: received)
+        await messenger.start()
+        var settings = AppSettings()
+        settings.autoDownloadFiles = 0
+        try await messenger.saveSettings(settings)
+        let appID = try await messenger.createIdentity()
+        try folder.open("peer").addContact(appID)
+        let peerID = try folder.userID("peer")
+        try await messenger.addContact(name: "peer", userID: peerID)
+        try await waitFor(messenger) { $0.link == .connected }
+
+        // The peer never logged in: the relay refuses the blob with UNKNOWN_RECIPIENT.
+        let outgoing = folder.url.appendingPathComponent("notes.txt")
+        try Data("sent twice".utf8).write(to: outgoing)
+        let first = try await messenger.sendFile(outgoing, caption: "again", to: peerID)
+        try await waitFor(messenger) { $0.chats.first?.messages.last?.file?.state == .notSent }
+        let failed = try #require(try await chat(messenger)?.messages.last)
+        #expect(failed.id == first && failed.failure != nil && failed.file?.savedAs == outgoing.path)
+
+        let peerFiles = folder.url.appendingPathComponent("peer-received")
+        let peer = try await run(folder.open("peer"), URLSessionDialer(), url: relay.url, receivedFiles: peerFiles)
+        try await until { try await isRegistered(peer.transport) }
+        let again = try await messenger.resendFile(first)
+        let saved = try await nextFile(peer.transport) { $0.state == .received }
+        #expect(try Data(contentsOf: saved.path!) == Data("sent twice".utf8))
+        try await waitFor(messenger) { $0.chats.first?.messages.map(\.id) == [again] }
+        #expect(try await chat(messenger)?.messages.first?.text == "again")
+
+        let incoming = folder.url.appendingPathComponent("waits.txt")
+        try Data("click me".utf8).write(to: incoming)
+        try await peer.transport.sendFile(try Identity.decodeUserID(appID), file: incoming)
+        try await waitFor(messenger) { $0.chats.first?.messages.last?.file?.state == .offered }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let offered = try #require(try await chat(messenger)?.messages.last)
+        #expect(offered.file?.state == .offered, "a file above the size waits")
+        try await messenger.download(offered.id)
+        try await waitFor(messenger) { $0.chats.first?.messages.last?.file?.state == .received }
+        let file = try #require(try await chat(messenger)?.messages.last?.file)
+        #expect(try String(contentsOfFile: file.savedAs!, encoding: .utf8) == "click me")
+        await messenger.close()
+        await peer.stop()
+    }
+
     @Test func aTextWithoutASessionWaitsOfflineAcrossARestartAndLeavesOnceConnected() async throws {
         let relay = try await RealRelay()
         defer { relay.stop() }

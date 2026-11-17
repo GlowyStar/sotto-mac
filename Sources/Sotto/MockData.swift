@@ -1,9 +1,13 @@
 import CryptoKit
 import Foundation
+import ImageIO
+import SottoCore
+import UniformTypeIdentifiers
 
 /// Mock contacts and chats that exercise the layout: short and long messages, several lines,
 /// a link, emoji, Russian and English, groups, several days, unread counts, an empty chat,
-/// outgoing messages in both states, pinned, muted and archived chats and a draft.
+/// outgoing messages in both states, pinned, muted and archived chats and a draft; two chats
+/// hold photos and files in every state, drawn in code into a temporary folder.
 @MainActor
 enum MockData {
     /// A stable 64-hex id made from a name.
@@ -130,8 +134,141 @@ enum MockData {
             $0.archived = true
             $0.muted = true
         }
+        add("Vera Lindqvist", added: day(6, 9, 0), photoMessages())
+        add("Leo Fischer", added: day(6, 9, 0), fileMessages())
+
         model.contacts = contacts
         model.messages = messages
         model.drafts = [id(for: "Tom Becker"): "Let me check the schedule first"]
+    }
+
+    // MARK: Photos and files
+
+    /// The folder of the demo pictures and files, outside the repository and the data folders.
+    static let mediaFolder = FileManager.default.temporaryDirectory.appendingPathComponent("sotto-demo-media", isDirectory: true)
+
+    /// A landscape drawn in code: sky, sun and two hills in the colours of `hue`.
+    static func picture(_ name: String, width: Int, height: Int, hue: Double) -> URL {
+        let url = mediaFolder.appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        try? FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return url }
+        func colour(_ h: Double, _ s: Double, _ b: Double) -> CGColor {
+            let r = hsb(h.truncatingRemainder(dividingBy: 1), s, b)
+            return CGColor(colorSpace: space, components: [r.0, r.1, r.2, 1])!
+        }
+        let w = CGFloat(width), h = CGFloat(height)
+        let sky = CGGradient(colorsSpace: space, colors: [colour(hue, 0.25, 1), colour(hue + 0.05, 0.6, 0.85)] as CFArray, locations: [0, 1])!
+        context.drawLinearGradient(sky, start: CGPoint(x: 0, y: h), end: CGPoint(x: 0, y: h * 0.3), options: [.drawsAfterEndLocation])
+        context.setFillColor(colour(0.12, 0.35, 1))
+        context.fillEllipse(in: CGRect(x: w * 0.62, y: h * 0.58, width: min(w, h) * 0.22, height: min(w, h) * 0.22))
+        for (index, level) in [0.42, 0.28].enumerated() {
+            context.setFillColor(colour(hue + 0.35, 0.5, 0.55 - Double(index) * 0.18))
+            context.beginPath()
+            context.move(to: CGPoint(x: 0, y: 0))
+            context.addLine(to: CGPoint(x: 0, y: h * level))
+            context.addCurve(
+                to: CGPoint(x: w, y: h * (level - 0.08)),
+                control1: CGPoint(x: w * (0.3 + 0.2 * Double(index)), y: h * (level + 0.22)),
+                control2: CGPoint(x: w * 0.6, y: h * (level - 0.2)))
+            context.addLine(to: CGPoint(x: w, y: 0))
+            context.closePath()
+            context.fillPath()
+        }
+        if let image = context.makeImage(),
+            let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
+        {
+            CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+            CGImageDestinationFinalize(destination)
+        }
+        return url
+    }
+
+    private static func hsb(_ h: Double, _ s: Double, _ b: Double) -> (CGFloat, CGFloat, CGFloat) {
+        let i = Int(h * 6) % 6, f = h * 6 - Double(Int(h * 6)), p = b * (1 - s), q = b * (1 - f * s), t = b * (1 - (1 - f) * s)
+        let (r, g, bl) = [(b, t, p), (q, b, p), (p, b, t), (p, q, b), (t, p, b), (b, p, q)][i]
+        return (CGFloat(r), CGFloat(g), CGFloat(bl))
+    }
+
+    /// A small file of the demo; `size` is what the bubble says, the bytes are few.
+    static func document(_ name: String) -> URL {
+        let url = mediaFolder.appendingPathComponent(name)
+        try? FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: url.path) { try? Data("demo".utf8).write(to: url) }
+        return url
+    }
+
+    /// A file of `size` bytes that takes no room on the disk, for the "too large" row.
+    static func sparse(_ name: String, size: Int) -> URL {
+        let url = mediaFolder.appendingPathComponent(name)
+        try? FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        if let handle = try? FileHandle(forWritingTo: url) {
+            try? handle.truncate(atOffset: UInt64(size))
+            try? handle.close()
+        }
+        return url
+    }
+
+    private static func photo(
+        _ url: URL, _ state: FileState, size: Int, done: Double = 0, local: Bool = true
+    ) -> ChatFile {
+        let made = Thumbnail.make(url)
+        let total = Blob.blobLength(size)
+        return ChatFile(
+            name: url.lastPathComponent, size: size, mediaType: "image/jpeg", state: state,
+            done: Int(Double(total) * done), total: total, savedAs: local ? url.path : nil,
+            width: made?.width ?? 0, height: made?.height ?? 0, thumbnail: made?.jpeg ?? Data())
+    }
+
+    private static func file(_ name: String, _ mediaType: String, _ state: FileState, size: Int, done: Double = 0) -> ChatFile {
+        let total = Blob.blobLength(size)
+        let local = state == .received || state == .sent || state == .sending
+        return ChatFile(
+            name: name, size: size, mediaType: mediaType, state: state, done: Int(Double(total) * done), total: total,
+            savedAs: local ? document(name).path : nil, result: state == .notReceived ? "BAD_BLOB" : nil)
+    }
+
+    private static func media(
+        _ id: String, out: Bool, _ date: Date, _ file: ChatFile, caption text: String = "", _ state: MessageState = .stored
+    ) -> Message {
+        Message(id: id, outgoing: out, text: text, date: date, state: state, file: file)
+    }
+
+    static func photoMessages() -> [Message] {
+        let lake = picture("lake.jpg", width: 1600, height: 1067, hue: 0.55)
+        let dusk = picture("dusk.jpg", width: 1200, height: 900, hue: 0.02)
+        let tower = picture("tower.jpg", width: 800, height: 1200, hue: 0.7)
+        let field = picture("field.jpg", width: 1500, height: 1000, hue: 0.12)
+        let wide = picture("panorama.jpg", width: 2400, height: 600, hue: 0.45)
+        let failed = "The file was not sent (QUOTA_FULL)."
+        return [
+            media("vera-1", out: false, day(1, 18, 2), photo(lake, .received, size: 1_843_200)),
+            media("vera-2", out: false, day(1, 18, 3), photo(dusk, .received, size: 954_000), caption: "Вид с балкона вечером 🌅"),
+            media("vera-3", out: false, day(1, 18, 4), photo(field, .offered, size: 24_500_000, local: false)),
+            media("vera-4", out: false, day(1, 18, 4), photo(tower, .receiving, size: 3_400_000, done: 0.4, local: false)),
+            media("vera-5", out: false, day(1, 18, 5), photo(wide, .notAvailable, size: 2_100_000, local: false)),
+            media("vera-6", out: true, ago(30), photo(field, .sent, size: 1_200_000), caption: "Look at this one"),
+            media("vera-7", out: true, ago(20), photo(tower, .sent, size: 3_400_000)),
+            media("vera-8", out: true, ago(5), photo(lake, .notSent, size: 1_843_200), .failed(failed)),
+            media("vera-9", out: true, ago(1), photo(dusk, .sending, size: 954_000, done: 0.6), .waiting),
+        ]
+    }
+
+    static func fileMessages() -> [Message] {
+        [
+            media("leo-1", out: false, day(2, 10, 0), file("Report Q3.pdf", "application/pdf", .received, size: 1_400_000), caption: "The report for the third quarter"),
+            media("leo-2", out: false, day(2, 10, 1), file("Holiday photos archive.zip", "application/zip", .offered, size: 48_300_000)),
+            media("leo-3", out: false, day(2, 10, 2), file("Interview.mov", "video/quicktime", .receiving, size: 1_400_000, done: 0.3)),
+            media("leo-4", out: false, day(2, 10, 3), file("Contract.docx", "", .notReceived, size: 84_000)),
+            media("leo-5", out: false, day(2, 10, 4), file("Old slides.key", "", .notAvailable, size: 5_200_000)),
+            media("leo-6", out: true, ago(40), file("notes.txt", "text/plain", .sent, size: 2_300)),
+            media("leo-7", out: true, ago(10), file("Budget 2027 final version.xlsx", "", .notSent, size: 312_000), caption: "Second draft", .failed("The file was not sent (UNKNOWN_RECIPIENT).")),
+            media("leo-8", out: true, ago(2), file("Design.sketch", "", .sending, size: 12_600_000, done: 0.35), .waiting),
+        ]
     }
 }

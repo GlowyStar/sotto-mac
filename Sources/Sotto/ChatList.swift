@@ -325,7 +325,7 @@ struct ChatRow: View {
                 + Text(oneLine(draft)).foregroundColor(color)
         }
         guard let message else { return Text("No messages yet").foregroundColor(color) }
-        return Text(oneLine(message.text)).foregroundColor(color)
+        return Text(oneLine(message.preview)).foregroundColor(color)
     }
 
     private func oneLine(_ text: String) -> String {

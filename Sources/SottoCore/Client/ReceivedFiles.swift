@@ -1,3 +1,4 @@
+import CoreServices
 import Foundation
 
 /// Received files on disk by docs/protocol.md, section 32.2: the name of the peer never
@@ -19,7 +20,8 @@ public enum ReceivedFiles {
     ///
     /// The name is the sent one when it passes `isSafeName`, else one of the client's own; a
     /// name that is taken gets a number, ` (1)` and up, in front of its suffix. A write that
-    /// fails leaves no file.
+    /// fails leaves no file. The file is marked as downloaded from elsewhere (quarantine), so
+    /// macOS asks before it runs anything the peer sent.
     public static func save(_ data: Data, named fileName: String, into folder: URL) throws -> URL {
         try FileManager.default.createDirectory(
             at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: folderMode]
@@ -60,6 +62,13 @@ public enum ReceivedFiles {
                 unlink(path.path)
                 throw StoreError.system(path: path.path, errno: written ? errno : failure)
             }
+            var marked = URLResourceValues()
+            marked.quarantineProperties = [
+                kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
+                kLSQuarantineAgentNameKey as String: "Sotto",
+            ]
+            var quarantined = path
+            try? quarantined.setResourceValues(marked)
             return path
         }
     }

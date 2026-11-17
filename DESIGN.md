@@ -553,6 +553,19 @@ Estimated or Sotto's own, worth a look by the owner:
 - Notifications: one per chat for each batch of new messages, about the newest (so the messages that waited on the relay while the app was closed make one per chat, not a burst), grouped by chat; reading a chat removes its notifications; a click opens the chat; while the app is in front, a notification still shows for another chat.
 - The highlight fades in over 200ms and out over 500ms (the reference timings are the 500 and 3000ms of the hold).
 
+### Added with photos and files (SOTTO-32, 2026-11-17)
+
+Built as 13 to 15 say; departures and estimates of the build, worth a look by the owner:
+- A photo is a message whose media type is a picture type the Mac draws (jpeg, png, gif, heic, heif, webp, tiff, bmp). "Send as file" sends the picture with an empty media type (allowed by protocol section 32.1), so it shows as a file at the other end, also in another Sotto. A photo from a client that sends no image size (the Python client) has a 200 x 200 frame until the picture is downloaded, then the size of the picture: the layout moves once.
+- The thumbnail is a JPEG of at most 160 on its longest side (smaller until it fits 16384 bytes), quality 0.7.
+- Cancel of a sending deletes the message (13.1 "cancel removes the pending message"), which ends the upload and deletes its blob at the relay. A file handed to the app while it is not logged in shows at once as sending with a cross and no ring; its message is made after the login.
+- Retry of a file not sent is a new upload from the file it was read from (protocol section 33.5: a new blob); the old message is deleted. 13.1 "resumes from the last stored offset" cannot hold: a not-sent upload is deleted with its blob. When that file has moved, a toast says so.
+- A download pause keeps the piece on its way: the ring stops one piece later.
+- The caption of a photo wraps within the photo's width; the rule of 13.1 for a caption wider than the photo is not built.
+- The viewer opens and closes with a fade and a 0.97 scale, not the grow from the bubble; zoom is a pinch, a double click (fit and 100%) and Cmd+plus, Cmd+minus, Cmd+0; the scroll wheel does not zoom; the context menu and the ellipsis menu are the system menu; the controls hide after 1.1 s without movement.
+- The drop card splits into two zones only when the dragged items declare a picture type; Finder may declare only a file URL, and then one card shows.
+- The attach menu has a 6 blur shadow (the box shadow is 12); the menu rows are 34 high.
+- Not built: "Ask where to save each file", the storage figures and "Clear cache" of 11.5.
 
 ## 10. Additions to tokens and existing sections
 

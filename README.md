@@ -14,8 +14,8 @@ interoperate with sotto's command-line client byte for byte.
 - Files (part 3 of the protocol) are in the core and the command-line tool: a file of up to
   100 MiB goes to a contact encrypted with the blob cipher, uploaded and downloaded in
   pieces that resume after a cut connection or a restart; `scripts/interop.py` sends files
-  both ways with sotto's client, two of them cut in the middle. The app does not show
-  files yet.
+  both ways with sotto's client, two of them cut in the middle. The app sends and shows
+  photos and files (`scripts/app-interop.py` checks both ways, also cut in the middle).
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
 
@@ -123,6 +123,7 @@ Launch arguments of the app:
 | `--dump` | with `--data-dir`: prints the chats of that store as JSON and exits |
 | `--demo` | mock data and no store, with a "Mock" menu; `--first-launch` adds the first-launch screen |
 | `--send <name> <text>` | a scripting aid, any number of times: once connected, sends the text to the contact of that local name through the same action as the compose bar |
+| `--send-file <name> <path>` | the same for a file, through the action of the send box; a picture goes as a photo |
 
 A text sent to a contact without a session (nobody has written yet) waits in the store
 with a clock until a connection fetches the contact's keys, also across a restart. A
@@ -143,13 +144,32 @@ app: under `swift run` none are posted. Search finds chats by name and messages 
 across chats from the list and inside the open chat (Cmd+F); the emoji button opens the
 macOS character palette. All of this stays on the Mac: nothing new is sent to the relay.
 
+Photos and files: the paperclip of the compose bar (or Cmd+Shift+A) offers Photo or File,
+files can be dropped on the chat, and a picture or files can be pasted into the compose
+field; a send box shows them with a caption field before they go, each as its own message.
+A picture goes as a photo with its size and a small JPEG preview made on the Mac, unless
+"Send as file" is checked, which sends it with an empty media type so that it shows as a
+file. A transfer shows a ring with its progress: a click on the ring cancels a sending
+(the message is deleted, which ends its upload) or pauses a download (the bytes stay). A
+received photo or file within the auto-download size of Settings, Data and storage, is
+saved into the download folder of the settings (Downloads by default) by itself; a larger
+one waits for a click. Transfers go on after a reconnect and after a restart without a
+click. A file that was not sent is sent again from the file it was read from with a
+click on its circle: a new upload, as the protocol says. A photo opens in a viewer (zoom,
+the other photos of the chat with the arrow keys, "Save as..."); a file opens with the
+system only on a click, and every received file is marked as downloaded (quarantine), so
+macOS asks before it runs anything a contact sent. A picture pasted into the field is kept as a PNG in the folder
+`Pasted` of the data directory, so that the photo can be shown and sent again.
+
 A local passcode locks the window at launch, after the auto-lock time, on Cmd+L and on
 sleep. It only hides the window: the store is not encrypted with it, and it cannot be
 recovered.
 
 The end-to-end check of the app (a relay on a free port; the Python client writing to the
 app while it runs and while it is closed; the app sending with `--send` to the running
-Python client, right after a restart, and while the Python client is away; then a dump and
+Python client, right after a restart, and while the Python client is away; a photo and a
+file each way, compared byte for byte; a large upload and a large download of the app, each
+cut by killing the app in the middle and ended whole after its next start; then a dump and
 a snapshot of its store):
 
 ```sh
@@ -168,9 +188,10 @@ Limits as they are:
   of each notification in its own notification database, outside the data directory.
 - One device per identity: when the same identity logs in elsewhere, the relay closes the
   older connection and the app says so instead of reconnecting.
-- One-to-one chats, text only. No files, no groups. The auto-download, download folder
-  and cache settings are saved and shown but take effect only with the cards that bring
-  those features.
+- One-to-one chats with texts, photos and files. No groups, no albums. "Ask where to save
+  each file" and the storage figures and "Clear cache" of Data and storage are shown but do
+  nothing yet. A new auto-download size or download folder holds for the files that arrive
+  after the change.
 - A chat is muted until it is unmuted: there are no timed mutes. Pinned chats keep the
   order in which they were pinned; they are not reordered by dragging.
 - No security audit.

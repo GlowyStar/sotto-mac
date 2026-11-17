@@ -63,6 +63,8 @@ public enum TransportEvent: Sendable, Equatable {
 public actor Transport {
     public typealias Jitter = @Sendable (Double) -> Double
     public typealias Sleep = @Sendable (Double) async throws -> Void
+    /// Whether a file that arrives is downloaded by itself; the others wait for `download`.
+    public typealias AutoDownload = @Sendable (Sotto_Attachment) -> Bool
 
     public static let retryMaxSeconds = 60.0
     public static let frameRefillSeconds = 1.0
@@ -98,9 +100,9 @@ public actor Transport {
     private var requests: [Request] = []
     private var backOffs: [Task<Void, Never>] = []
     private var stopping = false
-    /// The folder for received files; every offered file is downloaded into it by itself
-    /// (section 33.3). Nil leaves offered files offered.
-    private let receivedFiles: URL?
+    /// The folder for received files (section 33.3); nil leaves every file offered.
+    private var receivedFiles: URL?
+    private var autoDownload: AutoDownload
     /// The `blob_max_bytes` of the last LoggedIn: 0 before a login and for a relay without
     /// the blob frames (section 28.2).
     public private(set) var blobMaxBytes = 0
@@ -128,6 +130,7 @@ public actor Transport {
         url: String,
         insecure: Bool = false,
         receivedFiles: URL? = nil,
+        autoDownload: @escaping AutoDownload = { _ in true },
         dialer: any RelayDialer = URLSessionDialer(),
         jitter: @escaping Jitter = Transport.evenJitter,
         sleep: @escaping Sleep = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
@@ -139,6 +142,7 @@ public actor Transport {
         self.url = parsed
         self.client = client
         self.receivedFiles = receivedFiles
+        self.autoDownload = autoDownload
         self.dialer = dialer
         self.jitter = jitter
         self.sleep = sleep
@@ -349,7 +353,8 @@ public actor Transport {
 
     /// Steps 1 and 2 of section 33.2 once logged in: reads the file once, makes its blob and
     /// commits the upload; the upload goes on by itself and reports `.file` events, also
-    /// after a reconnect or a restart.
+    /// after a reconnect or a restart. A nil `mediaType` is taken from the name's extension;
+    /// `width`, `height` and `thumbnail` are the fields of section 32.1.
     ///
     /// - Throws: a check of section 33.1 (`SessionError.notAContact`,
     ///   `FileError.filesUnsupported`, `FileError.fileTooLarge`); `InvalidInputError` when
@@ -357,23 +362,61 @@ public actor Transport {
     ///   when the file cannot be read.
     /// - Returns: The blob id that the `.file` events of the file name.
     @discardableResult
-    public func sendFile(_ contact: Data, file: URL, caption: String = "") async throws -> Data {
+    public func sendFile(
+        _ contact: Data, file: URL, caption: String = "", mediaType: String? = nil,
+        width: Int = 0, height: Int = 0, thumbnail: Data = Data()
+    ) async throws -> Data {
         try await waitUntilReady()
+        // A sending cancelled while it waited for the login makes nothing.
+        try Task.checkCancellation()
         let size = try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int ?? 0
         try client.checkFile(contact, size: size, blobMaxBytes: blobMaxBytes)
         let data = try Data(contentsOf: file, options: .mappedIfSafe)
-        let mediaType = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? ""
+        let mediaType = mediaType ?? UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? ""
         let upload = try client.startUpload(
             contact,
             file: data,
             blobMaxBytes: blobMaxBytes,
             fileName: Self.cut(file.lastPathComponent, to: Envelope.maxFileNameBytes),
             mediaType: mediaType.utf8.count <= Envelope.maxMediaTypeBytes ? mediaType : "",
-            caption: caption
+            caption: caption,
+            width: width,
+            height: height,
+            thumbnail: thumbnail.count <= Envelope.maxThumbnailBytes ? thumbnail : Data(),
+            localPath: file.path
         )
         report(upload, .sending)
         startTransfers()
         return upload.blobID
+    }
+
+    /// Downloads a received file that is offered, paused or could not be received, from the
+    /// bytes it holds; without a connection it starts after the next login.
+    public func download(_ position: Int64) throws {
+        guard receivedFiles != nil, let file = try client.store.file(position), file.incoming,
+            [.offered, .receiving, .notReceived].contains(file.state)
+        else {
+            return
+        }
+        try client.beginDownload(position)
+        eventSink.yield(.file(Self.update(file, .receiving, done: file.held, total: Blob.blobLength(Int(file.attachment.size)))))
+        startTransfers()
+    }
+
+    /// Stops a download until `download` is asked again; the bytes it holds stay. A piece on
+    /// its way is still saved, so the answers of the relay keep their order (section 7.4).
+    public func pauseDownload(_ position: Int64) throws {
+        guard let file = try client.store.file(position), file.state == .receiving else {
+            return
+        }
+        try client.pauseDownload(position)
+        eventSink.yield(.file(Self.update(file, .offered, done: file.held)))
+    }
+
+    /// The folder for received files and the rule for files that arrive from now on.
+    public func setDownloads(folder: URL?, autoDownload: @escaping AutoDownload) {
+        receivedFiles = folder
+        self.autoDownload = autoDownload
     }
 
     /// L2 of section 20.6 with a fresh bundle; returns the GAP of the session that left.
@@ -545,7 +588,12 @@ public actor Transport {
             try await socket.send(ack.serializedBytes())
         }
         eventSink.yield(.incoming(sender: deliver.sender, received: received))
-        if received.attachment != nil {
+        if let attachment = received.attachment, receivedFiles != nil, autoDownload(attachment),
+            let file = try client.store.files().last(where: {
+                $0.incoming && $0.contact == deliver.sender && $0.messageID == deliver.messageID
+            })
+        {
+            try client.beginDownload(file.position)
             startTransfers()
         }
     }
@@ -769,7 +817,7 @@ public actor Transport {
         }
         if blobMaxBytes == 0, receivedFiles != nil {
             let result = FileError.filesUnsupported.result
-            for file in try client.downloads() {
+            for file in try client.downloads() where file.state == .receiving {
                 eventSink.yield(.file(Self.update(file, try client.failDownload(file.position, result: result), result: result)))
             }
         }
@@ -786,7 +834,7 @@ public actor Transport {
         guard let folder = receivedFiles else {
             return
         }
-        for file in (try? client.downloads()) ?? [] {
+        for file in (try? client.downloads()) ?? [] where file.state == .receiving {
             track(.download(file.position)) { try await $0.download(file, into: folder) }
         }
     }
@@ -888,8 +936,14 @@ public actor Transport {
         let attachment = file.attachment
         let length = Blob.blobLength(Int(attachment.size))
         var held = file.held
+        guard try client.store.file(file.position)?.state == .receiving else {
+            return
+        }
         try client.beginDownload(file.position)
         while held < length {
+            guard try client.store.file(file.position)?.state == .receiving else {
+                return
+            }
             let asked = min(Frames.blobChunkBytes, length - held)
             var fetch = Sotto_ClientFrame()
             fetch.fetchBlob.blobID = attachment.blobID

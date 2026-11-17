@@ -1,4 +1,6 @@
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 @testable import SottoCore
 import Testing
 
@@ -13,6 +15,10 @@ final class Tally: @unchecked Sendable {
             counts[kind, default: 0] += 1
             return counts[kind]!
         }
+    }
+
+    func count(_ kind: String) -> Int {
+        lock.withLock { counts[kind, default: 0] }
     }
 }
 
@@ -47,6 +53,31 @@ func nextFile(_ transport: Transport, _ matches: @escaping @Sendable (FileUpdate
 /// Bytes that differ from piece to piece, so that a piece in the wrong place shows.
 private func pattern(_ count: Int) -> Data {
     Data((0..<count).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ $0 >> 8) })
+}
+
+/// A PNG of the given size, noisy when `noise` so that it compresses badly.
+func testPicture(width: Int, height: Int, noise: Bool = false) throws -> Data {
+    let context = try #require(CGContext(
+        data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ))
+    context.setFillColor(red: 0.3, green: 0.6, blue: 0.9, alpha: 1)
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    if noise {
+        var seed: UInt64 = 7
+        for _ in 0..<20_000 {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            let value = Double(seed >> 40 & 0xff) / 255
+            context.setFillColor(red: value, green: 1 - value, blue: value / 2, alpha: 1)
+            context.fill(CGRect(x: Int(seed >> 8 % UInt64(width)) % width, y: Int(seed >> 24) % height, width: 9, height: 9))
+        }
+    }
+    let image = try #require(context.makeImage())
+    let data = NSMutableData()
+    let destination = try #require(CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil))
+    CGImageDestinationAddImage(destination, image, nil)
+    #expect(CGImageDestinationFinalize(destination))
+    return data as Data
 }
 
 /// Two clients on the scripted relay, Bob with a folder for received files.
@@ -113,6 +144,91 @@ struct FileTests {
         #expect(try await alice.transport.withClient { try $0.store.uploads() }.isEmpty)
         await alice.stop()
         await bob.stop()
+    }
+
+    @Test func fileAboveItsAutoDownloadSizeWaitsForAClickAndAPauseKeepsItsBytes() async throws {
+        let pair = Pair()
+        let (alice, bob) = try await pair.start()
+        let bobKey = try pair.key("bob")
+        await bob.transport.setDownloads(folder: pair.received, autoDownload: { $0.size < 1000 })
+        let tally = Tally()
+        // The third piece comes late once, while the download is paused.
+        await pair.relay.edit(toClient: { link, message in
+            if link.identity == bobKey, serverKind(message) == "blob_data", tally.next("data") == 3 {
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+            return [.message(message)]
+        })
+        let content = pattern(400_000)
+
+        try await alice.transport.sendFile(bobKey, file: pair.file("large.bin", content))
+        try await nextIncoming(bob.transport)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let file = try #require(try await bob.transport.withClient { try $0.store.files().first })
+        let position = file.position
+        #expect(file.state == .offered && file.held == 0)
+        #expect(await fetchOffsets(pair.relay).isEmpty, "a file above the size is not fetched by itself")
+
+        try await bob.transport.download(position)
+        try await nextFile(bob.transport) { $0.state == .receiving && $0.done == 2 * Frames.blobChunkBytes }
+        try await bob.transport.pauseDownload(position)
+        try await Task.sleep(nanoseconds: 800_000_000)
+        let paused = try #require(try await bob.transport.withClient { try $0.store.file(position) })
+        #expect(paused.state == .offered && paused.held == 3 * Frames.blobChunkBytes, "a pause keeps the bytes")
+        #expect(await fetchOffsets(pair.relay).count == 3, "nothing more is fetched while paused")
+
+        try await bob.transport.download(position)
+        let received = try await nextFile(bob.transport) { $0.state == .received || $0.state == .notReceived }
+        #expect(try Data(contentsOf: received.path!) == content)
+        #expect(await fetchOffsets(pair.relay).filter { $0.offset == 0 }.count == 1, "the download goes on from its bytes")
+
+        try await alice.transport.sendFile(bobKey, file: pair.file("small.txt", Data("small".utf8)))
+        let small = try await nextFile(bob.transport) { $0.state == .received || $0.state == .notReceived }
+        #expect(small.fileName == "small.txt" && small.state == .received, "a file within the size downloads by itself")
+        await alice.stop()
+        await bob.stop()
+    }
+
+    @Test func photoLeavesWithItsSizeThumbnailAndLocalPath() async throws {
+        let pair = Pair()
+        let (alice, bob) = try await pair.start()
+        let picture = try pair.file("picture.png", testPicture(width: 1200, height: 800))
+        let made = try #require(Thumbnail.make(picture))
+        #expect(made.width == 1200 && made.height == 800 && made.jpeg.count <= Envelope.maxThumbnailBytes)
+
+        try await alice.transport.sendFile(
+            try pair.key("bob"), file: picture, mediaType: "image/png", width: made.width, height: made.height, thumbnail: made.jpeg
+        )
+        try await nextFile(bob.transport) { $0.state == .received }
+        let got = try #require(try await bob.transport.withClient { try $0.store.files().first })
+        #expect(got.attachment.width == 1200 && got.attachment.height == 800 && got.attachment.mediaType == "image/png")
+        #expect(Thumbnail.decode(got.attachment.thumbnail) != nil)
+        let sent = try #require(try await alice.transport.withClient { try $0.store.files().first })
+        #expect(sent.state == .sent && sent.savedAs == picture.path, "a sent file keeps where it was read from")
+        await alice.stop()
+        await bob.stop()
+    }
+
+    @Test func thumbnailIsAJPEGWithinItsLimitAndOnlyAJPEGDecodes() throws {
+        let folder = Folder()
+        try FileManager.default.createDirectory(at: folder.url, withIntermediateDirectories: true)
+        let large = folder.url.appendingPathComponent("large.png")
+        try testPicture(width: 4000, height: 3000, noise: true).write(to: large)
+        let made = try #require(Thumbnail.make(large))
+        #expect(made.width == 4000 && made.height == 3000)
+        #expect(made.jpeg.count <= Envelope.maxThumbnailBytes && Thumbnail.decode(made.jpeg) != nil)
+        // A JPEG that claims a large picture is decoded small.
+        let source = try #require(CGImageSourceCreateWithData(try testPicture(width: 2000, height: 1000) as CFData, nil))
+        let image = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        let big = try #require(Thumbnail.jpeg(image))
+        let decoded = try #require(Thumbnail.decode(big))
+        #expect(decoded.width <= Thumbnail.sides[0])
+        #expect(Thumbnail.decode(try testPicture(width: 20, height: 20)) == nil, "a PNG thumbnail is not shown")
+        #expect(Thumbnail.decode(Data("not a picture".utf8)) == nil)
+        #expect(Thumbnail.decode(Data()) == nil)
+        let text = folder.url.appendingPathComponent("note.txt")
+        try Data("text".utf8).write(to: text)
+        #expect(Thumbnail.make(text) == nil)
     }
 
     @Test func uploadCutInTheMiddleGoesOnFromTheStoredLength() async throws {
@@ -187,6 +303,8 @@ struct FileTests {
 
         try await alice.transport.sendFile(try pair.key("bob"), file: pair.file("restart.bin", content))
         try await nextFile(alice.transport) { $0.state == .sending && $0.done == Frames.blobChunkBytes }
+        // Stopped only once the answer is lost, so the next Alice does not lose hers instead.
+        try await until { tally.count("stored") >= 3 }
         await alice.stop()
         alice = try await pair.alice()
         #expect(try await nextFile(alice.transport) { $0.state == .sent || $0.state == .notSent }.state == .sent)
@@ -382,6 +500,7 @@ struct FileTests {
         let second = try ReceivedFiles.save(Data("two".utf8), named: "note.txt", into: target)
         #expect(first.lastPathComponent == "note.txt" && second.lastPathComponent == "note (1).txt")
         #expect(try String(contentsOf: first, encoding: .utf8) == "one")
+        #expect(try first.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties != nil, "macOS asks first")
 
         let outside = folder.url.appendingPathComponent("outside.txt")
         try FileManager.default.createSymbolicLink(at: target.appendingPathComponent("link.txt"), withDestinationURL: outside)

@@ -15,6 +15,18 @@ enum Snapshot {
         let setUp: (AppModel) -> Void
     }
 
+    private static func open(_ model: AppModel, _ name: String) {
+        if let contact = model.contacts.first(where: { $0.name == name }) { model.openChat(contact.id) }
+    }
+
+    private static func photos(_ model: AppModel) { open(model, "Vera Lindqvist") }
+    private static func files(_ model: AppModel) { open(model, "Leo Fischer") }
+
+    private static func view(_ model: AppModel, _ messageID: String) {
+        photos(model)
+        model.viewer = ViewerItem(chatID: model.openChatID ?? "", messageID: messageID)
+    }
+
     private static func openRich(_ model: AppModel) {
         if let anna = model.contacts.first(where: { $0.name == "Anna Petrova" }) { model.openChat(anna.id) }
     }
@@ -121,6 +133,68 @@ enum Snapshot {
             model.notificationsDenied = true
             page(model, .notifications)
         },
+        // SOTTO-32: photos and files in every state, attaching, the viewer.
+        Shot(name: "media-photos", size: CGSize(width: 900, height: 2300)) { photos($0) },
+        Shot(name: "media-photos-dark", size: CGSize(width: 900, height: 2300), dark: true) { photos($0) },
+        Shot(name: "media-files", size: CGSize(width: 900, height: 1000)) { files($0) },
+        Shot(name: "media-files-dark", size: CGSize(width: 900, height: 1000), dark: true) { files($0) },
+        Shot(name: "media-offline", size: CGSize(width: 900, height: 1000)) { model in
+            files(model)
+            model.connection = .connecting
+        },
+        Shot(name: "media-offline-dark", dark: true) { model in
+            photos(model)
+            model.connection = .connecting
+        },
+        Shot(name: "media-narrow", size: CGSize(width: 380, height: 700)) { photos($0) },
+        Shot(name: "attach-menu") { model in
+            files(model)
+            model.attachMenuOpen = true
+        },
+        Shot(name: "attach-menu-dark", dark: true) { model in
+            photos(model)
+            model.attachMenuOpen = true
+        },
+        Shot(name: "send-photo", size: CGSize(width: 900, height: 700)) { model in
+            photos(model)
+            model.stage([MockData.picture("dusk.jpg", width: 1200, height: 900, hue: 0.02)])
+        },
+        Shot(name: "send-photo-as-file-dark", dark: true) { model in
+            photos(model)
+            model.stage([MockData.picture("dusk.jpg", width: 1200, height: 900, hue: 0.02)])
+            model.sendAsFile = true
+        },
+        Shot(name: "send-file") { model in
+            files(model)
+            model.stage([MockData.document("Quarterly report.pdf")])
+        },
+        Shot(name: "send-files", size: CGSize(width: 900, height: 700)) { model in
+            files(model)
+            model.stage([
+                MockData.document("Report Q3.pdf"), MockData.picture("lake.jpg", width: 1600, height: 1067, hue: 0.55),
+                MockData.document("notes.txt"), MockData.sparse("Disk image.dmg", size: 120_000_000),
+                MockData.sparse("empty.txt", size: 0),
+            ])
+        },
+        Shot(name: "send-files-dark", size: CGSize(width: 900, height: 700), dark: true) { model in
+            files(model)
+            model.stage([MockData.document("Report Q3.pdf"), MockData.document("Contract.docx")])
+        },
+        Shot(name: "drop") { model in
+            files(model)
+            model.drop = DropState(pictures: false, hover: .photos)
+        },
+        Shot(name: "drop-photos-dark", dark: true) { model in
+            photos(model)
+            model.drop = DropState(pictures: true, hover: .photos)
+        },
+        Shot(name: "drop-photos-files", size: CGSize(width: 900, height: 400)) { model in
+            photos(model)
+            model.drop = DropState(pictures: true, hover: .files)
+        },
+        Shot(name: "viewer") { view($0, "vera-1") },
+        Shot(name: "viewer-caption-dark", dark: true) { view($0, "vera-2") },
+        Shot(name: "viewer-loading") { view($0, "vera-4") },
     ]
 
     private static func page(_ model: AppModel, _ page: SettingsPage) {

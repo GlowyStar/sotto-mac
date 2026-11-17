@@ -139,3 +139,33 @@ private func chat(_ id: String, _ messages: [ChatMessage], unread: Int = 0, mute
     settings.dockBadge = false
     #expect(Alerts.badge(now, settings: settings, quietChat: nil) == 0)
 }
+
+@Test func aPhotoOrAFileSaysSoInItsNotificationAndTheRuleOfAutoDownloadFollowsTheSettings() throws {
+    func file(_ name: String, _ mediaType: String) -> ChatFile {
+        ChatFile(name: name, size: 10, mediaType: mediaType, state: .offered)
+    }
+    var photo = incoming(2, "")
+    photo.file = file("a.jpg", "image/jpeg")
+    var document = incoming(3, "see this")
+    document.file = file("report.pdf", "application/pdf")
+    var asFile = incoming(4, "")
+    asFile.file = file("b.png", "")
+    #expect([photo, document, asFile].map(Alerts.preview) == ["Photo", "File: report.pdf, see this", "File: b.png"])
+    let before = state([chat("a", [])])
+    let after = state([chat("a", [photo], unread: 1)])
+    #expect(Alerts.make(old: before, new: after, settings: AppSettings(), quietChat: nil, locked: false).map(\.body) == ["Photo"])
+
+    var settings = AppSettings()
+    settings.autoDownloadPhotos = 1
+    settings.autoDownloadFiles = 0
+    let rule = Messenger.autoDownload(settings)
+    func attachment(_ size: Int, _ mediaType: String) -> Sotto_Attachment {
+        var made = Sotto_Attachment()
+        made.size = UInt32(size)
+        made.mediaType = mediaType
+        return made
+    }
+    #expect(rule(attachment(1_000_000, "image/jpeg")))
+    #expect(!rule(attachment(1_000_001, "image/jpeg")))
+    #expect(!rule(attachment(1, "application/pdf")), "0 is off")
+}

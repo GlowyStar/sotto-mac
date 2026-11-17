@@ -370,6 +370,7 @@ public final class Client {
 
     /// Steps 1 and 2 of section 33.2: the checks, the blob and the upload, committed with
     /// the file and the logged message (its text is the caption) that the upload becomes.
+    /// `localPath`, where the file was read from, is kept with the file for this client.
     ///
     /// - Throws: a check of section 33.1; `InvalidInputError` when a name, media type or
     ///   caption is beyond its limit of section 32.1.
@@ -379,7 +380,11 @@ public final class Client {
         blobMaxBytes: Int,
         fileName: String = "",
         mediaType: String = "",
-        caption: String = ""
+        caption: String = "",
+        width: Int = 0,
+        height: Int = 0,
+        thumbnail: Data = Data(),
+        localPath: String? = nil
     ) throws -> UploadRow {
         try checkFile(contact, size: file.count, blobMaxBytes: blobMaxBytes)
         let blobID = randomBytes(Frames.blobIDLength)
@@ -393,6 +398,9 @@ public final class Client {
         attachment.mediaType = mediaType
         attachment.fileName = fileName
         attachment.caption = caption
+        attachment.width = UInt32(clamping: width)
+        attachment.height = UInt32(clamping: height)
+        attachment.thumbnail = thumbnail
         _ = try Envelope.encodeAttachment(attachment)
 
         let upload = UploadRow(
@@ -401,7 +409,10 @@ public final class Client {
         )
         try store.transaction {
             try store.addUpload(upload, blob: blob)
-            try store.addFile(contact, incoming: false, messageID: upload.messageID, attachment: attachment, state: .sending)
+            try store.addFile(
+                contact, incoming: false, messageID: upload.messageID, attachment: attachment, state: .sending,
+                savedAs: localPath
+            )
             try store.logMessage(contact, direction: .outgoing, messageID: upload.messageID, text: caption)
         }
         return upload
@@ -487,6 +498,11 @@ public final class Client {
     public func beginDownload(_ position: Int64) throws {
         let file = try file(position)
         try store.transaction { try store.beginDownload(position, length: Blob.blobLength(Int(file.attachment.size))) }
+    }
+
+    /// Stops a download until the user asks again; the bytes it holds stay.
+    public func pauseDownload(_ position: Int64) throws {
+        try store.transaction { try store.pauseDownload(position) }
     }
 
     /// Saves bytes of a blob at its held length together with the new length.

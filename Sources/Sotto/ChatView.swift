@@ -25,13 +25,18 @@ struct ChatScreen: View {
                 }
             }
             HStack(spacing: 0) {
-                VStack(spacing: 0) {
-                    MessageList(model: model, contact: contact)
-                    if model.chatSearch != nil {
-                        ChatSearchBottomBar(model: model)
-                    } else {
-                        ComposeBar(model: model, chatID: contact.id)
+                GeometryReader { area in
+                    VStack(spacing: 0) {
+                        MessageList(model: model, contact: contact)
+                        if model.chatSearch != nil {
+                            ChatSearchBottomBar(model: model)
+                        } else {
+                            ComposeBar(model: model, chatID: contact.id)
+                        }
                     }
+                    .overlay(alignment: .bottomLeading) { attachMenu }
+                    .overlay { if let drop = model.drop { DropOverlay(state: drop).transition(.opacity) } }
+                    .onDrop(of: [.fileURL], delegate: ChatDropDelegate(model: model, height: area.size.height))
                 }
                 if model.panelOpen && panelFits {
                     Rectangle().fill(Color.divider).frame(width: 1)
@@ -39,6 +44,23 @@ struct ChatScreen: View {
                         .frame(width: Metrics.panelWidth)
                         .transition(reduceMotion ? .opacity : .move(edge: .trailing))
                 }
+            }
+        }
+    }
+}
+
+extension ChatScreen {
+    /// The popup of the attach button, over a layer that closes it on a click elsewhere.
+    @ViewBuilder
+    var attachMenu: some View {
+        if model.attachMenuOpen {
+            ZStack(alignment: .bottomLeading) {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.attachMenuOpen = false }
+                AttachMenu(model: model)
+                    .padding(.bottom, Metrics.composeHeight + Metrics.attachMenuAbove)
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.95, anchor: .bottomLeading)))
             }
         }
     }
@@ -300,7 +322,7 @@ struct MessageList: View {
                 .overlay(alignment: .bottom) { Rectangle().fill(Color.unreadBarBorder).frame(height: 1) }
                 .padding(.vertical, Metrics.unreadMargin)
         case .message(let message, let top, let bottom):
-            MessageRow(message: message, top: top, bottom: bottom, maxWidth: maxBubble) {
+            MessageRow(message: message, top: top, bottom: bottom, maxWidth: maxBubble, model: model, chatID: contact.id) {
                 model.deleteMessage(message.id, in: contact.id)
             }
             .background { if highlighted == message.id { Color.messageHighlight } }
@@ -334,12 +356,16 @@ struct ScrollDownButton: View {
     }
 }
 
-/// A message with its margins, bubble, tail and time (DESIGN.md 5.4).
+/// A message with its margins, bubble, tail and time (DESIGN.md 5.4); a photo or a file
+/// draws its own bubble (DESIGN.md 13).
 struct MessageRow: View {
     let message: Message
     let top: Bool
     let bottom: Bool
     let maxWidth: CGFloat
+    /// The model and chat of the actions of a photo or a file; nil in previews.
+    var model: AppModel?
+    var chatID = ""
     let delete: () -> Void
     @Environment(\.settings) private var settings
 
@@ -349,6 +375,7 @@ struct MessageRow: View {
             if out { Spacer(minLength: Metrics.bubbleFar) }
             bubble
                 .frame(maxWidth: maxWidth, alignment: out ? .trailing : .leading)
+                .contextMenu { menu }
             if !out { Spacer(minLength: Metrics.bubbleFar) }
         }
         .padding(out ? .trailing : .leading, Metrics.bubbleNear)
@@ -356,13 +383,42 @@ struct MessageRow: View {
         .padding(.bottom, Metrics.messageBottomSpace)
     }
 
-    private var bubble: some View {
-        let out = message.outgoing
-        let shape = BubbleShape(
+    private var shape: BubbleShape {
+        BubbleShape(
             senderTop: top ? Metrics.radiusLarge : Metrics.radiusSmall,
             senderBottom: bottom ? 0 : Metrics.radiusSmall,
-            tail: bottom, mirrored: out)
-        let time = Formats.clock(message.date, h24: settings.clock24 ?? Formats.localeUses24Hours)
+            tail: bottom, mirrored: message.outgoing)
+    }
+
+    private var connected: Bool { (model?.connection ?? .connected) == .connected }
+
+    private var time: String {
+        Formats.clock(message.date, h24: settings.clock24 ?? Formats.localeUses24Hours)
+    }
+
+    @ViewBuilder
+    private var bubble: some View {
+        if let file = message.file {
+            let tap: () -> Void = { model?.tap(message, in: chatID) }
+            if file.isPhoto {
+                PhotoBubble(
+                    message: message, file: file, shape: shape, maxWidth: maxWidth, time: time,
+                    connected: connected, tap: tap
+                ) { textWithTime }
+            } else {
+                FileBubble(
+                    message: message, file: file, shape: shape, maxWidth: maxWidth, time: time,
+                    connected: connected, tap: tap
+                ) { textWithTime }
+            }
+        } else {
+            textWithTime.background { BubbleBackground(shape: shape, out: message.outgoing) }
+        }
+    }
+
+    /// The text with the time and the status mark at the end of its last line.
+    private var textWithTime: some View {
+        let out = message.outgoing
         // A transparent copy of the time keeps room for it on the last line.
         let reserve = Text(" \u{2007}" + time + (out ? "\u{2007}\u{2007}\u{2007}" : "")).foregroundColor(.clear)
         return (Text(Self.attributed(message.text, out: out)) + reserve)
@@ -375,35 +431,37 @@ struct MessageRow: View {
             .padding(.horizontal, Metrics.bubblePadH)
             .padding(.vertical, Metrics.bubblePadV)
             .overlay(alignment: .bottomTrailing) {
-                HStack(spacing: 3) {
-                    Text(time)
-                        .font(Fonts.message(settings.textSize))
-                        .foregroundStyle(out ? Color.msgOutDateFg : Color.msgInDateFg)
-                    if out {
-                        StatusMark(state: message.state, waitingColor: .msgSendingIconFg, storedColor: .msgStoredIconFg)
+                TimeMark(message: message, time: time)
+                    .padding(.trailing, Metrics.timeRight)
+                    .padding(.bottom, Metrics.timeBottom)
+            }
+    }
+
+    @ViewBuilder
+    private var menu: some View {
+        if let file = message.file, let model {
+            if let url = Media.localURL(file) {
+                Button { model.saveAs(message) } label: { Label("Save as...", systemImage: "square.and.arrow.down") }
+                if file.isPhoto {
+                    Button { model.copyImage(url) } label: { Label("Copy image", systemImage: "doc.on.doc") }
+                } else {
+                    Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: {
+                        Label("Show in Finder", systemImage: "folder")
                     }
                 }
-                .padding(.trailing, Metrics.timeRight)
-                .padding(.bottom, Metrics.timeBottom)
-                .accessibilityElement(children: .combine)
             }
-            .background {
-                ZStack {
-                    shape.fill(out ? Color.msgOutShadow : Color.msgInShadow).offset(y: Metrics.bubbleShadow)
-                    shape.fill(out ? Color.msgOutBg : Color.msgInBg)
-                }
+        }
+        if !message.text.isEmpty {
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(message.text, forType: .string)
+            } label: {
+                Label("Copy text", systemImage: "doc.on.doc")
             }
-            .contextMenu {
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(message.text, forType: .string)
-                } label: {
-                    Label("Copy text", systemImage: "doc.on.doc")
-                }
-                Button(role: .destructive, action: delete) {
-                    Label("Delete for me", systemImage: "trash")
-                }
-            }
+        }
+        Button(role: .destructive, action: delete) {
+            Label("Delete for me", systemImage: "trash")
+        }
     }
 
     /// The text with its links detected and coloured.

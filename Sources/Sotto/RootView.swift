@@ -25,7 +25,13 @@ struct RootView: View {
         .frame(minWidth: Metrics.windowMin.width, minHeight: Metrics.windowMin.height)
         .background(Color.windowBg)
         .overlay { if !model.locked { modalLayer } }
-        .overlay(alignment: .bottom) { if !model.locked { toastLayer } }
+        .overlay(alignment: .bottom) { if !model.locked && model.viewer == nil { toastLayer } }
+        .overlay {
+            if !model.locked, let item = model.viewer {
+                MediaViewer(model: model, item: item)
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.97)))
+            }
+        }
         .environment(\.settings, model.settings)
         .background {
             // Escape anywhere: closes a box, clears the search, leaves the chat.
@@ -37,6 +43,7 @@ struct RootView: View {
         .animation(Motion.pick(Motion.box, reduce: reduceMotion), value: model.modal)
         .animation(Motion.pick(Motion.box, reduce: reduceMotion), value: model.settingsDialog)
         .animation(Motion.pick(Motion.toastIn, reduce: reduceMotion), value: model.toast)
+        .animation(Motion.pick(Motion.viewer, reduce: reduceMotion), value: model.viewer)
         .ignoresSafeArea()
     }
 
@@ -139,6 +146,8 @@ struct RootView: View {
                     confirm: "Reset"
                 ) { model.resetSession(id) }
             }
+        case .sendFiles:
+            SendBox(model: model)
         case .delete(let id):
             if let contact = model.contact(id) {
                 ConfirmBox(

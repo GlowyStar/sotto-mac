@@ -58,6 +58,11 @@ struct Message: Identifiable, Hashable {
     let text: String
     let date: Date
     var state: MessageState = .stored
+    /// The photo or file of the message; `text` is then its caption.
+    var file: ChatFile?
+
+    /// The text of the message for a list row: a photo or a file says so.
+    var preview: String { Alerts.preview(text, file: file) }
 }
 
 enum ConnectionState: Hashable {
@@ -119,10 +124,12 @@ enum Modal: Hashable {
     case rename(String)
     case reset(String)
     case delete(String)
+    /// The send box of the files in `AppModel.picks` (DESIGN.md 14.2).
+    case sendFiles
 
     var isWide: Bool {
         switch self {
-        case .addContact, .myID, .settings, .contactInfo: true
+        case .addContact, .myID, .settings, .contactInfo, .sendFiles: true
         default: false
         }
     }
@@ -145,12 +152,16 @@ struct Launch {
     /// `--send NAME TEXT`, any number of times: texts sent to the contacts of those names once
     /// the app is connected, through the action of the compose bar.
     var sends: [(name: String, text: String)] = []
+    /// `--send-file NAME PATH`, any number of times: files sent like `--send`, a picture as a
+    /// photo, through the action of the send box.
+    var fileSends: [(name: String, path: String)] = []
 
     static let current = Launch(CommandLine.arguments)
 
     init(_ arguments: [String]) {
-        for (index, argument) in arguments.enumerated() where argument == "--send" && index + 2 < arguments.count {
-            sends.append((arguments[index + 1], arguments[index + 2]))
+        for (index, argument) in arguments.enumerated() where index + 2 < arguments.count {
+            if argument == "--send" { sends.append((arguments[index + 1], arguments[index + 2])) }
+            if argument == "--send-file" { fileSends.append((arguments[index + 1], arguments[index + 2])) }
         }
         func value(after flag: String) -> String? {
             guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
@@ -233,9 +244,23 @@ final class AppModel {
     var composeFocusTick = 0
     /// Bumped to ask the search field for focus.
     var searchFocusTick = 0
+    /// The files of the send box, in the order they go (DESIGN.md 14.2).
+    var picks: [Pick] = []
+    var sendAsFile = false
+    var attachMenuOpen = false
+    /// Files dragged over the chat area (DESIGN.md 14.3).
+    var drop: DropState?
+    /// The photo open in the media viewer (DESIGN.md 15).
+    var viewer: ViewerItem?
+    /// Files handed to the messenger that it has not logged yet, by chat; each shows as a
+    /// message until the message of its upload replaces it.
+    @ObservationIgnored var localSends: [String: [LocalSend]] = [:]
+    /// The last file handed to the messenger; the next waits for it, so files keep their order.
+    @ObservationIgnored var lastFileSend: Task<Void, Never>?
 
     private var toastTask: Task<Void, Never>?
     private var scriptedSends: [(name: String, text: String)] = []
+    private var scriptedFileSends: [(name: String, path: String)] = []
     @ObservationIgnored private var lastState: MessengerState?
     @ObservationIgnored private var savedDrafts: [String: String] = [:]
     @ObservationIgnored private var draftSave: Task<Void, Never>?
@@ -263,6 +288,7 @@ final class AppModel {
         settings = messenger.launchSettings ?? Self.legacySettings()
         locked = settings.passcode != nil
         scriptedSends = Launch.current.sends
+        scriptedFileSends = Launch.current.fileSends
         attach(messenger)
     }
 
@@ -292,13 +318,21 @@ final class AppModel {
             return model
         }
         do {
-            return AppModel(messenger: try Messenger(directory: launch.directory, relay: launch.relay), directory: launch.directory)
+            return AppModel(messenger: try Self.messenger(launch.directory), directory: launch.directory)
         } catch {
             let model = AppModel(mock: false)
             model.myID = ""
             model.connection = .stopped("The store cannot be opened: \(error).")
             return model
         }
+    }
+
+    /// The messenger of a data folder; received files go to the user's Downloads folder unless
+    /// the settings name another.
+    static func messenger(_ directory: URL) throws -> Messenger {
+        try Messenger(
+            directory: directory, relay: Launch.current.relay,
+            receivedFiles: FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0])
     }
 
     /// Takes over a state of the messenger; the chat open in the key window counts as read.
@@ -319,9 +353,12 @@ final class AppModel {
                 pinned: $0.pinned, muted: $0.muted, archived: $0.archived)
         }
         messages = Dictionary(uniqueKeysWithValues: state.chats.map { chat in
-            (chat.userID, chat.messages.map {
-                Message(id: String($0.id), outgoing: $0.outgoing, text: $0.text, date: $0.date, state: MessageState($0))
-            })
+            let logged = chat.messages.map {
+                Message(id: String($0.id), outgoing: $0.outgoing, text: $0.text, date: $0.date, state: MessageState($0), file: $0.file)
+            }
+            let ids = Set(logged.map(\.id))
+            localSends[chat.userID]?.removeAll { $0.resolved.map(ids.contains) ?? false }
+            return (chat.userID, logged + (localSends[chat.userID] ?? []).filter { !$0.cancelled }.map(\.message))
         })
         if let quiet, state.chats.contains(where: { $0.userID == quiet && $0.unread > 0 }) {
             run { try await $0.markRead(quiet) }
@@ -333,7 +370,7 @@ final class AppModel {
         }
         lastState = state
         if archiveOpen, archivedContacts.isEmpty { archiveOpen = false }
-        if connection == .connected, !scriptedSends.isEmpty {
+        if connection == .connected, !scriptedSends.isEmpty || !scriptedFileSends.isEmpty {
             for (name, text) in scriptedSends {
                 if let contact = contacts.first(where: { $0.name == name }) {
                     send(text, to: contact.id)
@@ -342,11 +379,19 @@ final class AppModel {
                 }
             }
             scriptedSends = []
+            for (name, path) in scriptedFileSends {
+                if let contact = contacts.first(where: { $0.name == name }), let pick = Pick(URL(fileURLWithPath: path)) {
+                    send([pick], caption: "", asFile: false, to: contact.id)
+                } else {
+                    FileHandle.standardError.write(Data("--send-file: no contact named \(name) or no file \(path)\n".utf8))
+                }
+            }
+            scriptedFileSends = []
         }
     }
 
     /// Runs an action of the messenger; its error becomes a toast.
-    private func run(_ action: @escaping @Sendable (Messenger) async throws -> Void, failed: (@MainActor () -> Void)? = nil) {
+    func run(_ action: @escaping @Sendable (Messenger) async throws -> Void, failed: (@MainActor () -> Void)? = nil) {
         guard let messenger else { return }
         Task { [weak self] in
             do {
@@ -389,7 +434,7 @@ final class AppModel {
         let all = sortedContacts
         let chats = all.filter { $0.name.localizedCaseInsensitiveContains(query) }.map(SearchRow.chat)
         let found = all.flatMap { contact in
-            (messages[contact.id] ?? []).filter { $0.text.localizedCaseInsensitiveContains(query) }.map { (contact, $0) }
+            (messages[contact.id] ?? []).filter { $0.preview.localizedCaseInsensitiveContains(query) }.map { (contact, $0) }
         }
         return chats + found.sorted { $0.1.date > $1.1.date }.map(SearchRow.message)
     }
@@ -540,12 +585,13 @@ final class AppModel {
             welcome = .start
             return
         }
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent("Pasted", isDirectory: true))
         welcome = .start
         Task { [weak self] in
             await messenger.close()
             do {
                 try Messenger.erase(directory: directory)
-                self?.attach(try Messenger(directory: directory, relay: Launch.current.relay))
+                self?.attach(try Self.messenger(directory))
             } catch {
                 self?.connection = .stopped("The store cannot be opened: \(error).")
                 self?.showToast(Messenger.describe(error))
@@ -570,6 +616,7 @@ final class AppModel {
 
     func closeChat() {
         saveDrafts()
+        attachMenuOpen = false
         openChatID = nil
         unreadAnchor = nil
         chatSearch = nil
@@ -720,7 +767,7 @@ final class AppModel {
     }
 
     /// The mock relay stores a message about a second after it leaves the outbox.
-    private func store(_ messageID: String, in chat: String) {
+    func store(_ messageID: String, in chat: String) {
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(1))
             guard let self, self.connection == .connected,
@@ -731,6 +778,10 @@ final class AppModel {
     }
 
     func deleteMessage(_ messageID: String, in chat: String) {
+        if let index = localSends[chat]?.firstIndex(where: { $0.message.id == messageID }) {
+            localSends[chat]?[index].cancelled = true
+            localSends[chat]?[index].task?.cancel()
+        }
         if let position = Int64(messageID), messenger != nil {
             run { try await $0.deleteMessage(position) }
         }
@@ -869,7 +920,11 @@ final class AppModel {
     /// Escape, wherever the focus is (DESIGN.md 6).
     func escape() {
         if locked { return }
-        if settingsDialog != nil {
+        if viewer != nil {
+            viewer = nil
+        } else if attachMenuOpen {
+            attachMenuOpen = false
+        } else if settingsDialog != nil {
             settingsDialog = nil
         } else if modal == .settings, settingsPage != nil {
             settingsPage = nil

@@ -10,9 +10,15 @@ identity and an app identity, and starts the app with `--data-dir` and `--relay`
 client sends texts while the app runs and while it is closed; the app is started again to
 receive the rest. Then the app sends with `--send`: once to the running Python client, once
 right after a restart, and once while the Python client is not connected, which prints that
-text when it connects again. The store is read back with `Sotto --dump` and drawn with
-`Sotto --snapshot`. Notifications are turned off in the app's own `app.json` before the first
-start, so that a run posts nothing on the screen. Exits 0 only if every text arrived; stops everything it started.
+text when it connects again. Then files: `sotto send-file` sends the app a photo and a file,
+and the app sends a photo and a file with `--send-file`; each is compared byte for byte. A
+large upload of the app is cut by killing the app when the relay holds part of its blob, and
+a large download of the app by killing it when its store holds part of the blob; each ends
+whole after the next start of the app, going on from where it stopped. The store is read
+back with `Sotto --dump` and drawn with `Sotto --snapshot`. The app's own `app.json` turns
+notifications off before the first start, so that a run posts nothing on the screen, and
+names a download folder of the run. Exits 0 only if every text and file arrived; stops
+everything it started.
 
 The data lives in a temporary directory that is removed at the end; `--keep DIR` keeps the
 stores, the relay database, the app log and the pictures in DIR instead.
@@ -21,13 +27,20 @@ stores, the relay database, the app log and the pictures in DIR instead.
 import argparse
 import asyncio
 import json
+import os
+import re
 import sqlite3
+import struct
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
-from interop import PATIENCE_SECONDS, SOTTO, Chat, CheckFailed, command, outcome, relay, work_folder
+from interop import (
+    FILE_PATIENCE_SECONDS, LARGE_FILE_BYTES, PATIENCE_SECONDS, SOTTO, Chat, CheckFailed, command, outcome, relay,
+    work_folder,
+)
 
 REPOSITORY = Path(__file__).resolve().parent.parent
 APP = REPOSITORY / "build/Sotto.app/Contents/MacOS/Sotto"
@@ -39,13 +52,33 @@ TEXT_WHILE_AWAY = "written while python was away"
 PICTURES = ["real-list.png", "real-chat.png", "real-chat-dark.png"]
 
 
+def png(width: int, height: int) -> bytes:
+    """A PNG picture of a gradient, made without a library."""
+    rows = b"".join(
+        b"\x00" + b"".join(bytes((x * 255 // width, y * 255 // height, 160)) for x in range(width))
+        for y in range(height)
+    )
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+
+
+def same(sent: Path, saved: Path | str) -> None:
+    if Path(saved).read_bytes() != sent.read_bytes():
+        raise CheckFailed(f"{saved} is not the file {sent.name}")
+    print(f"ok   {saved} holds the {sent.stat().st_size} bytes of {sent.name}")
+
+
 def read_only(store: Path, statement: str) -> list[tuple[object, ...]]:
     with sqlite3.connect(f"file:{store}?mode=ro", uri=True) as connection:
         return connection.execute(statement).fetchall()
 
 
-async def until(label: str, condition: object) -> None:
-    deadline = time.monotonic() + PATIENCE_SECONDS
+async def until(label: str, condition: object, patience: float = PATIENCE_SECONDS, step: float = 0.2) -> None:
+    deadline = time.monotonic() + patience
     while time.monotonic() < deadline:
         try:
             if condition():  # type: ignore[operator]
@@ -53,7 +86,7 @@ async def until(label: str, condition: object) -> None:
                 return
         except sqlite3.OperationalError:
             pass
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(step)
     raise CheckFailed(f"timed out: {label}")
 
 
@@ -70,6 +103,12 @@ class App:
         if self.process.poll() is None:
             self.process.terminate()
             self.process.wait(timeout=PATIENCE_SECONDS)
+        self.log.close()
+
+    def kill(self) -> None:
+        """Ends the app at once, as a crash or a power loss would, in the middle of what it does."""
+        self.process.kill()
+        self.process.wait(timeout=PATIENCE_SECONDS)
         self.log.close()
 
 
@@ -107,7 +146,11 @@ async def run(run_folder: Path) -> None:
             await command(sotto_mac, "--data-dir", app_dir, "add", "python", python_id)
             print(f"ok   identities made: python {python_id[:8]}..., app {app_id[:8]}...")
             notes = app_dir / "app.json"
-            notes.write_text(json.dumps({"settings": {"notifications": False}}))
+            downloads = run_folder / "downloads"
+            settings = {
+                "notifications": False, "downloadFolder": str(downloads), "autoDownloadPhotos": 100, "autoDownloadFiles": 100,
+            }
+            notes.write_text(json.dumps({"settings": settings}))
             notes.chmod(0o600)
 
             apps.append(App(app_dir, url, log))
@@ -155,6 +198,8 @@ async def run(run_folder: Path) -> None:
             await python.expect(f"app: {TEXT_WHILE_AWAY}")
             await python.quit()
 
+            await files_both_ways(run_folder, url, app_dir, python_dir, downloads, log, apps, start_python)
+
         code, dumped, errors = await outcome(APP, "--data-dir", app_dir, "--dump")
         if code != 0:
             raise CheckFailed(f"Sotto --dump exited {code}: {errors}")
@@ -164,9 +209,14 @@ async def run(run_folder: Path) -> None:
         chat = next((chat for chat in state["chats"] if chat["userID"] == python_id), None)
         if chat is None or chat["name"] != "python":
             raise CheckFailed("the dump has no chat with python")
-        messages = chat["messages"]
+        messages = [message for message in chat["messages"] if "file" not in message]
         incoming = [message["text"] for message in messages if not message["outgoing"]]
         outgoing = [message for message in messages if message["outgoing"]]
+        files = [message for message in chat["messages"] if "file" in message]
+        states = sorted((message["outgoing"], message["file"]["state"]) for message in files)
+        if states != [(False, "received")] * 3 + [(True, "sent")] * 3:
+            raise CheckFailed(f"the files of the chat are {states}")
+        print("ok   the store holds the 3 files of each side, received and sent")
         if incoming != everything:
             raise CheckFailed(f"the chat holds the incoming texts {incoming}")
         print(f"ok   the store holds the {len(everything)} texts of python in order, as incoming")
@@ -180,7 +230,7 @@ async def run(run_folder: Path) -> None:
         if dates != sorted(dates) or not all(isinstance(date, (int, float)) and date > 0 for date in dates):
             raise CheckFailed(f"the message times are {dates}")
         print("ok   every text has a time, in order")
-        if chat["unread"] != len(everything):
+        if chat["unread"] != len(everything) + 3:
             raise CheckFailed(f"the chat counts {chat['unread']} unread")
         print(f"ok   the chat counts {chat['unread']} unread")
 
@@ -200,6 +250,131 @@ async def run(run_folder: Path) -> None:
         for chat in chats:
             chat.kill()
             await chat.process.wait()
+
+
+async def files_both_ways(
+    run_folder: Path, url: str, app_dir: Path, python_dir: Path, downloads: Path, log: Path, apps: list[App],
+    start_python: object,
+) -> None:
+    """A photo and a file each way, then a large upload and a large download of the app, each
+    cut by a kill of the app in the middle and ended by its next start."""
+    app_store, relay_store = app_dir / "store.db", run_folder / "relay.db"
+    files = run_folder / "files"
+    files.mkdir()
+    photo_in, file_in = files / "from python.jpg", files / "from-python.txt"
+    (files / "picture.png").write_bytes(png(320, 200))
+    subprocess.run(
+        ["sips", "-s", "format", "jpeg", files / "picture.png", "--out", photo_in], check=True, stdout=subprocess.DEVNULL
+    )
+    file_in.write_bytes("a file from python, ünïcode\n".encode() * 300)
+    photo_out, file_out = files / "from-app.png", files / "from app.bin"
+    photo_out.write_bytes(png(640, 480))
+    file_out.write_bytes(os.urandom(90_000))
+
+    def received(name: str) -> Path | None:
+        rows = read_only(app_store, "SELECT saved_as FROM files WHERE direction = 'in' AND state = 'received'")
+        return next((Path(str(row[0])) for row in rows if Path(str(row[0])).name == name), None)
+
+    async def python_sends(path: Path) -> None:
+        await command(SOTTO, "--data-dir", python_dir, "send-file", "app", path, "--relay", url)
+        print(f"ok   python sent {path.name}")
+
+    apps.append(App(app_dir, url, log))
+    for path in (photo_in, file_in):
+        await python_sends(path)
+        await until(f"the running app saved {path.name}", lambda: received(path.name) is not None)
+        saved = received(path.name)
+        assert saved is not None
+        same(path, saved)
+        if saved.parent != downloads:
+            raise CheckFailed(f"the app saved {path.name} into {saved.parent}, not the folder of its settings")
+    apps[-1].stop()
+
+    python: Chat = await start_python(url)  # type: ignore[operator]
+    apps.append(App(app_dir, url, log, "--send-file", "python", str(photo_out), "--send-file", "python", str(file_out)))
+    for path in (photo_out, file_out):
+        saved_line = await python.expect_match(f"app: {re.escape(path.name)} saved as (.+)", FILE_PATIENCE_SECONDS)
+        same(path, saved_line.group(1))
+    apps[-1].stop()
+
+    # The upload of the app, cut when the relay holds part of its blob.
+    large_out = files / "large-out.bin"
+    large_out.write_bytes(os.urandom(LARGE_FILE_BYTES))
+
+    def relay_blob() -> tuple[int, int] | None:
+        rows = read_only(relay_store, "SELECT stored_length, length FROM blobs ORDER BY position DESC LIMIT 1")
+        return (int(rows[0][0]), int(rows[0][1])) if rows else None  # type: ignore[call-overload]
+
+    apps.append(App(app_dir, url, log, "--send-file", "python", str(large_out)))
+    await until(
+        "the relay holds part of the large upload of the app",
+        lambda: (blob := relay_blob()) is not None and blob[1] // 10 <= blob[0] <= blob[1] // 2,
+        FILE_PATIENCE_SECONDS, 0.02,
+    )
+    apps[-1].kill()
+    cut = relay_blob()
+    assert cut is not None
+    print(f"ok   the app was killed with {cut[0]} of {cut[1]} bytes of its blob at the relay")
+    apps.append(App(app_dir, url, log))
+    seen: list[int] = []
+
+    def uploaded() -> bool:
+        blob = relay_blob()
+        if blob is not None:
+            seen.append(blob[0])
+        return blob is None or blob[0] == blob[1]
+
+    await until("the started app finished the upload", uploaded, FILE_PATIENCE_SECONDS, 0.02)
+    if min(seen, default=cut[0]) < cut[0]:
+        raise CheckFailed(f"the upload started again below the stored length: {min(seen)} < {cut[0]}")
+    print("ok   the upload went on from the stored length")
+    saved_line = await python.expect_match(f"app: {re.escape(large_out.name)} saved as (.+)", FILE_PATIENCE_SECONDS)
+    same(large_out, saved_line.group(1))
+    await python.quit()
+
+    # The download of the app, cut when its store holds part of the blob.
+    large_in = files / "large-in.bin"
+    large_in.write_bytes(os.urandom(LARGE_FILE_BYTES))
+
+    def download() -> tuple[str, int, int] | None:
+        rows = read_only(
+            app_store,
+            "SELECT files.state, files.held, length(downloads.bytes) FROM files JOIN downloads USING (position)"
+            " WHERE files.direction = 'in'",
+        )
+        return (str(rows[0][0]), int(rows[0][1]), int(rows[0][2])) if rows else None  # type: ignore[call-overload]
+
+    await python_sends(large_in)
+    await until(
+        "the app holds part of the large download",
+        lambda: (held := download()) is not None and held[2] // 10 <= held[1] <= held[2] // 2,
+        FILE_PATIENCE_SECONDS, 0.02,
+    )
+    apps[-1].kill()
+    stopped = download()
+    assert stopped is not None
+    if received(large_in.name) is not None:
+        raise CheckFailed("the download ended before the kill could cut it")
+    print(f"ok   the app was killed holding {stopped[1]} of {stopped[2]} bytes of the blob")
+    if stopped[1] != read_only(app_store, "SELECT held FROM files WHERE direction = 'in' AND state = 'receiving'")[0][0]:
+        raise CheckFailed("the store does not keep what the app held")
+    apps.append(App(app_dir, url, log))
+    held_after: list[int] = []
+
+    def downloaded() -> bool:
+        held = download()
+        if held is not None:
+            held_after.append(held[1])
+        return received(large_in.name) is not None
+
+    await until("the started app saved the large file", downloaded, FILE_PATIENCE_SECONDS, 0.02)
+    if min(held_after, default=stopped[1]) < stopped[1]:
+        raise CheckFailed(f"the download started again below the bytes it held: {min(held_after)} < {stopped[1]}")
+    print("ok   the download went on from the bytes it held")
+    saved = received(large_in.name)
+    assert saved is not None
+    same(large_in, saved)
+    apps[-1].stop()
 
 
 async def main() -> int:

@@ -17,7 +17,13 @@ public struct ChatMessage: Codable, Equatable, Sendable, Identifiable {
 }
 
 /// A file sent or received (section 33.5).
-public struct ChatFile: Codable, Equatable, Sendable {
+public struct ChatFile: Codable, Hashable, Sendable {
+    /// The media types that the app shows as a photo; any other file, and a picture sent with
+    /// an empty media type, shows as a file.
+    public static let photoTypes: Set<String> = [
+        "image/jpeg", "image/png", "image/gif", "image/heic", "image/heif", "image/webp", "image/tiff", "image/bmp",
+    ]
+
     /// The name in the attachment: a text of the peer for a received file.
     public let name: String
     public let size: Int
@@ -27,11 +33,42 @@ public struct ChatFile: Codable, Equatable, Sendable {
     /// sending or receiving; 0 before the first piece.
     public let done: Int
     public let total: Int
-    /// Where a received file was saved.
+    /// Where a received file was saved, or the file a sent one was read from.
     public let savedAs: String?
     /// Why the file failed: a result of section 33.6 or of a refusal.
     public let result: String?
+    /// The image size in pixels, 0 when the sender gave none.
+    public var width = 0
+    public var height = 0
+    /// The thumbnail as the sender gave it; `Thumbnail.decode` tells whether it may be shown.
+    public var thumbnail = Data()
+
+    public init(
+        name: String, size: Int, mediaType: String, state: FileState, done: Int = 0, total: Int = 0,
+        savedAs: String? = nil, result: String? = nil, width: Int = 0, height: Int = 0, thumbnail: Data = Data()
+    ) {
+        self.name = name
+        self.size = size
+        self.mediaType = mediaType
+        self.state = state
+        self.done = done
+        self.total = total
+        self.savedAs = savedAs
+        self.result = result
+        self.width = width
+        self.height = height
+        self.thumbnail = thumbnail
+    }
+
+    public var isPhoto: Bool { Self.isPhoto(mediaType) }
+
+    public static func isPhoto(_ mediaType: String) -> Bool {
+        photoTypes.contains(mediaType.lowercased())
+    }
 }
+
+/// A file to send again is not where it was read from.
+public struct FileGoneError: Error, Equatable, Sendable {}
 
 public struct Chat: Codable, Equatable, Sendable {
     public let userID: String
@@ -129,8 +166,10 @@ public actor Messenger {
     private var progress: [Data: Progress] = [:]
 
     /// Opens the store in `directory`, creating it when it is missing; `relay` is used until
-    /// an address is saved with `setRelay`. Every received file is downloaded into
-    /// `receivedFiles`; nil leaves received files offered.
+    /// an address is saved with `setRelay`. Received files are downloaded into the folder of
+    /// the settings, or `receivedFiles` when they name none, each by itself when it is within
+    /// the auto-download size of its kind and the others when `download` asks; a nil
+    /// `receivedFiles` leaves every received file offered.
     public init(directory: URL, relay: String, receivedFiles: URL? = nil) throws {
         self.directory = directory
         self.receivedFiles = receivedFiles
@@ -232,12 +271,74 @@ public actor Messenger {
     /// - Throws: `NotConnectedError` without a transport; `FileError` or
     ///   `SessionError.notAContact` from the checks of section 33.1; an error of the file
     ///   system when the file cannot be read.
-    public func sendFile(_ file: URL, caption: String = "", to userID: String) async throws {
+    /// `mediaType`, `width`, `height` and `thumbnail` are those of `Transport.sendFile`.
+    /// Returns the position of the message.
+    @discardableResult
+    public func sendFile(
+        _ file: URL, caption: String = "", to userID: String, mediaType: String? = nil,
+        width: Int = 0, height: Int = 0, thumbnail: Data = Data()
+    ) async throws -> Int64 {
         guard let transport else {
             throw NotConnectedError()
         }
         let contact = try Identity.decodeUserID(userID)
-        try await transport.sendFile(contact, file: file, caption: caption)
+        let blobID = try await transport.sendFile(
+            contact, file: file, caption: caption, mediaType: mediaType, width: width, height: height, thumbnail: thumbnail
+        )
+        let position = try await transport.withClient { client -> Int64 in
+            guard let sent = try client.store.files().last(where: { !$0.incoming && $0.attachment.blobID == blobID }) else {
+                return 0
+            }
+            return try client.store.messages(contact).last { $0.messageID == sent.messageID }?.position ?? 0
+        }
+        await publish()
+        return position
+    }
+
+    /// Sends the file of a message that was not sent again, as a new message from the file it
+    /// was read from, and deletes the old message (section 33.5). Returns the new position.
+    ///
+    /// - Throws: `FileGoneError` when the file is not where it was read from; what `sendFile`
+    ///   throws.
+    @discardableResult
+    public func resendFile(_ position: Int64) async throws -> Int64 {
+        guard let file = try await withClient({ try $0.store.files(ofMessageAt: position).first }), !file.incoming,
+            file.state == .notSent
+        else {
+            return position
+        }
+        guard let path = file.savedAs, FileManager.default.fileExists(atPath: path) else {
+            throw FileGoneError()
+        }
+        let sent = file.attachment
+        let made = try await sendFile(
+            URL(fileURLWithPath: path), caption: sent.caption, to: Identity.encodeUserID(file.contact),
+            mediaType: sent.mediaType, width: Int(sent.width), height: Int(sent.height), thumbnail: sent.thumbnail
+        )
+        try await deleteMessage(position)
+        return made
+    }
+
+    /// Downloads the received file of a message: offered, paused or not received; after the
+    /// next login when there is no connection.
+    public func download(_ position: Int64) async throws {
+        guard let transport else {
+            throw NotConnectedError()
+        }
+        if let file = try await transport.withClient({ try $0.store.files(ofMessageAt: position).first }) {
+            try await transport.download(file.position)
+        }
+        await publish()
+    }
+
+    /// Pauses the download of the file of a message; the bytes it holds stay.
+    public func pauseDownload(_ position: Int64) async throws {
+        guard let transport else {
+            throw NotConnectedError()
+        }
+        if let file = try await transport.withClient({ try $0.store.files(ofMessageAt: position).first }) {
+            try await transport.pauseDownload(file.position)
+        }
         await publish()
     }
 
@@ -360,9 +461,29 @@ public actor Messenger {
         await publish()
     }
 
-    public func saveSettings(_ settings: AppSettings) throws {
+    /// Saves the settings; a new download folder or auto-download size holds for the files
+    /// that arrive from now on.
+    public func saveSettings(_ settings: AppSettings) async throws {
         notes.settings = settings
         try notes.save(directory)
+        await transport?.setDownloads(folder: downloadFolder, autoDownload: Self.autoDownload(settings))
+    }
+
+    /// The folder of the settings, or the one given at launch.
+    private var downloadFolder: URL? {
+        guard let receivedFiles else {
+            return nil
+        }
+        return notes.settings?.downloadFolder.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? receivedFiles
+    }
+
+    /// A photo or a file downloads by itself up to the size of its kind; 0 is off.
+    static func autoDownload(_ settings: AppSettings) -> Transport.AutoDownload {
+        let (photos, files) = (settings.autoDownloadPhotos, settings.autoDownloadFiles)
+        return { attachment in
+            let megabytes = ChatFile.isPhoto(attachment.mediaType) ? photos : files
+            return megabytes > 0 && Int(attachment.size) <= megabytes * 1_000_000
+        }
     }
 
     /// Deletes the files of a store in `directory` (the database, its journal and
@@ -432,6 +553,7 @@ public actor Messenger {
         case is NotConnectedError: "There is no connection to a relay."
         case FileError.filesUnsupported: "The relay does not take files."
         case FileError.fileTooLarge: "The file is too large."
+        case is FileGoneError: "The file to send again is not where it was read from."
         case is CancellationError: "The request was cancelled."
         default: "\(error)"
         }
@@ -460,7 +582,8 @@ public actor Messenger {
         do {
             client = nil
             let made = try Transport(
-                client: Client(store: ClientStore(directory: directory)), url: relay, receivedFiles: receivedFiles
+                client: Client(store: ClientStore(directory: directory)), url: relay, receivedFiles: downloadFolder,
+                autoDownload: Self.autoDownload(notes.settings ?? AppSettings())
             )
             transport = made
             link = .connecting
@@ -645,7 +768,10 @@ public actor Messenger {
                             done: moved?.done ?? $0.held,
                             total: moved?.total ?? ($0.state == .receiving ? Blob.blobLength(Int($0.attachment.size)) : 0),
                             savedAs: $0.savedAs,
-                            result: $0.result
+                            result: $0.result,
+                            width: Int($0.attachment.width),
+                            height: Int($0.attachment.height),
+                            thumbnail: $0.attachment.thumbnail
                         )
                     }
                 )

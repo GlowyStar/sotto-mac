@@ -100,6 +100,24 @@ extension Color {
     static let settingsIconBg5 = token("7595ff", "7595ff")
     static let settingsIconBg6 = token("b580e2", "b580e2")
     static let settingsIconBg8 = token("f2925b", "f2925b")
+    static let fileCircleIn = token("40a7e3", "3f96d0")
+    static let fileCircleInOver = token("4eade3", "489ed7")
+    static let fileCircleOut = token("5fbe67", "4c9ce2")
+    static let fileCircleOutOver = token("56b45e", "54a4e9")
+    static let fileGlyphIn = token("ffffff", "ffffff")
+    static let fileGlyphOut = token("effdde", "ffffff")
+    static let mediaOverlayBg = token("00000054", "00000054")
+    static let mediaOverlayBgOver = token("00000074", "00000074")
+    static let mediaOverlayFg = token("ffffff", "fffffff2")
+    static let mediaOverlayGlyph = token("ffffff", "efefef")
+    static let fileTones = [token("72b1df", "3e7eba"), token("5fbe67", "3ea34a"), token("e47272", "d6454c"), token("efc274", "d99546")]
+    static let viewerBg = token("222222eb", "222222eb")
+    static let viewerControlBg = token("0000003c", "0000003c")
+    static let viewerControlFg = token("ffffff", "ffffff")
+    static let viewerCaptionBg = token("11111180", "11111180")
+    static let viewerCaptionFg = token("ffffff", "ffffff")
+    static let viewerLinkFg = token("4db8ff", "70baf5")
+    static let imageBg = token("000000", "000000")
     /// The dim over the page below a pushed settings page (DESIGN.md 11.1).
     static let slideFadeOutBg = token("0000003c", "0000003c")
 
@@ -282,6 +300,34 @@ enum Metrics {
     static let chatSearchCounterLeft: CGFloat = 10
     static let highlightHold = Duration.milliseconds(3000)
 
+    // Media (DESIGN.md 13 to 15)
+    static let mediaMax: CGFloat = 430
+    static let photoMinWidth: CGFloat = 200
+    static let photoMinHeight: CGFloat = 100
+    static let mediaCircle: CGFloat = 44
+    static let ringWidth: CGFloat = 3
+    static let ringInset: CGFloat = 3
+    static let mediaPillPad = EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8)
+    static let mediaPillInset: CGFloat = 4
+    static let mediaPillRadius: CGFloat = 6
+    static let fileMinWidth: CGFloat = 268
+    static let filePad = EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 10)
+    static let fileTextX: CGFloat = 11
+    static let fileNameTop: CGFloat = 4
+    static let attachWidth: CGFloat = 44
+    static let attachMenuWidth: CGFloat = 200
+    static let attachMenuAbove: CGFloat = 8
+    static let sendPreview: CGFloat = 308
+    static let sendBodyPad: CGFloat = 28
+    static let fileTile: CGFloat = 44
+    static let dropInset: CGFloat = 20
+    static let dropBlock: CGFloat = 72
+    static let viewerButton: CGFloat = 44
+    static let viewerArrowZone: CGFloat = 90
+    static let viewerCaptionWidth: CGFloat = 600
+    static let viewerControlsHold = Duration.milliseconds(1100)
+    static let viewerToastHold = Duration.milliseconds(2000)
+
     // Boxes and toast
     static let boxWidth: CGFloat = 320
     static let boxWideWidth: CGFloat = 364
@@ -372,6 +418,15 @@ enum Motion {
     // DESIGN.md 19.7
     static let highlightIn = Animation.easeOut(duration: 0.2)
     static let highlightOut = Animation.easeIn(duration: 0.5)
+    // DESIGN.md 18, media
+    static let mediaHover = Animation.easeOut(duration: 0.2)
+    static let ring = Animation.easeOut(duration: 0.2)
+    static let picture = Animation.smooth(duration: 0.2)
+    static let menuIn = Animation.smooth(duration: 0.2)
+    static let drop = Animation.smooth(duration: 0.2)
+    static let viewer = Animation.smooth(duration: 0.2)
+    static let controlsIn = Animation.easeOut(duration: 0.2)
+    static let controlsOut = Animation.easeIn(duration: 0.6)
 
     static func pick(_ animation: Animation, reduce: Bool) -> Animation { reduce ? reduced : animation }
 }

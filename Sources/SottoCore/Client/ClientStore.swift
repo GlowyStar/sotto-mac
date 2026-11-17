@@ -105,7 +105,8 @@ public struct UploadRow: Equatable, Sendable {
 }
 
 /// An attachment of the message log, sent or received: `held` bytes of its blob are
-/// downloaded, `savedAs` is the path of a received file, `result` why it failed.
+/// downloaded, `savedAs` is the path of a received file or the file a sent one was read
+/// from, `result` why it failed.
 public struct FileRow: Equatable, Sendable {
     public var position: Int64
     public var contact: Data
@@ -576,21 +577,22 @@ public final class ClientStore {
 
     @discardableResult
     public func addFile(
-        _ contact: Data, incoming: Bool, messageID: Data, attachment: Sotto_Attachment, state: FileState
+        _ contact: Data, incoming: Bool, messageID: Data, attachment: Sotto_Attachment, state: FileState,
+        savedAs: String? = nil
     ) throws -> Int64 {
         try change(
-            "INSERT INTO files (contact, direction, message_id, attachment, state) VALUES (?, ?, ?, ?, ?) RETURNING position",
+            "INSERT INTO files (contact, direction, message_id, attachment, state, saved_as) VALUES (?, ?, ?, ?, ?, ?) RETURNING position",
             [
                 .blob(contact), .text((incoming ? MessageDirection.incoming : .outgoing).rawValue), .blob(messageID),
-                .blob(try attachment.serializedBytes()), .text(state.rawValue),
+                .blob(try attachment.serializedBytes()), .text(state.rawValue), savedAs.map(SQLValue.text) ?? .null,
             ]
         )[0][0].integer!
     }
 
-    /// Sets the state of a file and drops its downloaded bytes.
+    /// Sets the state of a file and drops its downloaded bytes; a nil `savedAs` keeps the path.
     public func setFileState(_ position: Int64, _ state: FileState, savedAs: String? = nil, result: String? = nil) throws {
         try change(
-            "UPDATE files SET state = ?, saved_as = ?, result = ?, held = 0 WHERE position = ?",
+            "UPDATE files SET state = ?, saved_as = coalesce(?, saved_as), result = ?, held = 0 WHERE position = ?",
             [.text(state.rawValue), savedAs.map(SQLValue.text) ?? .null, result.map(SQLValue.text) ?? .null, .integer(position)]
         )
         try change("DELETE FROM downloads WHERE position = ?", [.integer(position)])
@@ -601,6 +603,14 @@ public final class ClientStore {
         try change("UPDATE files SET state = ? WHERE position = ?", [.text(FileState.receiving.rawValue), .integer(position)])
         try change(
             "INSERT INTO downloads VALUES (?, zeroblob(?)) ON CONFLICT DO NOTHING", [.integer(position), .integer(Int64(length))]
+        )
+    }
+
+    /// A download that waits for the user again: it is offered and keeps the bytes it holds.
+    public func pauseDownload(_ position: Int64) throws {
+        try change(
+            "UPDATE files SET state = ? WHERE position = ? AND state = ?",
+            [.text(FileState.offered.rawValue), .integer(position), .text(FileState.receiving.rawValue)]
         )
     }
 

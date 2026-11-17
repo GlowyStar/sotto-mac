@@ -35,12 +35,25 @@ public enum Alerts {
                     chatID: chat.userID,
                     messageID: message.id,
                     title: hide || !settings.notificationSender ? hiddenTitle : chat.name,
-                    body: hide || !settings.notificationPreview ? hiddenBody : message.text,
+                    body: hide || !settings.notificationPreview ? hiddenBody : preview(message),
                     sound: settings.sound
                 ))
             }
         }
         return alerts
+    }
+
+    /// The text of a message for a person: a photo or a file says so before its caption.
+    public static func preview(_ message: ChatMessage) -> String {
+        preview(message.text, file: message.file)
+    }
+
+    public static func preview(_ text: String, file: ChatFile?) -> String {
+        guard let file else {
+            return text
+        }
+        let kind = file.isPhoto ? "Photo" : file.name.isEmpty ? "File" : "File: \(file.name)"
+        return text.isEmpty ? kind : "\(kind), \(text)"
     }
 
     /// The number on the Dock icon: unread messages of every chat, muted and archived ones

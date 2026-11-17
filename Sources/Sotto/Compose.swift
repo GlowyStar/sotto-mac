@@ -18,6 +18,7 @@ struct ComposeBar: View {
     var body: some View {
         let size = model.settings.textSize
         HStack(alignment: .bottom, spacing: 0) {
+            AttachButton(model: model)
             ZStack(alignment: .topLeading) {
                 if text.wrappedValue.isEmpty {
                     Text("Write a message...")
@@ -30,12 +31,14 @@ struct ComposeBar: View {
                     text: text, height: $height, focused: $focused, focusTick: model.composeFocusTick,
                     textSize: size, commandEnterSends: model.settings.sendWithCommandEnter,
                     onSend: { model.send(text.wrappedValue, to: chatID) },
-                    onEscape: { model.escape() }
+                    onEscape: { model.escape() },
+                    onPasteFiles: { model.stage($0) },
+                    onPasteImage: { model.stagePasted($0) }
                 )
                 .frame(height: height)
                 .accessibilityLabel("Message")
             }
-            .padding(.leading, Metrics.fieldLeft)
+            .padding(.leading, 2)
             .padding(.vertical, Metrics.fieldPadV)
             IconButton(symbol: "face.smiling", size: 22, label: "Emoji", side: Metrics.emojiWidth) {
                 // The system palette types into the first responder, so the field takes focus first.
@@ -68,6 +71,34 @@ struct ComposeBar: View {
     }
 }
 
+/// The paperclip at the leading edge of the compose bar: opens the attach menu (DESIGN.md 14.1).
+struct AttachButton: View {
+    let model: AppModel
+    @State private var hover = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button {
+            withAnimation(model.attachMenuOpen ? Motion.pick(.easeIn(duration: 0.15), reduce: reduceMotion) : Motion.pick(Motion.menuIn, reduce: reduceMotion)) {
+                model.attachMenuOpen.toggle()
+            }
+        } label: {
+            Image(systemName: "paperclip")
+                .font(.system(size: 22))
+                .foregroundStyle(hover ? Color.composeIconFgOver : Color.composeIconFg)
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(hover ? Color.windowBgOver : .clear))
+                .frame(width: Metrics.attachWidth, height: Metrics.composeHeight)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .animation(Motion.hover, value: hover)
+        .accessibilityLabel("Attach a photo or a file")
+        .help("Attach")
+    }
+}
+
 /// An `NSTextView` that grows with its text. It sends on Enter and breaks the line on
 /// Shift+Enter, or sends on Cmd+Enter and breaks the line on Enter (DESIGN.md 11.4).
 struct GrowingTextView: NSViewRepresentable {
@@ -82,11 +113,31 @@ struct GrowingTextView: NSViewRepresentable {
     var commandEnterSends = false
     let onSend: () -> Void
     let onEscape: () -> Void
+    var onPasteFiles: ([URL]) -> Void = { _ in }
+    /// A picture pasted without text, as PNG bytes.
+    var onPasteImage: (Data) -> Void = { _ in }
 
     final class Field: NSTextView {
         var focusChanged: ((Bool) -> Void)?
         var commandReturn: (() -> Void)?
+        var pasteFiles: (([URL]) -> Void)?
+        var pasteImage: ((Data) -> Void)?
         var appliedSize = 0
+
+        /// Files on the pasteboard and a picture without text go to the send box (DESIGN.md 14.1).
+        override func paste(_ sender: Any?) {
+            let board = NSPasteboard.general
+            let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+            if let urls = board.readObjects(forClasses: [NSURL.self], options: options) as? [URL], !urls.isEmpty {
+                pasteFiles?(urls)
+            } else if board.string(forType: .string) == nil, let image = NSImage(pasteboard: board),
+                let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+            {
+                pasteImage?(png)
+            } else {
+                super.paste(sender)
+            }
+        }
         override func keyDown(with event: NSEvent) {
             if [36, 76].contains(event.keyCode), event.modifierFlags.contains(.command) {
                 commandReturn?()
@@ -172,6 +223,8 @@ struct GrowingTextView: NSViewRepresentable {
         field.autoresizingMask = [.width]
         field.textContainer?.widthTracksTextView = true
         field.commandReturn = { [weak coordinator = context.coordinator] in coordinator?.parent.onSend() }
+        field.pasteFiles = { [weak coordinator = context.coordinator] in coordinator?.parent.onPasteFiles($0) }
+        field.pasteImage = { [weak coordinator = context.coordinator] in coordinator?.parent.onPasteImage($0) }
         field.string = text
         applySize(field)
         field.focusChanged = { [weak coordinator = context.coordinator] value in
