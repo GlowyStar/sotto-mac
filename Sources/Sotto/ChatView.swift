@@ -80,7 +80,7 @@ struct ChatHeader: View {
             }
             Button(action: togglePanel) {
                 HStack(spacing: Metrics.headerTitleGap) {
-                    Avatar(id: contact.id, name: contact.name, size: Metrics.headerAvatar)
+                    Avatar(id: contact.id, name: contact.name, size: Metrics.headerAvatar, photo: contact.profile?.avatar)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(contact.name)
                             .font(Fonts.headerTitle)

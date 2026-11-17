@@ -118,6 +118,10 @@ extension Color {
     static let viewerCaptionFg = token("ffffff", "ffffff")
     static let viewerLinkFg = token("4db8ff", "70baf5")
     static let imageBg = token("000000", "000000")
+    static let cropFadeBg = token("0000007f", "0000007f")
+    static let cropHandleFg = token("ffffff7f", "ffffff7f")
+    static let qrBg = token("ffffff", "ffffff")
+    static let qrFg = token("000000", "000000")
     /// The dim over the page below a pushed settings page (DESIGN.md 11.1).
     static let slideFadeOutBg = token("0000003c", "0000003c")
 
@@ -244,7 +248,7 @@ enum Metrics {
     static let connectionBar: CGFloat = 37
 
     // Chat header
-    static let headerAvatar: CGFloat = 40
+    static let headerAvatar: CGFloat = 42
     static let headerAvatarLeft: CGFloat = 16
     static let headerTitleGap: CGFloat = 12
     static let headerButton: CGFloat = 40
@@ -347,6 +351,19 @@ enum Metrics {
     static let panelWidth: CGFloat = 320
     static let panelRow: CGFloat = 44
     static let bigAvatar: CGFloat = 80
+    // Profile (DESIGN.md 12)
+    static let editAvatar: CGFloat = 100
+    static let cropCanvas = CGSize(width: 364, height: 340)
+    static let cropMargin: CGFloat = 20
+    static let cropStart: CGFloat = 280
+    static let cropMinimum: CGFloat = 100
+    static let cropHandle: CGFloat = 10
+    static let cropMaxZoom: CGFloat = 4
+    static let qrPlate: CGFloat = 260
+    static let qrQuiet: CGFloat = 16
+    static let qrSavedQuiet: CGFloat = 32
+    static let nameLimit = 64
+    static let nameCounterFrom = 54
 
     // Settings panel (DESIGN.md 11)
     static let settingsMaxWidth: CGFloat = 392
@@ -392,8 +409,10 @@ enum Fonts {
     static let idField = Font.system(size: 13, design: .monospaced)
     static let title = Font.system(size: 13)
 
+    static let coverName = Font.system(size: 17, weight: .semibold)
+
     static func initials(for size: CGFloat) -> Font {
-        .system(size: size >= 80 ? 28 : size >= 46 ? 17 : 15, weight: .semibold)
+        .system(size: size >= 100 ? 36 : size >= 80 ? 28 : size >= 46 ? 17 : 15, weight: .semibold)
     }
 }
 
@@ -422,6 +441,7 @@ enum Motion {
     static let mediaHover = Animation.easeOut(duration: 0.2)
     static let ring = Animation.easeOut(duration: 0.2)
     static let picture = Animation.smooth(duration: 0.2)
+    static let cropGrid = Animation.easeOut(duration: 0.1)
     static let menuIn = Animation.smooth(duration: 0.2)
     static let drop = Animation.smooth(duration: 0.2)
     static let viewer = Animation.smooth(duration: 0.2)

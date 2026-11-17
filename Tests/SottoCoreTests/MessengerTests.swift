@@ -332,6 +332,40 @@ struct MessengerRelayTests {
         await peer.stop()
     }
 
+    @Test func profilesBothWaysAreNoMessagesAndTheLocalNameStays() async throws {
+        let relay = try await RealRelay()
+        defer { relay.stop() }
+        let messenger = try Messenger(directory: appDirectory, relay: relay.url)
+        await messenger.start()
+        let appID = try await messenger.createIdentity()
+        let appKey = try Identity.decodeUserID(appID)
+        try folder.open("peer").addContact(appID)
+        let peerID = try folder.userID("peer")
+        try await messenger.addContact(name: "peer", userID: peerID)
+        try await waitFor(messenger) { $0.link == .connected }
+        let peer = try await run(folder.open("peer"), URLSessionDialer(), url: relay.url)
+        try await until { try await isRegistered(peer.transport) }
+
+        let avatar = try testPicture(width: 32, height: 32)
+        try await messenger.setProfile(name: "App", avatar: avatar, width: 32, height: 32)
+        let own = try await messenger.state().profile
+        #expect(own.name == "App" && own.avatar?.picture == avatar && own.avatar?.state == .received)
+        try await messenger.send("hello peer", to: peerID)
+        #expect(try await nextText(peer.transport) == (appKey, "hello peer"))
+        try await until { try await peer.transport.withClient { try $0.profile(appKey)?.avatar } == avatar }
+
+        try await messenger.setArchived(peerID, true)
+        let peerAvatar = try testPicture(width: 24, height: 24)
+        try await peer.transport.setProfile(OwnProfile(name: "Peer's own name", avatar: peerAvatar))
+        try await waitFor(messenger) { $0.chats.first?.profile?.avatar?.picture == peerAvatar }
+        let chat = try #require(try await chat(messenger))
+        #expect(chat.name == "peer" && chat.profile?.name == "Peer's own name")
+        #expect(chat.profile?.avatar?.state == .received)
+        #expect(chat.unread == 0 && chat.archived && chat.messages.map(\.text) == ["hello peer"])
+        await messenger.close()
+        await peer.stop()
+    }
+
     @Test func aLoginOfTheSameIdentityElsewhereStopsWithAnExplanation() async throws {
         let relay = try await RealRelay()
         defer { relay.stop() }

@@ -52,7 +52,7 @@ public enum Thumbnail {
         return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
-    static func jpeg(_ image: CGImage, quality: Double = 0.7) -> Data? {
+    public static func jpeg(_ image: CGImage, quality: Double = 0.7) -> Data? {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else {
             return nil

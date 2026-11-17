@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public struct ChatMessage: Codable, Equatable, Sendable, Identifiable {
@@ -70,6 +71,38 @@ public struct ChatFile: Codable, Hashable, Sendable {
 /// A file to send again is not where it was read from.
 public struct FileGoneError: Error, Equatable, Sendable {}
 
+/// A profile of part 4: the user's own, or the latest one a contact sent.
+public struct UserProfile: Codable, Hashable, Sendable {
+    /// The display name; for a contact, a text of the peer that its local name wins over.
+    public var name: String
+    public var avatar: ProfilePhoto?
+
+    public init(name: String = "", avatar: ProfilePhoto? = nil) {
+        self.name = name
+        self.avatar = avatar
+    }
+}
+
+/// The avatar of a profile (protocol section 36.4).
+public struct ProfilePhoto: Codable, Hashable, Sendable {
+    /// Changes whenever the picture does: the blob id of a contact's avatar in hex, a digest
+    /// of the user's own.
+    public var key: String
+    /// The picture, once it is received; always there for the user's own avatar.
+    public var picture: Data?
+    /// The JPEG thumbnail that came with the picture, possibly empty.
+    public var thumbnail: Data
+    /// Received, or why the picture is not here (section 36.5).
+    public var state: FileState
+
+    public init(key: String, picture: Data?, thumbnail: Data, state: FileState) {
+        self.key = key
+        self.picture = picture
+        self.thumbnail = thumbnail
+        self.state = state
+    }
+}
+
 public struct Chat: Codable, Equatable, Sendable {
     public let userID: String
     public let name: String
@@ -82,6 +115,8 @@ public struct Chat: Codable, Equatable, Sendable {
     public var archived = false
     /// The text typed in the compose bar and not sent.
     public var draft: String?
+    /// The latest profile the contact sent; `name` above stays the local name.
+    public var profile: UserProfile?
 }
 
 public enum LinkState: Codable, Equatable, Sendable {
@@ -99,6 +134,8 @@ public struct MessengerState: Codable, Equatable, Sendable {
     public var chats: [Chat]
     public var link: LinkState
     public var relay: String
+    /// The user's own profile; empty until one is set.
+    public var profile = UserProfile()
 }
 
 public enum ContactError: Error, Equatable, Sendable {
@@ -342,6 +379,21 @@ public actor Messenger {
         await publish()
     }
 
+    /// Saves the own profile and sends it to every contact with a session, at once when
+    /// logged in, else after the next login (protocol section 36.2). An empty name and no
+    /// avatar clear it. `thumbnail`, `width` and `height` go with the avatar.
+    ///
+    /// - Throws: `EnvelopeError.badProfileName`, `.avatarTooLarge` or `.notAnImage`.
+    public func setProfile(name: String, avatar: Data?, thumbnail: Data = Data(), width: Int = 0, height: Int = 0) async throws {
+        let profile = OwnProfile(name: name, avatar: avatar, thumbnail: thumbnail, width: width, height: height)
+        if let transport {
+            try await transport.setProfile(profile)
+        } else {
+            try await withClient { try $0.setProfile(profile) }
+        }
+        await publish()
+    }
+
     public func addContact(name rawName: String, userID rawID: String) async throws {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         let id = Self.normalizedID(rawID)
@@ -553,6 +605,9 @@ public actor Messenger {
         case is NotConnectedError: "There is no connection to a relay."
         case FileError.filesUnsupported: "The relay does not take files."
         case FileError.fileTooLarge: "The file is too large."
+        case EnvelopeError.badProfileName: "The name is too long or holds a control character."
+        case EnvelopeError.avatarTooLarge: "The picture is too large."
+        case EnvelopeError.notAnImage: "Choose a picture."
         case is FileGoneError: "The file to send again is not where it was read from."
         case is CancellationError: "The request was cancelled."
         default: "\(error)"
@@ -629,11 +684,18 @@ public actor Messenger {
         case .connected: link = .connected
         case .retrying: link = .connecting
         case .stopped(let reason): link = .stopped(Self.explain(reason))
-        case .incoming(let sender, _):
-            if let userID = try? Identity.encodeUserID(sender), notes.arrived(userID) {
+        case .incoming(let sender, let received):
+            // A profile, or a member of a later part that the client does not know, is no
+            // message (protocol sections 20.3 and 36.3): the chat stays where it is.
+            let isMessage = received.text != nil || received.attachment != nil
+            if isMessage, let userID = try? Identity.encodeUserID(sender), notes.arrived(userID) {
                 try? notes.save(directory)
             }
         case .refused, .transferFailed: break
+        case .file(let update) where update.avatar:
+            if update.state == .sending || update.state == .receiving {
+                return
+            }
         case .file(let update):
             let moving = update.state == .sending || update.state == .receiving
             let made = Progress(done: update.done, total: update.total)
@@ -795,14 +857,35 @@ public actor Messenger {
                 pinned: notes.pins.firstIndex(of: userID),
                 muted: notes.muted.contains(userID),
                 archived: notes.archived.contains(userID),
-                draft: notes.drafts[userID]
+                draft: notes.drafts[userID],
+                profile: rows.profiles[contact.identityKey].map { sent in
+                    UserProfile(
+                        name: sent.name,
+                        avatar: sent.avatarFile.flatMap { rows.avatarFiles[$0] }.map { file in
+                            ProfilePhoto(
+                                key: file.attachment.blobID.map { String(format: "%02x", $0) }.joined(),
+                                picture: sent.avatar, thumbnail: file.attachment.thumbnail, state: file.state
+                            )
+                        }
+                    )
+                }
             )
         }
+        let own = rows.ownProfile
         return MessengerState(
             userID: try rows.identityKey.map(Identity.encodeUserID),
             chats: chats,
             link: link,
-            relay: relay
+            relay: relay,
+            profile: UserProfile(
+                name: own.name,
+                avatar: own.avatar.map {
+                    ProfilePhoto(
+                        key: SHA256.hash(data: $0).prefix(8).map { String(format: "%02x", $0) }.joined(),
+                        picture: $0, thumbnail: own.thumbnail, state: .received
+                    )
+                }
+            )
         )
     }
 
@@ -839,6 +922,10 @@ struct Rows: Sendable {
     var waiting: Set<Data>
     var refusals: [Data: String]
     var files: [FileKey: FileRow] = [:]
+    var ownProfile: OwnProfile
+    var profiles: [Data: ContactProfile] = [:]
+    /// The files of the avatars of the profiles, by position; no file of the message log.
+    var avatarFiles: [Int64: FileRow] = [:]
 
     init(store: ClientStore) throws {
         identityKey = try store.identity().map { try Identity.deriveIdentityKey(seed: $0.seed) }
@@ -852,7 +939,15 @@ struct Rows: Sendable {
         waiting = Set(try store.outbox().map(\.messageID))
         refusals = try store.refusals()
         for file in try store.files() {
-            files[FileKey(contact: file.contact, outgoing: !file.incoming, messageID: file.messageID)] = file
+            if file.avatar {
+                avatarFiles[file.position] = file
+            } else {
+                files[FileKey(contact: file.contact, outgoing: !file.incoming, messageID: file.messageID)] = file
+            }
+        }
+        ownProfile = try store.ownProfile()
+        for profile in try store.profiles() {
+            profiles[profile.contact] = profile
         }
     }
 }

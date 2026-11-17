@@ -9,6 +9,9 @@ public enum EnvelopeError: Error, Equatable, Sendable {
     case badContent
     case unknownContent
     case textTooLong
+    case badProfileName
+    case avatarTooLarge
+    case notAnImage
 
     public var result: String {
         switch self {
@@ -18,11 +21,14 @@ public enum EnvelopeError: Error, Equatable, Sendable {
         case .badContent: "BAD_CONTENT"
         case .unknownContent: "UNKNOWN_CONTENT"
         case .textTooLong: "TEXT_TOO_LONG"
+        case .badProfileName: "BAD_PROFILE_NAME"
+        case .avatarTooLarge: "AVATAR_TOO_LARGE"
+        case .notAnImage: "NOT_AN_IMAGE"
         }
     }
 }
 
-/// The peer envelope and the plaintext of docs/protocol.md, section 19.
+/// The peer envelope and the plaintext of docs/protocol.md, sections 19, 32 and 35.
 public enum Envelope {
     public static let version: UInt32 = 1
     public static let paddingBlock = 256
@@ -33,6 +39,13 @@ public enum Envelope {
     public static let maxFileNameBytes = 255
     public static let maxThumbnailBytes = 16384
     public static let maxCaptionBytes = 4096
+    public static let maxProfileNameBytes = 256
+    public static let maxAvatarBytes = 1_048_576
+    /// The media types of an avatar and the first bytes of each (section 35.2).
+    public static let avatarSignatures: [(mediaType: String, signature: [UInt8])] = [
+        ("image/jpeg", [0xff, 0xd8, 0xff]),
+        ("image/png", [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    ]
 
     /// Returns P of section 19.6: the content, `80`, then `00` up to the next block.
     public static func pad(_ content: Data) -> Data {
@@ -65,6 +78,61 @@ public enum Envelope {
     ///
     /// - Throws: `InvalidInputError` when a field is beyond its limit of section 32.1.
     public static func encodeAttachment(_ attachment: Sotto_Attachment) throws -> Data {
+        try checkLimits(attachment)
+        var content = Sotto_Content()
+        content.attachment = attachment
+        return pad(try content.serializedBytes())
+    }
+
+    /// Returns the padded plaintext of the client's own profile (section 35.2).
+    ///
+    /// - Throws: `EnvelopeError.badProfileName`, `.avatarTooLarge` or `.notAnImage`;
+    ///   `InvalidInputError` when a field of the avatar is beyond its limit of section 32.1
+    ///   or it has a file name or a caption.
+    public static func encodeProfile(name: String, avatar: Sotto_Attachment?) throws -> Data {
+        guard isProfileName(name) else {
+            throw EnvelopeError.badProfileName
+        }
+        var profile = Sotto_Profile()
+        profile.name = name
+        if let avatar {
+            guard avatar.size <= maxAvatarBytes else {
+                throw EnvelopeError.avatarTooLarge
+            }
+            guard isAvatarType(avatar.mediaType) else {
+                throw EnvelopeError.notAnImage
+            }
+            guard avatar.fileName.isEmpty, avatar.caption.isEmpty else {
+                throw InvalidInputError(message: "an avatar has no file name and no caption")
+            }
+            try checkLimits(avatar)
+            profile.avatar = avatar
+        }
+        var content = Sotto_Content()
+        content.profile = profile
+        return pad(try content.serializedBytes())
+    }
+
+    /// Whether a name keeps the rule of section 35.2: its length and no control character.
+    public static func isProfileName(_ name: String) -> Bool {
+        name.utf8.count <= maxProfileNameBytes && !name.unicodeScalars.contains(where: isControl)
+    }
+
+    /// The media type of an avatar by its first bytes (section 35.2).
+    ///
+    /// - Throws: `EnvelopeError.notAnImage` when the bytes start with no signature.
+    public static func avatarMediaType(_ image: Data) throws -> String {
+        guard let found = avatarSignatures.first(where: { image.starts(with: $0.signature) }) else {
+            throw EnvelopeError.notAnImage
+        }
+        return found.mediaType
+    }
+
+    static func isAvatarType(_ mediaType: String) -> Bool {
+        avatarSignatures.contains { $0.mediaType == mediaType }
+    }
+
+    private static func checkLimits(_ attachment: Sotto_Attachment) throws {
         let breaksALimit = attachment.blobID.count != Frames.blobIDLength
             || attachment.key.count != Blob.fileKeyLength
             || attachment.digest.count != Blob.digestLength
@@ -76,9 +144,6 @@ public enum Envelope {
         guard !breaksALimit else {
             throw InvalidInputError(message: "a field of the attachment is beyond its limit of section 32.1")
         }
-        var content = Sotto_Content()
-        content.attachment = attachment
-        return pad(try content.serializedBytes())
     }
 
     /// Returns the text of a padded plaintext by sections 19.5 and 19.6.
@@ -89,8 +154,8 @@ public enum Envelope {
         return text
     }
 
-    /// Returns the body of a padded plaintext by sections 19.5, 19.6 and 32.2: a text, or
-    /// an attachment whose lengths hold.
+    /// Returns the body of a padded plaintext by sections 19.5, 19.6, 32.2 and 35.3: a text,
+    /// an attachment whose lengths hold, or a profile that passes the checks of 35.3.
     public static func decodeContent(_ padded: Data) throws -> Sotto_Content.OneOf_Body {
         let content: Sotto_Content
         do {
@@ -104,15 +169,32 @@ public enum Envelope {
         case .text(let text):
             return .text(text)
         case .attachment(let attachment):
-            let lengths = [attachment.blobID.count, attachment.key.count, attachment.digest.count]
-            guard lengths == [Frames.blobIDLength, Blob.fileKeyLength, Blob.digestLength],
-                  attachment.size <= Blob.maxFileBytes
-            else {
+            try checkReceived(attachment)
+            return .attachment(attachment)
+        case .profile(let profile):
+            guard isProfileName(profile.name) else {
                 throw EnvelopeError.badContent
             }
-            return .attachment(attachment)
+            if profile.hasAvatar {
+                let avatar = profile.avatar
+                try checkReceived(avatar)
+                guard avatar.size <= maxAvatarBytes, isAvatarType(avatar.mediaType) else {
+                    throw EnvelopeError.badContent
+                }
+            }
+            return .profile(profile)
         case nil:
             throw EnvelopeError.unknownContent
+        }
+    }
+
+    /// The checks of section 32.2.
+    private static func checkReceived(_ attachment: Sotto_Attachment) throws {
+        let lengths = [attachment.blobID.count, attachment.key.count, attachment.digest.count]
+        guard lengths == [Frames.blobIDLength, Blob.fileKeyLength, Blob.digestLength],
+              attachment.size <= Blob.maxFileBytes
+        else {
+            throw EnvelopeError.badContent
         }
     }
 

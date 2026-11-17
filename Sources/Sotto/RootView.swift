@@ -32,6 +32,12 @@ struct RootView: View {
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.97)))
             }
         }
+        .overlay {
+            if !model.locked, let photo = model.avatarViewer {
+                AvatarViewer(model: model, photo: photo)
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.97)))
+            }
+        }
         .environment(\.settings, model.settings)
         .background {
             // Escape anywhere: closes a box, clears the search, leaves the chat.
@@ -44,6 +50,7 @@ struct RootView: View {
         .animation(Motion.pick(Motion.box, reduce: reduceMotion), value: model.settingsDialog)
         .animation(Motion.pick(Motion.toastIn, reduce: reduceMotion), value: model.toast)
         .animation(Motion.pick(Motion.viewer, reduce: reduceMotion), value: model.viewer)
+        .animation(Motion.pick(Motion.viewer, reduce: reduceMotion), value: model.avatarViewer)
         .ignoresSafeArea()
     }
 
@@ -119,6 +126,10 @@ struct RootView: View {
     private func settingsBox(for dialog: SettingsDialog) -> some View {
         switch dialog {
         case .myID: MyIDBox(model: model) { model.settingsDialog = nil }
+        case .qrCode: QRCodeBox(model: model)
+        case .crop:
+            if let source = model.cropSource { CropBox(model: model, source: source.image) }
+        case .discardProfile: DiscardProfileBox(model: model)
         case .passcode: PasscodeBox(model: model)
         case .autoLock: AutoLockBox(model: model)
         case .reset: ResetBox(model: model)

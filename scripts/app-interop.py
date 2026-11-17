@@ -14,8 +14,12 @@ text when it connects again. Then files: `sotto send-file` sends the app a photo
 and the app sends a photo and a file with `--send-file`; each is compared byte for byte. A
 large upload of the app is cut by killing the app when the relay holds part of its blob, and
 a large download of the app by killing it when its store holds part of the blob; each ends
-whole after the next start of the app, going on from where it stopped. The store is read
-back with `Sotto --dump` and drawn with `Sotto --snapshot`. The app's own `app.json` turns
+whole after the next start of the app, going on from where it stopped. Then profiles:
+`sotto profile set` gives the Python client a name and an avatar, which the app receives
+and keeps byte for byte; the app sets its own with `--profile`, which `sotto contacts` and
+`sotto profile show` print and save byte for byte; a rename and a removed avatar of each
+side reach the other, and none of it becomes a message. The store is read back with
+`Sotto --dump` and drawn with `Sotto --snapshot`. The app's own `app.json` turns
 notifications off before the first start, so that a run posts nothing on the screen, and
 names a download folder of the run. Exits 0 only if every text and file arrived; stops
 everything it started.
@@ -26,6 +30,7 @@ stores, the relay database, the app log and the pictures in DIR instead.
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import re
@@ -50,6 +55,12 @@ TEXT_TO_RUNNING = "hello python, from the app"
 TEXT_AFTER_RESTART = "sent right after a restart"
 TEXT_WHILE_AWAY = "written while python was away"
 PICTURES = ["real-list.png", "real-chat.png", "real-chat-dark.png"]
+PYTHON_NAME = "Пайтон Python"
+PYTHON_RENAMED = "Python, renamed"
+APP_NAME = "Приложение App"
+APP_RENAMED = "App, renamed"
+MAX_AVATAR_BYTES = 1048576
+MAX_THUMBNAIL_BYTES = 16384
 
 
 def png(width: int, height: int) -> bytes:
@@ -199,6 +210,7 @@ async def run(run_folder: Path) -> None:
             await python.quit()
 
             await files_both_ways(run_folder, url, app_dir, python_dir, downloads, log, apps, start_python)
+            await profiles_both_ways(run_folder, url, app_dir, python_dir, app_id, log, apps, start_python)
 
         code, dumped, errors = await outcome(APP, "--data-dir", app_dir, "--dump")
         if code != 0:
@@ -233,6 +245,12 @@ async def run(run_folder: Path) -> None:
         if chat["unread"] != len(everything) + 3:
             raise CheckFailed(f"the chat counts {chat['unread']} unread")
         print(f"ok   the chat counts {chat['unread']} unread")
+        sent_profile = chat.get("profile", {})
+        if chat["name"] != "python" or sent_profile.get("name") != PYTHON_RENAMED or "avatar" in sent_profile:
+            raise CheckFailed(f"the dump holds the chat {chat['name']!r} with the profile {sent_profile}")
+        if state["profile"].get("name") != APP_RENAMED or "avatar" in state["profile"]:
+            raise CheckFailed(f"the dump holds the own profile {state['profile']}")
+        print("ok   the dump keeps the local name, the last profile of python and the app's own")
 
         pictures = run_folder / "snapshots"
         code, _, errors = await outcome(APP, "--data-dir", app_dir, "--snapshot", pictures)
@@ -375,6 +393,98 @@ async def files_both_ways(
     assert saved is not None
     same(large_in, saved)
     apps[-1].stop()
+
+
+async def dump(app_dir: Path) -> dict[str, object]:
+    code, dumped, errors = await outcome(APP, "--data-dir", app_dir, "--dump")
+    if code != 0:
+        raise CheckFailed(f"Sotto --dump exited {code}: {errors}")
+    state: dict[str, object] = json.loads(dumped)
+    return state
+
+
+async def profiles_both_ways(
+    run_folder: Path, url: str, app_dir: Path, python_dir: Path, app_id: str, log: Path, apps: list[App],
+    start_python: object,
+) -> None:
+    """A profile with an avatar each way, then a rename without an avatar each way."""
+    app_store, python_store = app_dir / "store.db", python_dir / "store.db"
+    pictures = run_folder / "profiles"
+    pictures.mkdir()
+    python_avatar, app_picture = pictures / "python.jpg", pictures / "app.png"
+    (pictures / "python.png").write_bytes(png(200, 160))
+    subprocess.run(
+        ["sips", "-s", "format", "jpeg", pictures / "python.png", "--out", python_avatar],
+        check=True, stdout=subprocess.DEVNULL,
+    )
+    app_picture.write_bytes(png(300, 200))
+
+    def sent_to(store: Path) -> tuple[str, bytes | None] | None:
+        rows = read_only(store, "SELECT name, avatar FROM profiles")
+        return (str(rows[0][0]), rows[0][1]) if rows else None  # type: ignore[return-value]
+
+    def messages() -> int:
+        return int(read_only(app_store, "SELECT count(*) FROM messages")[0][0])  # type: ignore[call-overload]
+
+    logged = messages()
+    await command(SOTTO, "--data-dir", python_dir, "profile", "set", "--name", PYTHON_NAME, "--avatar", python_avatar)
+    apps.append(App(app_dir, url, log))
+    python: Chat = await start_python(url)  # type: ignore[operator]
+    await until(
+        "the running app keeps the name and the avatar python set",
+        lambda: sent_to(app_store) == (PYTHON_NAME, python_avatar.read_bytes()),
+        FILE_PATIENCE_SECONDS,
+    )
+    apps[-1].stop()
+    state = await dump(app_dir)
+    chat = next(chat for chat in state["chats"] if chat["name"] == "python")  # type: ignore[attr-defined]
+    avatar = chat.get("profile", {}).get("avatar", {})
+    if chat["profile"]["name"] != PYTHON_NAME or base64.b64decode(avatar.get("picture", "")) != python_avatar.read_bytes():
+        raise CheckFailed(f"the dump holds the profile {chat.get('profile', {}).get('name')!r} of python, not its own")
+    print("ok   the dump shows the name and the avatar of python under the local name")
+
+    apps.append(App(app_dir, url, log, "--profile", APP_NAME, str(app_picture)))
+    await python.expect(f'app: profile "{APP_NAME}", with an avatar')
+    await until(
+        "python keeps the avatar of the app",
+        lambda: (held := sent_to(python_store)) is not None and held[1] is not None,
+        FILE_PATIENCE_SECONDS,
+    )
+    apps[-1].stop()
+    await python.quit()
+    own = read_only(app_store, "SELECT name, avatar, media_type, thumbnail, width, height FROM own_profile")[0]
+    name, picture, media_type, thumbnail, width, height = own
+    assert isinstance(picture, bytes) and isinstance(thumbnail, bytes)
+    is_within_35_2 = (
+        name == APP_NAME and media_type == "image/jpeg" and picture.startswith(b"\xff\xd8\xff")
+        and len(picture) <= MAX_AVATAR_BYTES and thumbnail.startswith(b"\xff\xd8\xff")
+        and 0 < len(thumbnail) <= MAX_THUMBNAIL_BYTES and (width, height) == (512, 512)
+    )
+    if not is_within_35_2:
+        raise CheckFailed(f"the app keeps {media_type} {len(picture)} bytes, a thumbnail of {len(thumbnail)}, {width}x{height}")
+    print(f"ok   the app sends a {width}x{height} JPEG of {len(picture)} bytes with a JPEG thumbnail of {len(thumbnail)}")
+    contacts = await command(SOTTO, "--data-dir", python_dir, "contacts")
+    if f'app {app_id} profile "{APP_NAME}", avatar received' not in contacts.splitlines():
+        raise CheckFailed(f"sotto contacts printed {contacts!r}")
+    print("ok   sotto contacts shows the name the app sent after the local name")
+    saved = pictures / "app-avatar-saved-by-python.jpg"
+    await command(SOTTO, "--data-dir", python_dir, "profile", "show", "app", "--avatar-to", saved)
+    if saved.read_bytes() != picture:
+        raise CheckFailed("sotto profile show saved another picture than the avatar of the app")
+    print(f"ok   sotto profile show saved the {len(picture)} bytes of the avatar of the app")
+
+    await command(SOTTO, "--data-dir", python_dir, "profile", "set", "--name", PYTHON_RENAMED, "--no-avatar")
+    apps.append(App(app_dir, url, log, "--profile", APP_RENAMED, ""))
+    python = await start_python(url)  # type: ignore[operator]
+    await python.expect(f'app: profile "{APP_RENAMED}", no avatar')
+    await until("the app shows the new name of python without an avatar", lambda: sent_to(app_store) == (PYTHON_RENAMED, None))
+    apps[-1].stop()
+    await python.quit()
+    if sent_to(python_store) != (APP_RENAMED, None):
+        raise CheckFailed(f"python keeps the profile {sent_to(python_store)} of the app")
+    if messages() != logged:
+        raise CheckFailed(f"the profiles logged {messages() - logged} messages in the app")
+    print("ok   a rename and a removed avatar reached each side, and no profile became a message")
 
 
 async def main() -> int:

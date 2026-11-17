@@ -120,7 +120,8 @@ private func state(skipped: Int = 0) -> RatchetState {
 
         #expect(tables.map { $0[0].text! } == [
             "blob_deletions", "contacts", "downloads", "files", "identity", "messages", "one_time_prekeys",
-            "outbox", "pending", "records", "refusals", "seen_ids", "sessions", "signed_prekeys", "uploads",
+            "outbox", "own_profile", "pending", "profile_sends", "profiles", "records", "refusals", "seen_ids",
+            "sessions", "signed_prekeys", "uploads",
         ])
     }
 }

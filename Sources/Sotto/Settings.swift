@@ -13,6 +13,7 @@ extension SettingsPage {
         case .privacy: "Privacy and security"
         case .connection: "Connection"
         case .advanced: "Advanced"
+        case .profile: "Edit profile"
         }
     }
 
@@ -24,6 +25,7 @@ extension SettingsPage {
         case .privacy: "lock.fill"
         case .connection: "antenna.radiowaves.left.and.right"
         case .advanced: "gearshape.2.fill"
+        case .profile: "person.crop.circle.fill"
         }
     }
 
@@ -35,6 +37,7 @@ extension SettingsPage {
         case .privacy: .settingsIconBg3
         case .connection: .settingsIconBg5
         case .advanced: .settingsIconBg6
+        case .profile: .settingsIconBg4
         }
     }
 }
@@ -88,7 +91,10 @@ struct SettingsPanel: View {
 
     @ViewBuilder
     private func content(of page: SettingsPage) -> some View {
-        SettingsPageView(title: page.title, back: { model.settingsPage = nil }, height: measured(page)) {
+        SettingsPageView(
+            title: page.title, back: { model.leavePage() },
+            save: page == .profile ? (model.profileChanged, { model.saveProfile() }) : nil, height: measured(page)
+        ) {
             switch page {
             case .notifications: NotificationsPage(model: model)
             case .chats: ChatSettingsPage(model: model)
@@ -96,6 +102,7 @@ struct SettingsPanel: View {
             case .privacy: PrivacyPage(model: model)
             case .connection: ConnectionPage(model: model)
             case .advanced: AdvancedPage(model: model)
+            case .profile: EditProfilePage(model: model)
             }
         }
     }
@@ -107,6 +114,8 @@ struct SettingsPageView<Content: View>: View {
     let title: String
     var back: (() -> Void)?
     var close: (() -> Void)?
+    /// A "Save" text button at the right of the top bar, enabled or not.
+    var save: (enabled: Bool, action: () -> Void)?
     let height: (CGFloat) -> Void
     @ViewBuilder let content: () -> Content
     @State private var scrolled = false
@@ -124,6 +133,23 @@ struct SettingsPageView<Content: View>: View {
                         Spacer()
                         IconButton(symbol: "xmark", size: 14, label: "Close settings", side: 48, action: close)
                             .frame(height: Metrics.settingsBar)
+                    }
+                }
+                if let save {
+                    HStack {
+                        Spacer()
+                        Button(action: save.action) {
+                            Text("Save")
+                                .font(Fonts.button)
+                                .foregroundStyle(save.enabled ? Color.accentText : Color.windowSubFg)
+                                .padding(.horizontal, Metrics.buttonPadH)
+                                .frame(height: Metrics.buttonHeight)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!save.enabled)
+                        .keyboardShortcut("s", modifiers: .command)
+                        .padding(.trailing, 8)
                     }
                 }
             }
@@ -473,23 +499,42 @@ struct SettingsRoot: View {
             .background(Color.windowBgOver)
     }
 
-    /// The own avatar, the short id and the QR button. The name line comes with the profile.
+    /// The own avatar, the name, the short id and the QR button (DESIGN.md 11.2): the avatar
+    /// opens the picker, the rest the Edit profile page.
     private var cover: some View {
-        HStack(spacing: 10) {
-            Avatar(id: model.myID, name: "Me", size: Metrics.bigAvatar)
-            Text(model.myID.count == 64 ? "\(model.myID.prefix(8))...\(model.myID.suffix(8))" : model.myID)
-                .font(Fonts.idField)
-                .foregroundStyle(Color.windowSubFg)
-                .textSelection(.enabled)
-                .help(model.myID)
-            Spacer(minLength: 0)
-            IconButton(symbol: "qrcode", size: 18, label: "My id", color: .accentText, hoverColor: .accentText, side: 34) {
-                model.settingsDialog = .myID
+        HStack(alignment: .top, spacing: 10) {
+            EditableAvatar(model: model, photo: model.profile.avatar, name: model.ownName, size: Metrics.bigAvatar) {
+                model.pickAvatar()
             }
-            .padding(.trailing, 5)
+            .padding(.top, 8)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(model.profile.name.isEmpty ? "Add your name" : model.profile.name)
+                    .font(Fonts.coverName)
+                    .foregroundStyle(model.profile.name.isEmpty ? Color.accentText : Color.windowBoldFg)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(height: 24)
+                HStack(spacing: 0) {
+                    Text(model.myID.count == 64 ? "\(model.myID.prefix(8))...\(model.myID.suffix(8))" : model.myID)
+                        .font(Fonts.idField)
+                        .foregroundStyle(Color.windowSubFg)
+                        .help(model.myID)
+                    Spacer(minLength: 0)
+                    IconButton(symbol: "qrcode", size: 18, label: "QR code", color: .accentText, hoverColor: .accentText, side: 34) {
+                        model.settingsDialog = .qrCode
+                    }
+                    .frame(height: 18)
+                    .padding(.trailing, 5)
+                }
+            }
+            .padding(.top, 12)
         }
         .padding(.leading, 22)
-        .frame(height: 104)
+        .frame(maxWidth: .infinity, minHeight: 104, maxHeight: 104, alignment: .topLeading)
+        .contentShape(Rectangle())
+        .onTapGesture { model.openProfile() }
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Edit profile") { model.openProfile() }
     }
 }
 

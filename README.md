@@ -16,6 +16,9 @@ interoperate with sotto's command-line client byte for byte.
   pieces that resume after a cut connection or a restart; `scripts/interop.py` sends files
   both ways with sotto's client, two of them cut in the middle. The app sends and shows
   photos and files (`scripts/app-interop.py` checks both ways, also cut in the middle).
+- The profile (part 4 of the protocol): a display name and an avatar sent, encrypted, to
+  every contact with a session, and the latest profile of each contact kept and shown; the
+  app and sotto's command-line client exchange them both ways (`scripts/app-interop.py`).
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
 
@@ -124,6 +127,7 @@ Launch arguments of the app:
 | `--demo` | mock data and no store, with a "Mock" menu; `--first-launch` adds the first-launch screen |
 | `--send <name> <text>` | a scripting aid, any number of times: once connected, sends the text to the contact of that local name through the same action as the compose bar |
 | `--send-file <name> <path>` | the same for a file, through the action of the send box; a picture goes as a photo |
+| `--profile <name> <path>` | a scripting aid: once connected, sets the own profile through the action of "Save" on the Edit profile page, the picture cut to its centered square; an empty path is no picture |
 
 A text sent to a contact without a session (nobody has written yet) waits in the store
 with a clock until a connection fetches the contact's keys, also across a restart. A
@@ -161,6 +165,19 @@ system only on a click, and every received file is marked as downloaded (quarant
 macOS asks before it runs anything a contact sent. A picture pasted into the field is kept as a PNG in the folder
 `Pasted` of the data directory, so that the photo can be shown and sent again.
 
+The profile: Settings shows the own photo, name and short id at the top; a click on the
+photo opens the file panel and then the crop box, a click on the name the Edit profile page
+(photo, display name, the id and its QR code drawn with Core Image). "Save" keeps the profile
+in the store and sends it to every contact with a session: the name at once, the photo as a
+512 x 512 JPEG uploaded to each contact as its own blob, with a 128 x 128 JPEG thumbnail
+inside the message. A contact without a session gets it with its first session, and both
+sides send theirs again after a reset. The profile a contact sends is kept, its photo
+downloaded by itself into the store (no file is written), and shown in the chat list, the
+chat header and the contact panel; the local name stays the name of the contact everywhere,
+and the contact panel shows the name the contact set under it. A profile is never a message:
+no row, no unread count, no notification, and an archived chat stays archived. A lost photo
+comes back only with the contact's next change or the next new session.
+
 A local passcode locks the window at launch, after the auto-lock time, on Cmd+L and on
 sleep. It only hides the window: the store is not encrypted with it, and it cannot be
 recovered.
@@ -188,7 +205,8 @@ Limits as they are:
   of each notification in its own notification database, outside the data directory.
 - One device per identity: when the same identity logs in elsewhere, the relay closes the
   older connection and the app says so instead of reconnecting.
-- One-to-one chats with texts, photos and files. No groups, no albums. "Ask where to save
+- One-to-one chats with texts, photos and files. No groups, no albums. The command-line
+  tool prints a profile that arrives but cannot set its own. "Ask where to save
   each file" and the storage figures and "Clear cache" of Data and storage are shown but do
   nothing yet. A new auto-download size or download folder holds for the files that arrive
   after the change.

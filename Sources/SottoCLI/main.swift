@@ -10,7 +10,8 @@ let defaultRelay = "ws://127.0.0.1:8765/ws"
 let defaultDataDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".sotto-mac").path
 let quit = "/quit"
 let quitGraceSeconds = 2.0
-let silentResults: Set<String> = ["DUPLICATE", "NOT_A_CONTACT"]
+// UNKNOWN_CONTENT may be a later member of Content that is no message (section 20.3).
+let silentResults: Set<String> = ["DUPLICATE", "NOT_A_CONTACT", "UNKNOWN_CONTENT"]
 let receivedFolder = "received"
 let progressSteps = 10
 let usage = """
@@ -196,6 +197,8 @@ func printEvent(_ event: TransportEvent, _ names: [Data: String], _ progress: in
         } else if let attachment = received.attachment {
             let caption = attachment.caption.isEmpty ? "" : ": \(printable(attachment.caption))"
             say("\(name): file \(printable(attachment.fileName)), \(attachment.size) bytes\(caption)")
+        } else if let profile = received.profile {
+            say("\(name): \(describeProfile(profile))")
         } else if let result = received.result, !silentResults.contains(result) {
             say("\(name): a message could not be read (\(result))")
         }
@@ -214,7 +217,25 @@ func printEvent(_ event: TransportEvent, _ names: [Data: String], _ progress: in
     }
 }
 
+/// One line about a profile that arrived, as the reference prints it.
+func describeProfile(_ profile: Sotto_Profile) -> String {
+    guard !profile.name.isEmpty || profile.hasAvatar else {
+        return "profile cleared"
+    }
+    let named = profile.name.isEmpty ? "profile without a name" : "profile \"\(printable(profile.name))\""
+    return "\(named), \(profile.hasAvatar ? "with an avatar" : "no avatar")"
+}
+
 func printFileUpdate(_ update: FileUpdate, _ name: String, _ progress: inout [Data: Int]) {
+    if update.avatar {
+        // Only the end of an avatar transfer that failed: the profile line said the rest.
+        switch update.state {
+        case .notSent: say("your avatar was not sent to \(name) (\(update.result ?? ""))")
+        case .notReceived, .notAvailable: say("\(name): the avatar \(update.state.rawValue) (\(update.result ?? ""))")
+        default: break
+        }
+        return
+    }
     let fileName = printable(update.fileName)
     switch update.state {
     case .sending, .receiving:

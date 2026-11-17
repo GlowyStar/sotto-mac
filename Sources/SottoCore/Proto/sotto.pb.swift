@@ -719,11 +719,20 @@ public nonisolated struct Sotto_Content: Sendable {
     set {body = .attachment(newValue)}
   }
 
+  public var profile: Sotto_Profile {
+    get {
+      if case .profile(let v)? = body {return v}
+      return Sotto_Profile()
+    }
+    set {body = .profile(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Body: Equatable, Sendable {
     case text(String)
     case attachment(Sotto_Attachment)
+    case profile(Sotto_Profile)
 
   }
 
@@ -759,6 +768,30 @@ public nonisolated struct Sotto_Attachment: Sendable {
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
+}
+
+/// The name and the avatar that a client shows to its contacts (section 35).
+public nonisolated struct Sotto_Profile: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var name: String = String()
+
+  public var avatar: Sotto_Attachment {
+    get {_avatar ?? Sotto_Attachment()}
+    set {_avatar = newValue}
+  }
+  /// Returns true if `avatar` has been explicitly set.
+  public var hasAvatar: Bool {self._avatar != nil}
+  /// Clears the value of `avatar`. Subsequent reads from it will return its default value.
+  public mutating func clearAvatar() {self._avatar = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _avatar: Sotto_Attachment? = nil
 }
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
@@ -2054,7 +2087,7 @@ nonisolated extension Sotto_InitialHeader: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Sotto_Content: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Content"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{1}attachment\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{1}attachment\0\u{1}profile\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2083,6 +2116,19 @@ nonisolated extension Sotto_Content: SwiftProtobuf.Message, SwiftProtobuf._Messa
           self.body = .attachment(v)
         }
       }()
+      case 3: try {
+        var v: Sotto_Profile?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .profile(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .profile(v)
+        }
+      }()
       default: break
       }
     }
@@ -2101,6 +2147,10 @@ nonisolated extension Sotto_Content: SwiftProtobuf.Message, SwiftProtobuf._Messa
     case .attachment?: try {
       guard case .attachment(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    }()
+    case .profile?: try {
+      guard case .profile(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
     }()
     case nil: break
     }
@@ -2184,6 +2234,45 @@ nonisolated extension Sotto_Attachment: SwiftProtobuf.Message, SwiftProtobuf._Me
     if lhs.height != rhs.height {return false}
     if lhs.thumbnail != rhs.thumbnail {return false}
     if lhs.caption != rhs.caption {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_Profile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Profile"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}avatar\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._avatar) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 1)
+    }
+    try { if let v = self._avatar {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_Profile, rhs: Sotto_Profile) -> Bool {
+    if lhs.name != rhs.name {return false}
+    if lhs._avatar != rhs._avatar {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -7,7 +7,8 @@ import UniformTypeIdentifiers
 /// Mock contacts and chats that exercise the layout: short and long messages, several lines,
 /// a link, emoji, Russian and English, groups, several days, unread counts, an empty chat,
 /// outgoing messages in both states, pinned, muted and archived chats and a draft; two chats
-/// hold photos and files in every state, drawn in code into a temporary folder.
+/// hold photos and files in every state, drawn in code into a temporary folder; the user and
+/// several contacts have a profile, most with a photo drawn in code.
 @MainActor
 enum MockData {
     /// A stable 64-hex id made from a name.
@@ -137,9 +138,73 @@ enum MockData {
         add("Vera Lindqvist", added: day(6, 9, 0), photoMessages())
         add("Leo Fischer", added: day(6, 9, 0), fileMessages())
 
+        // Profiles: photos received, a thumbnail only, a picture gone, a name alone.
+        set("Anna Petrova") { $0.profile = UserProfile(name: "Anya", avatar: portrait("anna", hue: 0.95)) }
+        set("Max Turner") { $0.profile = UserProfile(name: "Max Turner", avatar: portrait("max", hue: 0.33)) }
+        set("Vera Lindqvist") { $0.profile = UserProfile(name: "Vera", avatar: landscape("vera", hue: 0.55)) }
+        set("Lena Smirnova") { $0.profile = UserProfile(name: "Лена", avatar: thumbnailOnly(portrait("lena", hue: 0.08), .receiving)) }
+        set("Sam Carter") { $0.profile = UserProfile(name: "Sam", avatar: thumbnailOnly(landscape("sam", hue: 0.12), .notAvailable)) }
+        set("Olga") { $0.profile = UserProfile(name: "Olga S.") }
+        model.profile = UserProfile(name: "Alex Morgan", avatar: portrait("me", hue: 0.58))
+
         model.contacts = contacts
         model.messages = messages
         model.drafts = [id(for: "Tom Becker"): "Let me check the schedule first"]
+    }
+
+    // MARK: Profiles
+
+    private static var avatars: [String: ProfilePhoto] = [:]
+
+    /// A head and shoulders drawn in code on a background of `hue`, made into an avatar.
+    static func portrait(_ name: String, hue: Double) -> ProfilePhoto? {
+        if let kept = avatars[name] { return kept }
+        let side = 600
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let context = CGContext(
+            data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        func colour(_ h: Double, _ s: Double, _ b: Double) -> CGColor {
+            let r = hsb(h.truncatingRemainder(dividingBy: 1), s, b)
+            return CGColor(colorSpace: space, components: [r.0, r.1, r.2, 1])!
+        }
+        let w = CGFloat(side)
+        let background = CGGradient(
+            colorsSpace: space, colors: [colour(hue, 0.3, 0.95), colour(hue + 0.06, 0.55, 0.7)] as CFArray, locations: [0, 1])!
+        context.drawLinearGradient(background, start: CGPoint(x: 0, y: w), end: .zero, options: [])
+        context.setFillColor(colour(hue + 0.5, 0.45, 0.35))
+        context.fillEllipse(in: CGRect(x: w * 0.12, y: -w * 0.35, width: w * 0.76, height: w * 0.7))
+        context.setFillColor(colour(0.07, 0.35, 0.92))
+        context.fillEllipse(in: CGRect(x: w * 0.31, y: w * 0.3, width: w * 0.38, height: w * 0.44))
+        context.setFillColor(colour(hue + 0.1, 0.6, 0.3))
+        context.fillEllipse(in: CGRect(x: w * 0.29, y: w * 0.56, width: w * 0.42, height: w * 0.22))
+        guard let image = context.makeImage() else { return nil }
+        let made = AvatarPicture.make(image, crop: AvatarPicture.centered(image)).map { ProfilePhoto(key: name, picture: $0.picture, thumbnail: $0.thumbnail, state: .received) }
+        avatars[name] = made
+        return made
+    }
+
+    /// The centered square of a landscape of the demo, made into an avatar.
+    static func landscape(_ name: String, hue: Double) -> ProfilePhoto? {
+        if let kept = avatars[name] { return kept }
+        let url = picture("avatar-\(name).jpg", width: 900, height: 600, hue: hue)
+        guard let image = try? AvatarPicture.load(url),
+            let made = AvatarPicture.make(image, crop: AvatarPicture.centered(image))
+        else { return nil }
+        let photo = ProfilePhoto(key: name, picture: made.picture, thumbnail: made.thumbnail, state: .received)
+        avatars[name] = photo
+        return photo
+    }
+
+    /// An avatar whose picture is not on this Mac: only its thumbnail shows.
+    private static func thumbnailOnly(_ photo: ProfilePhoto?, _ state: FileState) -> ProfilePhoto? {
+        photo.map { ProfilePhoto(key: $0.key + "-thumbnail", picture: nil, thumbnail: $0.thumbnail, state: state) }
+    }
+
+    /// A picture for the crop box.
+    static func cropPicture() -> CGImage? {
+        try? AvatarPicture.load(picture("crop.jpg", width: 1400, height: 1000, hue: 0.62))
     }
 
     // MARK: Photos and files

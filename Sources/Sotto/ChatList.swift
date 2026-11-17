@@ -217,7 +217,7 @@ struct ChatRow: View {
         let draft = found == nil && contact.unread == 0 && model.openChatID != contact.id
             ? model.drafts[contact.id].flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } : nil
         HStack(alignment: .top, spacing: Metrics.rowTextX - Metrics.rowPadding - Metrics.rowAvatar) {
-            Avatar(id: contact.id, name: contact.name, size: Metrics.rowAvatar)
+            Avatar(id: contact.id, name: contact.name, size: Metrics.rowAvatar, photo: contact.profile?.avatar)
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: Metrics.rowGap) {
                     HStack(spacing: Metrics.rowMuteGap) {

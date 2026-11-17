@@ -567,6 +567,20 @@ Built as 13 to 15 say; departures and estimates of the build, worth a look by th
 - The attach menu has a 6 blur shadow (the box shadow is 12); the menu rows are 34 high.
 - Not built: "Ask where to save each file", the storage figures and "Clear cache" of 11.5.
 
+### Added with the profile (SOTTO-34, 2026-11-17)
+
+Built as 11.2, 12 and 16 say; departures and estimates of the build, worth a look by the owner:
+- The QR button of the settings cover opens the QR code box of 12.4 (it opened My id until the profile card); My id (7.2) stays in the list menu, now with the own photo.
+- The QR code box has no avatar: 12.4 lists none, 16 names "QR box" among the 80 avatars; 12.4 was followed. The first launch has no avatar either (7.1 draws none).
+- The crop box: a trackpad scroll moves the picture, a mouse wheel and a pinch zoom it (1x to 4x, about the circle's center); the circle stays inside the part of the picture the canvas shows. The chosen picture is read at most 2048 on its longest side.
+- No progress ring on the avatar: the picture is made at "Apply" (cut, 512 JPEG, 128 thumbnail), so there is nothing to wait for at "Save".
+- "Save" is also Cmd+S. A dropped picture opens the crop box at once (12.1); the overlay shows while the file panel is open.
+- The display name is cut to 64 characters and to the 256 bytes of the protocol, and control characters are dropped as they are typed or pasted.
+- "Discard changes?" has the body "The new name and photo are not saved." (12.1 gives no body).
+- A contact photo opens in a plain viewer (the picture fitted, a close button, a click or Escape closes), not the media viewer of 15, which is built for the photos of a chat.
+- Not built: the contact photo in the macOS notification (11.3, 16); it would go as an image attachment of each notification, a file written outside the store.
+- The avatar of a contact shows the thumbnail the contact sent until its picture arrives, and when the picture is gone (protocol 36.5); with neither, the initials.
+
 ## 10. Additions to tokens and existing sections
 
 ### 10.1 New colour tokens

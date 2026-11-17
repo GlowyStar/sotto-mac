@@ -23,6 +23,7 @@ public struct RefusedError: Error, Equatable, Sendable {
 /// file being sent and the sender of a received one; `fileName` is the name in the
 /// attachment, a text of the peer for a received file. `done` out of `total` bytes of the
 /// blob are stored at the relay or downloaded; `path` is where a received file was saved.
+/// `avatar` marks the avatar of a profile (section 36), which is no file of the chat.
 public struct FileUpdate: Equatable, Sendable {
     public var contact: Data
     public var blobID: Data
@@ -33,6 +34,7 @@ public struct FileUpdate: Equatable, Sendable {
     public var total = 0
     public var result: String?
     public var path: URL?
+    public var avatar = false
 }
 
 /// What the transport reports, in its order.
@@ -99,6 +101,8 @@ public actor Transport {
     private var unblockWaiters: [CheckedContinuation<Void, Never>] = []
     private var requests: [Request] = []
     private var backOffs: [Task<Void, Never>] = []
+    /// The sends of owed profiles that a Deliver started; the end of a connection ends them.
+    private var profileSends: [Task<Void, Never>] = []
     private var stopping = false
     /// The folder for received files (section 33.3); nil leaves every file offered.
     private var receivedFiles: URL?
@@ -348,6 +352,9 @@ public actor Transport {
         if ready {
             await request(Request(frame: Self.sendFrame(outgoing)))
         }
+        if bundle != nil {
+            await sendOwedProfiles()
+        }
         return outgoing.messageID
     }
 
@@ -422,7 +429,23 @@ public actor Transport {
     /// L2 of section 20.6 with a fresh bundle; returns the GAP of the session that left.
     public func resetSession(_ contact: Data) async throws -> Int {
         let bundle = try await fetchBundle(contact)
-        return try client.startSession(contact, bundle: bundle)
+        let missing = try client.startSession(contact, bundle: bundle)
+        await sendOwedProfiles()
+        return missing
+    }
+
+    /// Saves the own profile and sends it to every contact with a session once logged in
+    /// (section 36.2). An avatar upload of an older profile is cancelled and given up.
+    ///
+    /// - Throws: what `Client.checked` throws, before anything changes.
+    public func setProfile(_ profile: OwnProfile) async throws {
+        let profile = try Client.checked(profile)
+        for upload in try client.uploads() where upload.profile {
+            transfers.removeValue(forKey: .upload(upload.blobID))?.task.cancel()
+        }
+        try client.setProfile(profile)
+        await sendBlobDeletions()
+        await sendOwedProfiles()
     }
 
     /// The bundle of a contact, fetched again after a reconnect until an answer.
@@ -542,7 +565,7 @@ public actor Transport {
         waiters.forEach { $0.resume() }
         eventSink.yield(.connected)
         try endTransfersBeyondTheRelay()
-        startTransfers()
+        await sendOwedProfiles()
     }
 
     private func serve(_ socket: any RelaySocket) async throws {
@@ -579,6 +602,10 @@ public actor Transport {
         let received = try client.receive(
             Delivered(sender: deliver.sender, messageID: deliver.messageID, payload: deliver.payload)
         )
+        if received.profile != nil {
+            // Before the first await: the task of a replaced avatar must not go on.
+            cancelEndedDownloads()
+        }
         if received.ack {
             var reference = Sotto_MessageRef()
             reference.messageID = deliver.messageID
@@ -595,6 +622,14 @@ public actor Transport {
         {
             try client.beginDownload(file.position)
             startTransfers()
+        }
+        if received.profile?.hasAvatar == true {
+            startTransfers()
+        }
+        // A new session owes the own profile; in a task, so that a held request never stops
+        // the reading of frames.
+        if try !client.store.owedProfiles().isEmpty {
+            profileSends.append(Task { await self.sendOwedProfiles() })
         }
     }
 
@@ -653,6 +688,14 @@ public actor Transport {
             return
         }
         request.waiting = false
+        if request.kind == .blobWrite, (try? client.hasUpload(request.key)) != true {
+            // The upload was given up while its frame waited: sent again, it would make the
+            // blob anew after its DeleteBlob.
+            requests.removeAll { $0 === request }
+            request.settleBlob(.failure(CancellationError()))
+            release(request)
+            return
+        }
         request.sequence = nextSequence()
         let sentOn = generation
         if let data = try? request.frame.serializedBytes() as Data {
@@ -661,6 +704,11 @@ public actor Transport {
         guard sentOn == generation else {
             return
         }
+        release(request)
+    }
+
+    /// A request that held the others back holds them no more.
+    private func release(_ request: Request) {
         if request.holdsOthers {
             request.holdsOthers = false
             holders -= 1
@@ -757,6 +805,8 @@ public actor Transport {
     private func endConnection() throws {
         backOffs.forEach { $0.cancel() }
         backOffs = []
+        profileSends.forEach { $0.cancel() }
+        profileSends = []
         transfers.values.forEach { $0.task.cancel() }
         transfers = [:]
         deletionsSent = [:]
@@ -810,20 +860,27 @@ public actor Transport {
     private func endTransfersBeyondTheRelay() throws {
         for upload in try client.uploads() {
             let result: FileError? = blobMaxBytes == 0 ? .filesUnsupported : upload.length > blobMaxBytes ? .fileTooLarge : nil
-            if let result {
+            guard let result else {
+                continue
+            }
+            if upload.profile {
+                // Owed again, the profile goes without its avatar (section 36.2).
+                try client.oweProfileWithoutUpload(upload)
+            } else {
                 try client.giveUpUpload(upload, result: result.result)
                 report(upload, .notSent, result: result.result)
             }
         }
         if blobMaxBytes == 0, receivedFiles != nil {
             let result = FileError.filesUnsupported.result
-            for file in try client.downloads() where file.state == .receiving {
+            for file in try client.downloads() where file.state == .receiving && !file.avatar {
                 eventSink.yield(.file(Self.update(file, try client.failDownload(file.position, result: result), result: result)))
             }
         }
     }
 
-    /// Starts a task for every upload and download of the store that has none.
+    /// Starts a task for every upload and download of the store that has none. An avatar
+    /// downloads by itself into the store (section 36.3), a file into the folder.
     private func startTransfers() {
         guard ready, blobMaxBytes > 0 else {
             return
@@ -831,12 +888,45 @@ public actor Transport {
         for upload in (try? client.uploads()) ?? [] {
             track(.upload(upload.blobID)) { try await $0.upload(upload) }
         }
-        guard let folder = receivedFiles else {
+        for file in (try? client.downloads()) ?? [] {
+            let key = TransferKey.download(file.contact + file.attachment.blobID)
+            if file.avatar {
+                guard transfers[key] == nil, (try? client.beginDownload(file.position)) != nil else {
+                    continue
+                }
+                track(key) { try await $0.download(file, into: nil) }
+            } else if let folder = receivedFiles, file.state == .receiving {
+                track(key) { try await $0.download(file, into: folder) }
+            }
+        }
+    }
+
+    /// Cancels the download tasks of files that the store does not offer: a position of a
+    /// deleted file can be taken by a new one.
+    private func cancelEndedDownloads() {
+        let offered = Set(((try? client.downloads()) ?? []).map { TransferKey.download($0.contact + $0.attachment.blobID) })
+        for (key, transfer) in transfers where !offered.contains(key) {
+            if case .download = key {
+                transfer.task.cancel()
+                transfers[key] = nil
+            }
+        }
+    }
+
+    /// Section 36.2 once logged in: the owed profiles go out as Sends or as avatar uploads,
+    /// and every transfer without a task gets one.
+    private func sendOwedProfiles() async {
+        guard ready else {
             return
         }
-        for file in (try? client.downloads()) ?? [] where file.state == .receiving {
-            track(.download(file.position)) { try await $0.download(file, into: folder) }
+        do {
+            for outgoing in try client.sendOwedProfiles(blobMaxBytes: blobMaxBytes) {
+                await request(Request(frame: Self.sendFrame(outgoing)))
+            }
+        } catch {
+            eventSink.yield(.transferFailed(reason: "the profile was not sent: \(error)"))
         }
+        startTransfers()
     }
 
     private func track(_ key: TransferKey, _ body: @escaping @Sendable (isolated Transport) async throws -> Void) {
@@ -908,8 +998,8 @@ public actor Transport {
     /// Step 5 of section 33.2: the message of the file, after START when needed.
     private func sendAttachment(_ upload: UploadRow) async throws {
         let outgoing: Outgoing
+        var bundle: PrekeyBundle?
         do {
-            var bundle: PrekeyBundle?
             if try !client.hasSession(upload.contact) {
                 bundle = try await fetchBundle(upload.contact)
                 try Task.checkCancellation()
@@ -923,6 +1013,9 @@ public actor Transport {
             return try await notSent(upload, error.result)
         }
         await request(Request(frame: Self.sendFrame(outgoing)))
+        if bundle != nil {
+            await sendOwedProfiles()
+        }
     }
 
     private func notSent(_ upload: UploadRow, _ result: String) async throws {
@@ -931,17 +1024,18 @@ public actor Transport {
         await sendBlobDeletions()
     }
 
-    /// Steps 2 to 6 of section 33.3 from the bytes the store holds.
-    private func download(_ file: FileRow, into folder: URL) async throws {
+    /// Steps 2 to 6 of section 33.3 from the bytes the store holds; `folder` is nil for an
+    /// avatar, which stays in the store (section 36.3).
+    private func download(_ file: FileRow, into folder: URL?) async throws {
         let attachment = file.attachment
         let length = Blob.blobLength(Int(attachment.size))
         var held = file.held
-        guard try client.store.file(file.position)?.state == .receiving else {
+        guard try current(file)?.state == .receiving else {
             return
         }
         try client.beginDownload(file.position)
         while held < length {
-            guard try client.store.file(file.position)?.state == .receiving else {
+            guard try current(file)?.state == .receiving else {
                 return
             }
             let asked = min(Frames.blobChunkBytes, length - held)
@@ -951,7 +1045,7 @@ public actor Transport {
             fetch.fetchBlob.offset = UInt32(held)
             fetch.fetchBlob.length = UInt32(asked)
             let reply = try await askBlob(fetch)
-            guard try client.store.file(file.position) != nil else {
+            guard try current(file) != nil else {
                 return
             }
             switch reply {
@@ -970,17 +1064,34 @@ public actor Transport {
             }
         }
 
-        let path: URL
+        var path: URL?
         do {
-            path = try client.finishDownload(file.position, folder: folder)
+            if let folder {
+                path = try client.finishDownload(file.position, folder: folder)
+            } else {
+                try client.finishAvatarDownload(file.position)
+            }
         } catch CryptoError.badBlob {
             return try await notReceived(file, CryptoError.badBlob.result)
+        } catch EnvelopeError.notAnImage {
+            return try await notReceived(file, EnvelopeError.notAnImage.result)
         } catch StoreError.system(let failed, let code) {
             eventSink.yield(.transferFailed(reason: "cannot write \(failed): \(String(cString: strerror(code)))"))
             return
         }
         eventSink.yield(.file(Self.update(file, .received, path: path)))
         await sendBlobDeletions()
+    }
+
+    /// The row at the position of a file while it is still that file: the position of a
+    /// deleted file can be taken by another one.
+    private func current(_ file: FileRow) throws -> FileRow? {
+        guard let row = try client.store.file(file.position), row.contact == file.contact,
+            row.attachment.blobID == file.attachment.blobID
+        else {
+            return nil
+        }
+        return row
     }
 
     private func notReceived(_ file: FileRow, _ result: String) async throws {
@@ -1007,14 +1118,16 @@ public actor Transport {
     private func report(_ upload: UploadRow, _ state: FileState, done: Int = 0, result: String? = nil) {
         eventSink.yield(.file(FileUpdate(
             contact: upload.contact, blobID: upload.blobID, messageID: upload.messageID,
-            fileName: upload.attachment.fileName, state: state, done: done, total: upload.length, result: result
+            fileName: upload.attachment.fileName, state: state, done: done, total: upload.length, result: result,
+            avatar: upload.profile
         )))
     }
 
     static func update(_ file: FileRow, _ state: FileState, done: Int = 0, total: Int = 0, result: String? = nil, path: URL? = nil) -> FileUpdate {
         FileUpdate(
             contact: file.contact, blobID: file.attachment.blobID, messageID: file.messageID,
-            fileName: file.attachment.fileName, state: state, done: done, total: total, result: result, path: path
+            fileName: file.attachment.fileName, state: state, done: done, total: total, result: result, path: path,
+            avatar: file.avatar
         )
     }
 
@@ -1127,7 +1240,8 @@ private enum BlobReply {
 
 private enum TransferKey: Hashable {
     case upload(Data)
-    case download(Int64)
+    /// A download by its uploader and blob id.
+    case download(Data)
 }
 
 private struct BlobKey: Hashable {

@@ -64,8 +64,9 @@ func plaintextWithoutPaddingIsBadPadding(padded: Data) {
 }
 
 @Test func contentWithoutAKnownMemberIsUnknownContent() {
-    // Field 2 is the attachment of part 3, so field 3 stands for a member to come.
-    for content in [Data(), Data([0x1A, 0x01, 0x78])] {
+    // Fields 2 and 3 are the attachment of part 3 and the profile of part 4, so field 4
+    // stands for a member to come.
+    for content in [Data(), Data([0x22, 0x01, 0x78])] {
         #expect(throws: EnvelopeError.unknownContent) { try Envelope.decodeText(Envelope.pad(content)) }
     }
 }

@@ -195,7 +195,79 @@ enum Snapshot {
         Shot(name: "viewer") { view($0, "vera-1") },
         Shot(name: "viewer-caption-dark", dark: true) { view($0, "vera-2") },
         Shot(name: "viewer-loading") { view($0, "vera-4") },
+        // SOTTO-34: the profile and the avatars with a photo.
+        Shot(name: "profile-settings") { $0.openSettings() },
+        Shot(name: "profile-settings-dark", dark: true) { $0.openSettings() },
+        Shot(name: "profile-settings-empty") { model in
+            model.profile = UserProfile()
+            model.openSettings()
+        },
+        Shot(name: "profile-settings-empty-dark", dark: true) { model in
+            model.profile = UserProfile()
+            model.openSettings()
+        },
+        Shot(name: "profile-edit", size: CGSize(width: 900, height: 900)) { editProfile($0) },
+        Shot(name: "profile-edit-dark", size: CGSize(width: 900, height: 900), dark: true) { editProfile($0) },
+        Shot(name: "profile-edit-changed", size: CGSize(width: 900, height: 900)) { changedProfile($0) },
+        Shot(name: "profile-edit-changed-dark", size: CGSize(width: 900, height: 900), dark: true) { changedProfile($0) },
+        Shot(name: "profile-discard") { model in
+            changedProfile(model)
+            model.settingsDialog = .discardProfile
+        },
+        Shot(name: "profile-discard-dark", dark: true) { model in
+            changedProfile(model)
+            model.settingsDialog = .discardProfile
+        },
+        Shot(name: "profile-crop", size: CGSize(width: 900, height: 700)) { crop($0) },
+        Shot(name: "profile-crop-dark", size: CGSize(width: 900, height: 700), dark: true) { crop($0) },
+        Shot(name: "profile-qr", size: CGSize(width: 900, height: 700)) { model in
+            model.openSettings()
+            model.settingsDialog = .qrCode
+        },
+        Shot(name: "profile-qr-dark", size: CGSize(width: 900, height: 700), dark: true) { model in
+            editProfile(model)
+            model.settingsDialog = .qrCode
+        },
+        Shot(name: "profile-my-id") { $0.modal = .myID },
+        Shot(name: "profile-my-id-dark", dark: true) { $0.modal = .myID },
+        Shot(name: "avatars-chat", size: CGSize(width: 1100, height: 700)) { model in
+            openRich(model)
+            model.panelOpen = true
+        },
+        Shot(name: "avatars-chat-dark", size: CGSize(width: 1100, height: 700), dark: true) { model in
+            openRich(model)
+            model.panelOpen = true
+        },
+        Shot(name: "avatars-photos", size: CGSize(width: 900, height: 900)) { photos($0) },
+        Shot(name: "avatars-photos-dark", size: CGSize(width: 900, height: 900), dark: true) { model in
+            if let max = model.contacts.first(where: { $0.name == "Max Turner" }) { model.openChat(max.id) }
+        },
+        Shot(name: "avatars-viewer") { model in
+            openRich(model)
+            model.avatarViewer = model.openChat?.profile?.avatar
+        },
+        Shot(name: "avatars-viewer-dark", dark: true) { model in
+            photos(model)
+            model.avatarViewer = model.openChat?.profile?.avatar
+        },
     ]
+
+    private static func editProfile(_ model: AppModel) {
+        model.openSettings()
+        model.openProfile()
+    }
+
+    private static func changedProfile(_ model: AppModel) {
+        editProfile(model)
+        model.profileDraft?.name = "Alexandra Morgan-Whitfield of the Northern Isles, Esq."
+        model.profileDraft?.avatar = nil
+    }
+
+    private static func crop(_ model: AppModel) {
+        editProfile(model)
+        model.cropSource = MockData.cropPicture().map(CropSource.init)
+        model.settingsDialog = .crop
+    }
 
     private static func page(_ model: AppModel, _ page: SettingsPage) {
         model.openSettings()

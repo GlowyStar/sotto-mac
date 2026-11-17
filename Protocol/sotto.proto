@@ -188,6 +188,7 @@ message Content {
   oneof body {
     string text = 1;
     Attachment attachment = 2;
+    Profile profile = 3;
   }
 }
 
@@ -203,4 +204,10 @@ message Attachment {
   uint32 height = 8;
   bytes thumbnail = 9;
   string caption = 10;
+}
+
+// The name and the avatar that a client shows to its contacts (section 35).
+message Profile {
+  string name = 1;
+  Attachment avatar = 2;
 }

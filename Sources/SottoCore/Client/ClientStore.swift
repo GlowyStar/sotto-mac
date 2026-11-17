@@ -102,6 +102,8 @@ public struct UploadRow: Equatable, Sendable {
     public var messageID: Data
     public var attachment: Sotto_Attachment
     public var length: Int
+    /// The upload carries the avatar of a profile owed to `contact` (section 36.2).
+    public var profile = false
 }
 
 /// An attachment of the message log, sent or received: `held` bytes of its blob are
@@ -117,6 +119,44 @@ public struct FileRow: Equatable, Sendable {
     public var held: Int
     public var savedAs: String?
     public var result: String?
+    /// The file is the avatar of a contact's profile, no file of the message log (section 36.1).
+    public var avatar = false
+}
+
+/// The client's own profile (section 36.1): the name, the picture with its media type, and
+/// the thumbnail and size that go with the picture.
+public struct OwnProfile: Equatable, Sendable {
+    public var name: String
+    public var avatar: Data?
+    public var mediaType: String
+    public var thumbnail: Data
+    public var width: Int
+    public var height: Int
+
+    public init(
+        name: String = "", avatar: Data? = nil, mediaType: String = "", thumbnail: Data = Data(), width: Int = 0,
+        height: Int = 0
+    ) {
+        self.name = name
+        self.avatar = avatar
+        self.mediaType = mediaType
+        self.thumbnail = thumbnail
+        self.width = width
+        self.height = height
+    }
+
+    public var isEmpty: Bool {
+        name.isEmpty && avatar == nil
+    }
+}
+
+/// The latest profile a contact sent; `avatarFile` is the file of its avatar and `avatar`
+/// the picture once it is received.
+public struct ContactProfile: Equatable, Sendable {
+    public var contact: Data
+    public var name: String
+    public var avatarFile: Int64?
+    public var avatar: Data?
 }
 
 /// The client store of docs/protocol.md, section 22: the one connection to the SQLite file
@@ -259,6 +299,11 @@ public final class ClientStore {
             .isEmpty
     }
 
+    /// Whether an outgoing message with the id is in the message log.
+    public func isLoggedOutgoing(_ messageID: Data) throws -> Bool {
+        try !query("SELECT 1 FROM messages WHERE direction = 'out' AND message_id = ?", [.blob(messageID)]).isEmpty
+    }
+
     public func outbox() throws -> [OutboxRow] {
         try query("SELECT message_id, recipient, payload FROM outbox ORDER BY position").map {
             OutboxRow(messageID: $0[0].data!, recipient: $0[1].data!, payload: $0[2].data!)
@@ -304,13 +349,14 @@ public final class ClientStore {
     }
 
     public func uploads() throws -> [UploadRow] {
-        try query("SELECT blob_id, contact, message_id, attachment, length(blob) FROM uploads ORDER BY position").map {
+        try query(Schema.readUploads).map {
             UploadRow(
                 blobID: $0[0].data!,
                 contact: $0[1].data!,
                 messageID: $0[2].data!,
                 attachment: try Sotto_Attachment(serializedBytes: $0[3].data!),
-                length: Int($0[4].integer!)
+                length: Int($0[4].integer!),
+                profile: $0[5].integer! == 1
             )
         }
     }
@@ -362,6 +408,36 @@ public final class ClientStore {
         try query("SELECT uploader, blob_id FROM blob_deletions ORDER BY uploader, blob_id").map {
             (uploader: $0[0].data!, blobID: $0[1].data!)
         }
+    }
+
+    /// The own profile; the empty one when none was ever set.
+    public func ownProfile() throws -> OwnProfile {
+        guard let row = try query("SELECT name, avatar, media_type, thumbnail, width, height FROM own_profile").first else {
+            return OwnProfile()
+        }
+        return OwnProfile(
+            name: row[0].text!, avatar: row[1].data, mediaType: row[2].text!, thumbnail: row[3].data ?? Data(),
+            width: Int(row[4].integer!), height: Int(row[5].integer!)
+        )
+    }
+
+    /// The blob id of the avatar upload of the profile owed to a contact, if one started.
+    public func profileUpload(_ contact: Data) throws -> Data? {
+        try query("SELECT blob_id FROM profile_sends WHERE contact = ?", [.blob(contact)]).first?[0].data
+    }
+
+    /// The contacts owed the own profile whose avatar upload has not started.
+    public func owedProfiles() throws -> [Data] {
+        try query("SELECT contact FROM profile_sends WHERE blob_id IS NULL ORDER BY contact").map { $0[0].data! }
+    }
+
+    public func profile(_ contact: Data) throws -> ContactProfile? {
+        try query(Schema.readProfiles + " WHERE contact = ?", [.blob(contact)]).first.map(Self.profile)
+    }
+
+    /// The latest profile of every contact that sent one.
+    public func profiles() throws -> [ContactProfile] {
+        try query(Schema.readProfiles).map(Self.profile)
     }
 
     // MARK: Writes
@@ -426,8 +502,14 @@ public final class ClientStore {
         )
     }
 
-    /// Deletes the contact and its sessions; its seen ids and records stay (section 20.6).
+    /// Deletes the contact with its sessions and its profile; its seen ids and records stay
+    /// (section 20.6).
     public func removeContact(_ contact: Data) throws {
+        let avatarFile = "(SELECT avatar_file FROM profiles WHERE contact = ?)"
+        try change("DELETE FROM downloads WHERE position IN \(avatarFile)", [.blob(contact)])
+        try change("DELETE FROM files WHERE position IN \(avatarFile)", [.blob(contact)])
+        try change("DELETE FROM profiles WHERE contact = ?", [.blob(contact)])
+        try change("DELETE FROM profile_sends WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM sessions WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM contacts WHERE identity_key = ?", [.blob(contact)])
         try change(Schema.deleteOrphanRecords)
@@ -571,8 +653,51 @@ public final class ClientStore {
         )
     }
 
+    /// Deletes an upload, and the profile send that it carries, if it carries one.
     public func deleteUpload(_ blobID: Data) throws {
         try change("DELETE FROM uploads WHERE blob_id = ?", [.blob(blobID)])
+        try change("DELETE FROM profile_sends WHERE blob_id = ?", [.blob(blobID)])
+    }
+
+    public func deleteFile(_ position: Int64) throws {
+        try change("DELETE FROM files WHERE position = ?", [.integer(position)])
+        try change("DELETE FROM downloads WHERE position = ?", [.integer(position)])
+    }
+
+    public func setOwnProfile(_ profile: OwnProfile) throws {
+        try change(
+            Schema.setOwnProfile,
+            [
+                .text(profile.name), profile.avatar.map(SQLValue.blob) ?? .null, .text(profile.mediaType),
+                .blob(profile.thumbnail), .integer(Int64(profile.width)), .integer(Int64(profile.height)),
+            ]
+        )
+    }
+
+    /// Marks the own profile as owed to a contact; a send already owed stays as it is.
+    public func oweProfile(_ contact: Data) throws {
+        try change("INSERT INTO profile_sends (contact) VALUES (?) ON CONFLICT DO NOTHING", [.blob(contact)])
+    }
+
+    public func startProfileUpload(_ contact: Data, blobID: Data) throws {
+        try change("UPDATE profile_sends SET blob_id = ? WHERE contact = ?", [.blob(blobID), .blob(contact)])
+    }
+
+    public func deleteProfileSend(_ contact: Data) throws {
+        try change("DELETE FROM profile_sends WHERE contact = ?", [.blob(contact)])
+    }
+
+    /// Saves the latest profile of a contact; its avatar is not received yet.
+    public func setProfile(_ contact: Data, name: String, avatarFile: Int64?) throws {
+        try change(Schema.setProfile, [.blob(contact), .text(name), avatarFile.map(SQLValue.integer) ?? .null])
+    }
+
+    public func deleteProfile(_ contact: Data) throws {
+        try change("DELETE FROM profiles WHERE contact = ?", [.blob(contact)])
+    }
+
+    public func setAvatar(_ avatarFile: Int64, _ picture: Data) throws {
+        try change("UPDATE profiles SET avatar = ? WHERE avatar_file = ?", [.blob(picture), .integer(avatarFile)])
     }
 
     @discardableResult
@@ -766,8 +891,13 @@ public final class ClientStore {
             state: FileState(rawValue: row[5].text!) ?? .notAvailable,
             held: Int(row[6].integer!),
             savedAs: row[7].text,
-            result: row[8].text
+            result: row[8].text,
+            avatar: row[9].integer! == 1
         )
+    }
+
+    private static func profile(_ row: [SQLValue]) -> ContactProfile {
+        ContactProfile(contact: row[0].data!, name: row[1].text!, avatarFile: row[2].integer, avatar: row[3].data)
     }
 
     private static func encode(_ state: RatchetState) throws -> String {
@@ -965,9 +1095,59 @@ private enum Schema {
             PRIMARY KEY (uploader, blob_id)
         ) STRICT, WITHOUT ROWID
         """,
+        // Part 4 (section 36.1). The own profile keeps the thumbnail and the size that it
+        // sends with the picture.
+        """
+        CREATE TABLE IF NOT EXISTS own_profile (
+            only_row INTEGER PRIMARY KEY CHECK (only_row = 1),
+            name TEXT NOT NULL,
+            avatar BLOB,
+            media_type TEXT NOT NULL,
+            thumbnail BLOB NOT NULL,
+            width INTEGER NOT NULL,
+            height INTEGER NOT NULL
+        ) STRICT
+        """,
+        // The latest profile of each contact; `avatar_file` is the row of `files` that
+        // carries its avatar, which is no attachment of the message log.
+        """
+        CREATE TABLE IF NOT EXISTS profiles (
+            contact BLOB PRIMARY KEY,
+            name TEXT NOT NULL,
+            avatar_file INTEGER UNIQUE,
+            avatar BLOB
+        ) STRICT, WITHOUT ROWID
+        """,
+        // The contacts owed the own profile; `blob_id` names the upload of its avatar.
+        """
+        CREATE TABLE IF NOT EXISTS profile_sends (
+            contact BLOB PRIMARY KEY,
+            blob_id BLOB UNIQUE
+        ) STRICT, WITHOUT ROWID
+        """,
     ]
 
-    static let readFiles = "SELECT position, contact, direction, message_id, attachment, state, held, saved_as, result FROM files"
+    static let readFiles = """
+        SELECT position, contact, direction, message_id, attachment, state, held, saved_as, result,
+            position IN (SELECT avatar_file FROM profiles WHERE avatar_file IS NOT NULL)
+        FROM files
+        """
+    static let readUploads = """
+        SELECT blob_id, contact, message_id, attachment, length(blob),
+            blob_id IN (SELECT blob_id FROM profile_sends WHERE blob_id IS NOT NULL)
+        FROM uploads ORDER BY position
+        """
+    static let readProfiles = "SELECT contact, name, avatar_file, avatar FROM profiles"
+    static let setOwnProfile = """
+        INSERT INTO own_profile VALUES (1, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (only_row) DO UPDATE SET
+            name = excluded.name, avatar = excluded.avatar, media_type = excluded.media_type,
+            thumbnail = excluded.thumbnail, width = excluded.width, height = excluded.height
+        """
+    static let setProfile = """
+        INSERT INTO profiles VALUES (?, ?, ?, NULL)
+        ON CONFLICT (contact) DO UPDATE SET name = excluded.name, avatar_file = excluded.avatar_file, avatar = NULL
+        """
 
     static let addSession = """
         INSERT INTO sessions (contact, position, associated_data, state, initial_header)

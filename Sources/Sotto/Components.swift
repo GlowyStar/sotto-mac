@@ -1,23 +1,39 @@
 import AppKit
+import SottoCore
 import SwiftUI
 
-/// A circle with the contact's gradient and initials (DESIGN.md 3).
+/// A circle with the contact's gradient and initials (DESIGN.md 3), or its photo filling the
+/// circle when the photo is on this Mac (DESIGN.md 16).
 struct Avatar: View {
     let id: String
     let name: String
     let size: CGFloat
+    var photo: ProfilePhoto?
 
     var body: some View {
         let colors = AvatarPalette.colors[AvatarPalette.index(for: id)] ?? ("5caffa", "408acf")
-        Circle()
-            .fill(
-                LinearGradient(
-                    colors: [Color(nsColor: NSColor(hex: colors.top)), Color(nsColor: NSColor(hex: colors.bottom))],
-                    startPoint: .top, endPoint: .bottom)
-            )
-            .overlay(Text(Self.initials(name)).font(Fonts.initials(for: size)).foregroundStyle(Color.avatarFg))
-            .frame(width: size, height: size)
-            .accessibilityHidden(true)
+        let picture = photo.flatMap { AvatarPictures.image($0, side: size) }
+        ZStack {
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [Color(nsColor: NSColor(hex: colors.top)), Color(nsColor: NSColor(hex: colors.bottom))],
+                        startPoint: .top, endPoint: .bottom)
+                )
+                .overlay(Text(Self.initials(name)).font(Fonts.initials(for: size)).foregroundStyle(Color.avatarFg))
+            if let picture {
+                Image(nsImage: picture)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
+                    .frame(width: size, height: size)
+                    .transition(.opacity)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .animation(Motion.picture, value: picture == nil ? nil : photo?.key)
+        .accessibilityHidden(true)
     }
 
     static func initials(_ name: String) -> String {

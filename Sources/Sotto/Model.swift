@@ -13,6 +13,8 @@ struct Contact: Identifiable, Hashable {
     var pinned: Int?
     var muted = false
     var archived = false
+    /// The latest profile the contact sent; `name` stays the local name.
+    var profile: UserProfile?
 }
 
 /// A line of the list while it searches (DESIGN.md 5.2 and 19.4): a chat found by its name,
@@ -105,12 +107,15 @@ extension AppSettings.Theme {
 
 /// The pages under the root page of the settings panel (DESIGN.md 11).
 enum SettingsPage: Hashable, CaseIterable {
-    case notifications, chats, data, privacy, connection, advanced
+    case notifications, chats, data, privacy, connection, advanced, profile
 }
 
 /// The boxes drawn over the settings panel.
 enum SettingsDialog: Hashable {
     case myID
+    case qrCode
+    case crop
+    case discardProfile
     case passcode
     case autoLock
     case reset
@@ -155,6 +160,9 @@ struct Launch {
     /// `--send-file NAME PATH`, any number of times: files sent like `--send`, a picture as a
     /// photo, through the action of the send box.
     var fileSends: [(name: String, path: String)] = []
+    /// `--profile NAME PATH`: the profile set once the app is connected, through the action of
+    /// the Edit profile page; an empty PATH is no picture.
+    var profile: (name: String, path: String)?
 
     static let current = Launch(CommandLine.arguments)
 
@@ -162,6 +170,7 @@ struct Launch {
         for (index, argument) in arguments.enumerated() where index + 2 < arguments.count {
             if argument == "--send" { sends.append((arguments[index + 1], arguments[index + 2])) }
             if argument == "--send-file" { fileSends.append((arguments[index + 1], arguments[index + 2])) }
+            if argument == "--profile" { profile = (arguments[index + 1], arguments[index + 2]) }
         }
         func value(after flag: String) -> String? {
             guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
@@ -195,6 +204,16 @@ final class AppModel {
     var welcome: Welcome?
     var contacts: [Contact] = []
     var messages: [String: [Message]] = [:]
+    /// The user's own profile.
+    var profile = UserProfile()
+    /// The Edit profile page while it is open (DESIGN.md 12.1).
+    var profileDraft: ProfileDraft?
+    /// The picture of the crop box while it is open.
+    var cropSource: CropSource?
+    /// Set while the system file panel for an avatar is open.
+    var pickingAvatar = false
+    /// The contact photo open over the window (DESIGN.md 16).
+    var avatarViewer: ProfilePhoto?
     var drafts: [String: String] = [:] {
         didSet { scheduleDraftSave() }
     }
@@ -261,6 +280,7 @@ final class AppModel {
     private var toastTask: Task<Void, Never>?
     private var scriptedSends: [(name: String, text: String)] = []
     private var scriptedFileSends: [(name: String, path: String)] = []
+    private var scriptedProfile: (name: String, path: String)?
     @ObservationIgnored private var lastState: MessengerState?
     @ObservationIgnored private var savedDrafts: [String: String] = [:]
     @ObservationIgnored private var draftSave: Task<Void, Never>?
@@ -289,6 +309,7 @@ final class AppModel {
         locked = settings.passcode != nil
         scriptedSends = Launch.current.sends
         scriptedFileSends = Launch.current.fileSends
+        scriptedProfile = Launch.current.profile
         attach(messenger)
     }
 
@@ -341,6 +362,7 @@ final class AppModel {
         if let userID = state.userID { myID = userID }
         relayAddress = state.relay
         connection = ConnectionState(state.link)
+        profile = state.profile
         let quiet = quietChat
         if lastState == nil {
             let loaded = Dictionary(uniqueKeysWithValues: state.chats.compactMap { chat in chat.draft.map { (chat.userID, $0) } })
@@ -350,7 +372,7 @@ final class AppModel {
         contacts = state.chats.map {
             Contact(
                 id: $0.userID, name: $0.name, added: $0.added, unread: $0.userID == quiet ? 0 : $0.unread,
-                pinned: $0.pinned, muted: $0.muted, archived: $0.archived)
+                pinned: $0.pinned, muted: $0.muted, archived: $0.archived, profile: $0.profile)
         }
         messages = Dictionary(uniqueKeysWithValues: state.chats.map { chat in
             let logged = chat.messages.map {
@@ -370,6 +392,10 @@ final class AppModel {
         }
         lastState = state
         if archiveOpen, archivedContacts.isEmpty { archiveOpen = false }
+        if connection == .connected, let scripted = scriptedProfile {
+            scriptedProfile = nil
+            setScriptedProfile(name: scripted.name, path: scripted.path)
+        }
         if connection == .connected, !scriptedSends.isEmpty || !scriptedFileSends.isEmpty {
             for (name, text) in scriptedSends {
                 if let contact = contacts.first(where: { $0.name == name }) {
@@ -475,6 +501,7 @@ final class AppModel {
         guard modal != .settings else { return }
         settingsPage = nil
         settingsDialog = nil
+        profileDraft = nil
         relayDraft = nil
         modal = .settings
     }
@@ -579,6 +606,8 @@ final class AppModel {
         archiveOpen = false
         if messenger != nil { notifier.setBadge(0) }
         myID = ""
+        profile = UserProfile()
+        profileDraft = nil
         settings = AppSettings()
         locked = false
         guard let messenger, let directory = dataDirectory else {
@@ -922,12 +951,15 @@ final class AppModel {
         if locked { return }
         if viewer != nil {
             viewer = nil
+        } else if avatarViewer != nil {
+            avatarViewer = nil
         } else if attachMenuOpen {
             attachMenuOpen = false
         } else if settingsDialog != nil {
+            if settingsDialog == .crop { cropSource = nil }
             settingsDialog = nil
         } else if modal == .settings, settingsPage != nil {
-            settingsPage = nil
+            leavePage()
         } else if modal != nil {
             modal = nil
         } else if chatSearch != nil {

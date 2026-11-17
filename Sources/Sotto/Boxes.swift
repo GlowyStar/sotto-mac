@@ -132,7 +132,7 @@ struct MyIDBox: View {
     var body: some View {
         ModalBox(title: "My id", wide: true) {
             VStack(spacing: 0) {
-                Avatar(id: model.myID, name: "Me", size: Metrics.bigAvatar)
+                Avatar(id: model.myID, name: model.ownName, size: Metrics.bigAvatar, photo: model.profile.avatar)
                 IDBlock(id: model.myID).padding(.top, 16)
                 CopyIDButton { model.copyID(model.myID) }.padding(.top, 12)
             }
@@ -250,11 +250,26 @@ struct ContactPanel: View {
 
     private var details: some View {
         VStack(spacing: 0) {
-            Avatar(id: contact.id, name: contact.name, size: Metrics.bigAvatar)
+            let photo = contact.profile?.avatar
+            Button { model.avatarViewer = photo } label: {
+                Avatar(id: contact.id, name: contact.name, size: Metrics.bigAvatar, photo: photo)
+            }
+            .buttonStyle(.plain)
+            .disabled(photo.flatMap { AvatarPictures.image($0, side: Metrics.bigAvatar) } == nil)
+            .accessibilityLabel("Photo of \(contact.name)")
             Text(contact.name)
                 .font(Fonts.boxTitle)
                 .foregroundStyle(Color.windowBoldFg)
                 .padding(.top, 12)
+            if let sent = contact.profile?.name, !sent.isEmpty, sent != contact.name {
+                Text("Name set by the contact: \(sent)")
+                    .font(Fonts.label)
+                    .foregroundStyle(Color.windowSubFg)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, Metrics.boxPad)
+                    .padding(.top, 2)
+            }
             EncryptedLine().padding(.top, 4)
             VStack(alignment: .leading, spacing: 8) {
                 Text("Id").font(Fonts.sectionLabel).foregroundStyle(Color.accentText)
