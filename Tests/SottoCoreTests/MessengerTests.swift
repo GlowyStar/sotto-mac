@@ -24,7 +24,7 @@ let deadRelay = "ws://127.0.0.1:9/ws"
     #expect(logged[0].position < logged[1].position)
 
     try store.transaction {
-        try store.deleteMessage(logged[0].position)
+        try store.removeMessage(logged[0], at: 0)
         try store.renameContact(bob, name: "robert")
     }
     #expect(try store.messages(bob).map(\.text) == ["two"])
@@ -83,6 +83,31 @@ let deadRelay = "ws://127.0.0.1:9/ws"
 
     await #expect(throws: URLRefusedError.self) { try await messenger.setRelay("ws://relay.example.org/ws") }
     #expect(await messenger.relay == deadRelay)
+    await messenger.close()
+}
+
+@Test func expiredMessagesGoWhileTheMessengerHasNoTransport() async throws {
+    let folder = Folder()
+    let directory = folder.url.appendingPathComponent("app")
+    // A ws address off loopback is refused, so the messenger runs on a client alone.
+    let messenger = try Messenger(directory: directory, relay: "ws://relay.example.org/ws")
+    await messenger.start()
+    _ = try await messenger.createIdentity()
+    let bob = Data(repeating: 7, count: 32)
+    let other = try ClientStore(directory: directory)
+    let now = Int64(Date().timeIntervalSince1970)
+    let id = Data(repeating: 1, count: 16)
+    try other.transaction {
+        try other.addContact(bob, name: "bob")
+        try other.logMessage(bob, direction: .incoming, messageID: id, text: "soon gone")
+        try other.saveState(bob, incoming: true, messageID: id, state: NewState(writtenAt: now, expiresAfter: 1, expiresAt: now + 1))
+    }
+
+    try await until { try await messenger.state().chats.first?.messages.isEmpty == true }
+
+    #expect(try other.messages(bob).isEmpty)
+    #expect(try other.trace(bob, incoming: true, messageID: id)?.gone == true)
+    other.close()
     await messenger.close()
 }
 
@@ -362,6 +387,75 @@ struct MessengerRelayTests {
         #expect(chat.name == "peer" && chat.profile?.name == "Peer's own name")
         #expect(chat.profile?.avatar?.state == .received)
         #expect(chat.unread == 0 && chat.archived && chat.messages.map(\.text) == ["hello peer"])
+        await messenger.close()
+        await peer.stop()
+    }
+
+    @Test func repliesEditsDeletesReceiptsAndTheTimerReachEachSideAndAreNoMessages() async throws {
+        let relay = try await RealRelay()
+        defer { relay.stop() }
+        let messenger = try Messenger(directory: appDirectory, relay: relay.url)
+        await messenger.start()
+        let appID = try await messenger.createIdentity()
+        let appKey = try Identity.decodeUserID(appID)
+        try folder.open("peer").addContact(appID)
+        let peerID = try folder.userID("peer")
+        try await messenger.addContact(name: "peer", userID: peerID)
+        try await waitFor(messenger) { $0.link == .connected }
+        let peer = try await run(folder.open("peer"), URLSessionDialer(), url: relay.url)
+        try await until { try await peer.transport.withClient { try $0.store.newestSignedPrekey()?.confirmed ?? false } }
+
+        try await messenger.send("question", to: peerID)
+        #expect(try await nextText(peer.transport) == (appKey, "question"))
+        let atPeer = try #require(try await peer.transport.withClient { try $0.store.messages(appKey).last?.position })
+        try await waitFor(messenger) { $0.chats.first?.messages.last?.receipt == .delivered }
+        try await peer.transport.markRead(appKey, [atPeer])
+        try await waitFor(messenger) { $0.chats.first?.messages.last?.receipt == .read }
+        let question = try #require(try await chat(messenger)?.messages.last)
+
+        try await peer.transport.sendText(appKey, "answer", replyTo: atPeer)
+        try await waitFor(messenger) { $0.chats.first?.messages.count == 2 }
+        var answer = try #require(try await chat(messenger)?.messages.last)
+        #expect(answer.quote == ChatQuote(position: question.id, outgoing: true, text: "question"))
+        let answerAtPeer = try #require(try await peer.transport.withClient { try $0.store.messages(appKey).last?.position })
+        try await messenger.markSeen([answer.id], in: peerID)
+        try await until {
+            try await peer.transport.withClient { try $0.store.message(answerAtPeer)?.receipt } == .read
+        }
+
+        try await messenger.edit(question.id, text: "a better question", in: peerID)
+        try await until { try await peer.transport.withClient { try $0.store.message(atPeer)?.text } == "a better question" }
+        try await peer.transport.edit(appKey, answerAtPeer, "a better answer")
+        try await waitFor(messenger) { $0.chats.first?.messages.last?.text == "a better answer" }
+        let edited = try #require(try await chat(messenger))
+        #expect(edited.messages.map(\.edited) == [true, true])
+        #expect(edited.messages.first?.text == "a better question")
+        #expect(edited.unread == 1)
+
+        try await messenger.deleteForBoth(question.id, in: peerID)
+        try await until { try await peer.transport.withClient { try $0.store.message(atPeer) } == nil }
+        answer = try #require(try await chat(messenger)?.messages.first)
+        #expect(try await chat(messenger)?.messages.count == 1)
+        #expect(answer.quote?.isGone == true)
+
+        try await peer.transport.setTimer(appKey, seconds: 2)
+        try await waitFor(messenger) { $0.chats.first?.timer == 2 }
+        #expect(try await chat(messenger)?.timerChanges.map(\.own) == [false])
+        try await peer.transport.sendText(appKey, "vanishing")
+        try await waitFor(messenger) { $0.chats.first?.messages.last?.expiresAfter == 2 }
+        let vanishing = try #require(try await chat(messenger)?.messages.last)
+        #expect(vanishing.expiresAt == nil)
+        try await messenger.markSeen([vanishing.id], in: peerID)
+        try await waitFor(messenger) { $0.chats.first?.messages.last?.expiresAt != nil }
+        try await waitFor(messenger) { $0.chats.first?.messages.count == 1 }
+        // The answer: an edit, a timer and a message that is gone count as no unread message.
+        #expect(try await chat(messenger)?.unread == 1)
+
+        try await messenger.setReadReceipts(false)
+        #expect(try await messenger.state().readReceipts == false)
+        try await messenger.setTimer(0, in: peerID)
+        try await until { try await peer.transport.withClient { try $0.timer(appKey) } == 0 }
+        #expect(try await chat(messenger)?.timerChanges.map(\.own) == [false, true])
         await messenger.close()
         await peer.stop()
     }

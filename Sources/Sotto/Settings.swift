@@ -865,6 +865,9 @@ struct PrivacyPage: View {
         SectionTitle(text: "Notifications")
         SettingsToggle(title: "Hide contents while locked", isOn: $model.settings.hideContentsWhileLocked, enabled: on)
         Hint(text: "While Sotto is locked, notifications say only that a message arrived.")
+        SectionTitle(text: "Messages")
+        SettingsToggle(title: "Read receipts", isOn: Binding(get: { model.readReceipts }, set: { model.setReadReceipts($0) }))
+        Hint(text: "When off, contacts see that a message was delivered, never that you read it. Delivery receipts are always sent.")
     }
 }
 

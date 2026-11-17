@@ -6,11 +6,13 @@ Run with the interpreter of the sotto project's environment, which holds `sotto`
     ../../python/sotto/.venv/bin/python scripts/interop.py [--keep DIR]
 
 Starts the relay on a free port, builds `sotto-mac`, makes one identity with each client and
-drives both `chat` commands through pipes. Then files go both ways with `send-file`, also
-two large ones whose transfer is cut in the middle: the upload of `sotto-mac` by a kill of
-its `send-file`, the download of `sotto-mac` by a kill of its `chat`; each ends whole after
-the next start. Exits 0 only if every message arrived as text and every file byte for byte;
-stops everything it started. The data lives in a temporary directory that is removed at the
+drives both `chat` commands through pipes. Then part 5 goes both ways: a reply with its
+quote, the delivered and read marks, an edit, a delete for both and a message with a short
+timer that disappears at both sides and from both stores. Then files go both ways with
+`send-file`, also two large ones whose transfer is cut in the middle: the upload of
+`sotto-mac` by a kill of its `send-file`, the download of `sotto-mac` by a kill of its
+`chat`; each ends whole after the next start. Exits 0 only if every message arrived as text
+and every file byte for byte; stops everything it started. The data lives in a temporary directory that is removed at the
 end; `--keep DIR` keeps the stores and the relay database in DIR instead.
 """
 
@@ -72,6 +74,11 @@ class Chat:
 
     async def expect(self, line: str, patience: float = PATIENCE_SECONDS) -> None:
         await self.expect_match(re.escape(line), patience)
+
+    async def expect_message(self, head: str, text: str, patience: float = PATIENCE_SECONDS) -> int:
+        """A message of the chat, `#N head: text`; returns its number N in the log."""
+        match = await self.expect_match(rf"#(\d+) {re.escape(head)}: {re.escape(text)}", patience)
+        return int(match.group(1))
 
     async def expect_match(self, pattern: str, patience: float = PATIENCE_SECONDS) -> re.Match[str]:
         """The first line that matches the whole of `pattern`."""
@@ -142,6 +149,72 @@ async def relay(database: Path) -> AsyncIterator[str]:
         process.wait(timeout=PATIENCE_SECONDS)
 
 
+def stored_texts(store: Path) -> list[str]:
+    with sqlite3.connect(f"file:{store}?mode=ro", uri=True) as connection:
+        return [str(row[0]) for row in connection.execute("SELECT text FROM messages")]
+
+
+async def part_five(swift: Chat, python: Chat, swift_dir: Path, python_dir: Path, sotto_mac: Path) -> None:
+    """A reply, the marks, an edit, a delete for both and a short timer, each way."""
+    await python.type("wave two from python")
+    own_at_python = await python.expect_message("you", "wave two from python")
+    at_swift = await swift.expect_message("python", "wave two from python")
+    await python.expect(f"#{own_at_python} read")
+    print("ok   swift counted the text of python as read, and python shows it read")
+
+    await swift.type(f"/reply {at_swift} answer from swift")
+    own_at_swift = await swift.expect_message(f"you, replying to #{at_swift}", "answer from swift")
+    answer_at_python = await python.expect_message(
+        f'swift, replying to #{own_at_python} "wave two from python"', "answer from swift"
+    )
+    await swift.expect(f"#{own_at_swift} read")
+
+    await python.type(f"/reply {answer_at_python} answer from python")
+    await swift.expect_message(f'python, replying to #{own_at_swift} "answer from swift"', "answer from python")
+
+    await python.type(f"/edit {own_at_python} edited by python")
+    await python.expect(f"#{own_at_python} you edited: edited by python")
+    await swift.expect(f"#{at_swift} python edited: edited by python")
+    await swift.type(f"/edit {own_at_swift} edited by swift")
+    await swift.expect(f"#{own_at_swift} you edited: edited by swift")
+    await python.expect(f"#{answer_at_python} swift edited: edited by swift")
+
+    await python.type(f"/delete {own_at_python}")
+    await python.expect(f"#{own_at_python} deleted for both")
+    await swift.expect(f"#{at_swift} python deleted the message")
+    await swift.type(f"/delete {own_at_swift}")
+    await swift.expect(f"#{own_at_swift} deleted for both")
+    await python.expect(f"#{answer_at_python} swift deleted the message")
+    await swift.type(f"/edit {at_swift} not mine")
+    await swift.expect("not sent: NO_SUCH_MESSAGE")
+
+    await python.type("/timer 3s")
+    await python.expect("timer: 3s")
+    await swift.expect("python set the timer: 3s")
+    await swift.type("vanishing from swift")
+    vanishing_at_swift = await swift.expect_message("you (3s)", "vanishing from swift")
+    vanishing_at_python = await python.expect_message("swift (3s)", "vanishing from swift")
+    await python.type("vanishing from python")
+    other_at_python = await python.expect_message("you (3s)", "vanishing from python")
+    other_at_swift = await swift.expect_message("python (3s)", "vanishing from python")
+    for chat, number in (
+        (swift, vanishing_at_swift), (python, vanishing_at_python), (python, other_at_python), (swift, other_at_swift)
+    ):
+        await chat.expect(f"#{number} disappeared")
+    await swift.type("/timer off")
+    await swift.expect("timer: off")
+    await python.expect("swift set the timer: off")
+
+    for label, store in (("swift", swift_dir / "store.db"), ("python", python_dir / "store.db")):
+        left = [text for text in stored_texts(store) if "vanishing" in text or "edited by" in text or "wave two" in text]
+        if left:
+            raise CheckFailed(f"the store of {label} still holds {left}")
+    print("ok   the deleted, edited and expired texts are in neither store")
+    shown = await command(sotto_mac, "--data-dir", swift_dir, "read-receipts")
+    if shown != "read receipts: on":
+        raise CheckFailed(f"sotto-mac read-receipts printed {shown!r}")
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="sotto-mac and the Python client through a real relay.")
     parser.add_argument("--keep", type=Path, metavar="DIR", help="keep the data in DIR")
@@ -199,26 +272,27 @@ async def main() -> int:
                 python = await open_chat("python", SOTTO, python_dir, "swift", url)
 
                 await python.type("hello from python")
-                await swift.expect("python: hello from python")
+                await swift.expect_message("python", "hello from python")
                 await swift.type("hello from swift")
-                await python.expect("swift: hello from swift")
+                await python.expect_message("swift", "hello from swift")
 
                 await swift.quit()
                 await python.type("while swift was away")
                 await asyncio.sleep(1)
                 swift = await open_chat("swift", sotto_mac, swift_dir, "python", url)
-                await swift.expect("python: while swift was away")
+                await swift.expect_message("python", "while swift was away")
 
                 await python.quit()
                 await swift.type("while python was away")
                 await asyncio.sleep(1)
                 python = await open_chat("python", SOTTO, python_dir, "swift", url)
-                await python.expect("swift: while python was away")
+                await python.expect_message("swift", "while python was away")
 
                 await python.type("after both restarts")
-                await swift.expect("python: after both restarts")
+                await swift.expect_message("python", "after both restarts")
                 await swift.type("still here")
-                await python.expect("swift: still here")
+                await python.expect_message("swift", "still here")
+                await part_five(swift, python, swift_dir, python_dir, sotto_mac)
                 await python.quit()
 
                 async def send_file(
@@ -257,8 +331,8 @@ async def main() -> int:
                 )
                 await sender.expect(f"sent {from_python.name} to swift")
                 await ends_with(sender, 0)
-                await swift.expect(
-                    f"python: file {from_python.name}, {from_python.stat().st_size} bytes: a caption"
+                await swift.expect_message(
+                    "python", f"file {from_python.name}, {from_python.stat().st_size} bytes: a caption"
                 )
                 saved = await swift.expect_match(f"python: {re.escape(from_python.name)} saved as (.+)")
                 same(from_python, saved.group(1))

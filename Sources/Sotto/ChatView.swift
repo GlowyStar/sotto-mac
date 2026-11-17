@@ -1,4 +1,5 @@
 import AppKit
+import SottoCore
 import SwiftUI
 
 /// The open chat: header, messages, compose bar and, when it fits, the contact panel.
@@ -86,7 +87,15 @@ struct ChatHeader: View {
                             .font(Fonts.headerTitle)
                             .foregroundStyle(Color.windowBoldFg)
                             .lineLimit(1)
-                        EncryptedLine()
+                        HStack(spacing: 8) {
+                            EncryptedLine().lineLimit(1)
+                            if let timer = model.timers[contact.id], timer > 0 {
+                                TimerLabel(seconds: timer, color: .windowSubFg)
+                                    .fixedSize()
+                                    .layoutPriority(1)
+                                    .help("Disappearing messages: \(TimerChoices.title(timer))")
+                            }
+                        }
                     }
                 }
                 .contentShape(Rectangle())
@@ -97,7 +106,22 @@ struct ChatHeader: View {
             Spacer(minLength: 8)
             IconButton(symbol: "magnifyingglass", size: 18, label: "Search in chat") { model.openChatSearch() }
             IconButton(symbol: "sidebar.right", size: 18, label: "Contact info", action: togglePanel)
-                .padding(.trailing, 8)
+            Menu {
+                Menu("Disappearing messages") { TimerMenuItems(model: model, chatID: contact.id) }
+                Button("Contact info", action: togglePanel)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 18))
+                    .foregroundStyle(Color.composeIconFg)
+                    .frame(width: Metrics.headerButton, height: Metrics.headerButton)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("More")
+            .help("More")
+            .padding(.trailing, 8)
         }
         .frame(height: Metrics.topBarHeight)
         .background(Color.topBarBg)
@@ -110,40 +134,67 @@ enum ChatItem: Identifiable {
     case date(Date)
     case unread
     case message(Message, top: Bool, bottom: Bool)
+    /// A change of the disappearing timer (DESIGN.md 20.7).
+    case service(TimerChange)
 
     var id: String {
         switch self {
         case .date(let date): "date-\(date.timeIntervalSinceReferenceDate)"
         case .unread: "unread"
         case .message(let message, _, _): message.id
+        case .service(let change): "timer-\(change.date.timeIntervalSinceReferenceDate)-\(change.seconds)"
         }
     }
 
-    /// The day of a date pill or a message.
+    /// The day of a date pill, a message or a service line.
     var day: Date? {
         switch self {
         case .date(let date): date
         case .unread: nil
         case .message(let message, _, _): message.date
+        case .service(let change): change.date
         }
     }
 
-    /// Splits messages into days and groups (DESIGN.md 5.4 to 5.6).
-    static func build(_ messages: [Message], unreadAnchor: String?) -> [ChatItem] {
+    /// Splits messages into days and groups (DESIGN.md 5.4 to 5.6); a change of the timer
+    /// stands between the messages of its time and ends a group.
+    static func build(_ messages: [Message], unreadAnchor: String?, changes: [TimerChange] = []) -> [ChatItem] {
         let calendar = Calendar.current
+        enum Entry {
+            case message(Message)
+            case change(TimerChange)
+
+            var date: Date {
+                switch self {
+                case .message(let message): message.date
+                case .change(let change): change.date
+                }
+            }
+
+            var message: Message? {
+                if case .message(let message) = self { message } else { nil }
+            }
+        }
+        let entries = (messages.map(Entry.message) + changes.map(Entry.change)).enumerated()
+            .sorted { ($0.element.date, $0.offset) < ($1.element.date, $1.offset) }
+            .map(\.element)
         var items: [ChatItem] = []
-        for (index, message) in messages.enumerated() {
-            let previous = index > 0 ? messages[index - 1] : nil
-            let next = index + 1 < messages.count ? messages[index + 1] : nil
-            let newDay = previous.map { !calendar.isDate($0.date, inSameDayAs: message.date) } ?? true
-            if newDay { items.append(.date(message.date)) }
+        for (index, entry) in entries.enumerated() {
+            let previous = index > 0 ? entries[index - 1] : nil
+            let next = index + 1 < entries.count ? entries[index + 1] : nil
+            let newDay = previous.map { !calendar.isDate($0.date, inSameDayAs: entry.date) } ?? true
+            if newDay { items.append(.date(entry.date)) }
+            guard let message = entry.message else {
+                if case .change(let change) = entry { items.append(.service(change)) }
+                continue
+            }
             if message.id == unreadAnchor { items.append(.unread) }
             func joins(_ a: Message?, _ b: Message?) -> Bool {
                 guard let a, let b else { return false }
                 return a.outgoing == b.outgoing && calendar.isDate(a.date, inSameDayAs: b.date)
                     && b.date.timeIntervalSince(a.date) < Metrics.groupGap && b.id != unreadAnchor
             }
-            items.append(.message(message, top: !joins(previous, message), bottom: !joins(message, next)))
+            items.append(.message(message, top: !joins(previous?.message, message), bottom: !joins(message, next?.message)))
         }
         return items
     }
@@ -175,6 +226,8 @@ struct MessageList: View {
         let isDate: Bool
         let minY: CGFloat
         let maxY: CGFloat
+        /// The id of an incoming message.
+        var incoming: String?
     }
 
     private struct LinesKey: PreferenceKey {
@@ -184,7 +237,7 @@ struct MessageList: View {
 
     var body: some View {
         let messages = model.messages[contact.id] ?? []
-        let items = ChatItem.build(messages, unreadAnchor: model.unreadAnchor)
+        let items = ChatItem.build(messages, unreadAnchor: model.unreadAnchor, changes: model.timerChanges[contact.id] ?? [])
         GeometryReader { outer in
             let maxBubble = min(Metrics.bubbleMaxWidth, outer.size.width - Metrics.bubbleNear - Metrics.bubbleFar)
             ScrollViewReader { proxy in
@@ -209,7 +262,11 @@ struct MessageList: View {
                     Task { @MainActor in moved(frame, height: outer.size.height) }
                 }
                 .onPreferenceChange(LinesKey.self) { lines in
-                    Task { @MainActor in topDay = Self.topDay(lines) }
+                    Task { @MainActor in
+                        topDay = Self.topDay(lines)
+                        let shown = lines.filter { $0.maxY > 0 && $0.minY < outer.size.height }.compactMap(\.incoming)
+                        model.showing(shown, in: contact.id)
+                    }
                 }
                 .overlay(alignment: .top) {
                     if pillShown, let topDay {
@@ -276,9 +333,14 @@ struct MessageList: View {
     private func lineFrame(_ item: ChatItem) -> some View {
         GeometryReader { line in
             let frame = line.frame(in: .named("messages"))
+            let incoming: String? = if case .message(let message, _, _) = item, !message.outgoing { message.id } else { nil }
             Color.clear.preference(
                 key: LinesKey.self,
-                value: item.day.map { [Line(day: $0, isDate: { if case .date = item { true } else { false } }(), minY: frame.minY, maxY: frame.maxY)] } ?? [])
+                value: item.day.map {
+                    [Line(
+                        day: $0, isDate: { if case .date = item { true } else { false } }(), minY: frame.minY, maxY: frame.maxY,
+                        incoming: incoming)]
+                } ?? [])
         }
     }
 
@@ -321,6 +383,12 @@ struct MessageList: View {
                 .overlay(alignment: .top) { Rectangle().fill(Color.unreadBarBorder).frame(height: 1) }
                 .overlay(alignment: .bottom) { Rectangle().fill(Color.unreadBarBorder).frame(height: 1) }
                 .padding(.vertical, Metrics.unreadMargin)
+        case .service(let change):
+            ServicePill(text: TimerChoices.line(change, name: contact.name))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, Metrics.bubbleFar)
+                .padding(.top, Metrics.dateTop)
+                .padding(.bottom, Metrics.dateBottom)
         case .message(let message, let top, let bottom):
             MessageRow(message: message, top: top, bottom: bottom, maxWidth: maxBubble, model: model, chatID: contact.id) {
                 model.deleteMessage(message.id, in: contact.id)
@@ -403,24 +471,41 @@ struct MessageRow: View {
             if file.isPhoto {
                 PhotoBubble(
                     message: message, file: file, shape: shape, maxWidth: maxWidth, time: time,
-                    connected: connected, tap: tap
+                    connected: connected, tap: tap, header: quoteView.map { AnyView($0) }
                 ) { textWithTime }
             } else {
                 FileBubble(
                     message: message, file: file, shape: shape, maxWidth: maxWidth, time: time,
-                    connected: connected, tap: tap
+                    connected: connected, tap: tap, header: quoteView.map { AnyView($0) }
                 ) { textWithTime }
             }
+        } else if let quoteView {
+            BubbleColumn {
+                quoteView
+                    .padding(.horizontal, Metrics.quoteInset)
+                    .padding(.top, Metrics.quoteTop)
+                textWithTime
+            }
+            .background { BubbleBackground(shape: shape, out: message.outgoing) }
         } else {
             textWithTime.background { BubbleBackground(shape: shape, out: message.outgoing) }
         }
+    }
+
+    /// The quote of a reply; a click shows the quoted message when the chat holds it.
+    private var quoteView: QuoteBlock? {
+        guard let quote = message.quote else { return nil }
+        let target = quote.messageID.flatMap { id in model?.message(id, in: chatID).map { _ in id } }
+        return QuoteBlock(
+            quote: quote, out: message.outgoing, author: model?.author(quote.outgoing, in: chatID) ?? "",
+            action: target.map { id in { model?.focus(id, in: chatID) } })
     }
 
     /// The text with the time and the status mark at the end of its last line.
     private var textWithTime: some View {
         let out = message.outgoing
         // A transparent copy of the time keeps room for it on the last line.
-        let reserve = Text(" \u{2007}" + time + (out ? "\u{2007}\u{2007}\u{2007}" : "")).foregroundColor(.clear)
+        let reserve = Text(TimeMark.reserve(message, time: time)).foregroundColor(.clear)
         return (Text(Self.attributed(message.text, out: out)) + reserve)
             .font(Fonts.message(settings.textSize))
             .lineSpacing(Fonts.messageLineSpacing(settings.textSize))
@@ -439,6 +524,16 @@ struct MessageRow: View {
 
     @ViewBuilder
     private var menu: some View {
+        if let model {
+            if message.position != nil || model.messenger == nil {
+                Button { model.startReply(message.id, in: chatID) } label: {
+                    Label("Reply", systemImage: "arrowshape.turn.up.left")
+                }
+            }
+            if message.canEdit() || (model.messenger == nil && message.outgoing) {
+                Button { model.startEdit(message.id, in: chatID) } label: { Label("Edit", systemImage: "pencil") }
+            }
+        }
         if let file = message.file, let model {
             if let url = Media.localURL(file) {
                 Button { model.saveAs(message) } label: { Label("Save as...", systemImage: "square.and.arrow.down") }
@@ -459,8 +554,14 @@ struct MessageRow: View {
                 Label("Copy text", systemImage: "doc.on.doc")
             }
         }
-        Button(role: .destructive, action: delete) {
-            Label("Delete for me", systemImage: "trash")
+        Button(role: .destructive) {
+            if let model {
+                model.modal = .deleteMessage(chatID, message.id)
+            } else {
+                delete()
+            }
+        } label: {
+            Label("Delete", systemImage: "trash")
         }
     }
 

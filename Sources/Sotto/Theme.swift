@@ -52,6 +52,14 @@ extension Color {
     static let msgOutShadow = token("3ac3461d", "00000000")
     static let msgStoredIconFg = token("57b84c", "6bbfff")
     static let msgSendingIconFg = token("98d292", "70a4d2")
+    // DESIGN.md 20.1: replies, the delivered mark and the strip of the compose bar.
+    static let msgDeliveredIconFg = token("98d292", "70a4d2")
+    static let quoteBarIn = token("37a1de", "429bdb")
+    static let quoteBarOut = token("5eb854", "65b9f4")
+    static let quoteNameIn = token("168acd", "71bafa")
+    static let quoteNameOut = token("45a32d", "90caff")
+    static let replyCancelFg = token("999999", "737e87")
+    static let replyCancelFgOver = token("8a8a8a", "dcdcdc")
     static let serviceBg = token("517c417f", "213040d5")
     static let serviceFg = token("ffffff", "ffffff")
     static let unreadBarBg = token("fcfbfa", "182433")
@@ -212,6 +220,21 @@ enum AvatarPalette {
 
 /// Sizes in points (DESIGN.md 2 and 5).
 enum Metrics {
+    // DESIGN.md 20.2 and 20.3: the strip above the compose field and the quote in a bubble.
+    static let stripHeight: CGFloat = 49
+    static let stripIcon: CGFloat = 32
+    static let stripIconLeft: CGFloat = 7
+    static let stripTextLeft: CGFloat = 53
+    static let quoteLine: CGFloat = 18
+    static let quotePad = EdgeInsets(top: 2, leading: 11, bottom: 2, trailing: 6)
+    static let quoteBar: CGFloat = 3
+    static let quoteRadius: CGFloat = 5
+    /// The quote sits this far inside the bubble edges and this far under its top.
+    static let quoteInset: CGFloat = 8
+    static let quoteTop: CGFloat = 6
+    /// The double check and the single one (DESIGN.md 20.5).
+    static let checksSize = CGSize(width: 18, height: 11)
+    static let checkSize = CGSize(width: 13, height: 11)
     // Window and layout
     static let windowMin = CGSize(width: 380, height: 480)
     static let windowDefault = CGSize(width: 800, height: 600)
@@ -388,6 +411,7 @@ enum Fonts {
     static let badge = Font.system(size: 12, weight: .bold)
     static let headerTitle = Font.system(size: 14, weight: .semibold)
     static let headerSubtitle = Font.system(size: 13)
+    static let quoteName = Font.system(size: 13, weight: .semibold)
     /// Message text and time at the size of the chat settings; the line is size + 5.
     static func message(_ size: Int) -> Font { .system(size: CGFloat(size)) }
     static func messageLineSpacing(_ size: Int) -> CGFloat {

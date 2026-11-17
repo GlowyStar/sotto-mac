@@ -85,21 +85,39 @@ struct Badge: View {
     }
 }
 
-/// The outbox mark of an own message: a clock while waiting, a check once stored, a danger
+/// The mark of an own message (DESIGN.md 7.6 and 20.5): a clock while waiting, one check
+/// once stored, two checks once delivered and two in the full colour once read, a danger
 /// mark with the reason on hover when it is not sent.
 struct StatusMark: View {
     let state: MessageState
     let waitingColor: Color
     let storedColor: Color
+    /// The two checks of a message delivered and not read.
+    var deliveredColor: Color?
+    /// The smaller checks of a chat list row.
+    var small = false
 
     var body: some View {
         switch state {
-        case .waiting: mark("clock", waitingColor, label: "Waiting in the outbox")
-        case .stored: mark("checkmark", storedColor, label: "Stored by the relay")
+        case .waiting: mark("clock", waitingColor, label: "Sending")
+        case .stored: checks(double: false, storedColor, label: "Sent")
+        case .delivered: checks(double: true, deliveredColor ?? storedColor.opacity(0.55), label: "Delivered")
+        case .read: checks(double: true, storedColor, label: "Read")
         case .failed(let reason):
             mark("exclamationmark.circle.fill", .danger, label: "Not sent: \(reason)")
                 .help("Not sent. \(reason)")
         }
+    }
+
+    private func checks(double: Bool, _ color: Color, label: String) -> some View {
+        let size = double ? Metrics.checksSize : Metrics.checkSize
+        return Checks(double: double)
+            .fill(color)
+            .frame(width: size.width - (small ? 1 : 0), height: size.height - (small ? 1 : 0))
+            .frame(width: Metrics.checksSize.width, alignment: .leading)
+            .help(label)
+            .accessibilityLabel(label)
+            .transition(.opacity)
     }
 
     private func mark(_ symbol: String, _ color: Color, label: String) -> some View {

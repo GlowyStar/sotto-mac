@@ -60,7 +60,7 @@ private func content(_ text: String?) throws -> Data {
         let storeAfterFirst = try rows(bob.store)
         let second = try bob.receive(delivered)
 
-        #expect(first == Received(ack: true, text: "once", result: nil))
+        #expect(first.text == "once" && first.result == nil && first.isANewMessage)
         #expect(second == Received(ack: true, text: nil, result: "DUPLICATE"))
         #expect(try rows(bob.store) == storeAfterFirst)
     }

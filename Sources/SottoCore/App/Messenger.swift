@@ -15,6 +15,53 @@ public struct ChatMessage: Codable, Equatable, Sendable, Identifiable {
     public var failure: String?
     /// The file of the message; `text` is then its caption.
     public var file: ChatFile? = nil
+    /// The message this one answers (protocol section 39.2).
+    public var quote: ChatQuote? = nil
+    /// The text was changed after the message was sent (section 39.3).
+    public var edited = false
+    /// The last receipt of the peer for an own message (section 39.5).
+    public var receipt: ReceiptKind? = nil
+    /// The timer the message carries in seconds, 0 for none (section 39.6).
+    public var expiresAfter = 0
+    /// When the message disappears; nil while its timer has not started.
+    public var expiresAt: Date? = nil
+    /// Until when an own message can be edited; nil when it cannot be (section 39.3).
+    public var editableUntil: Date? = nil
+}
+
+/// The message a reply quotes, as the app shows it: its own copy when it has one
+/// (`position`, the current text and file), else the text the quote carried; neither once
+/// that message is gone (protocol section 39.2).
+public struct ChatQuote: Codable, Hashable, Sendable {
+    public var position: Int64?
+    /// The quoted message is the user's own.
+    public var outgoing: Bool
+    public var text: String?
+    public var file: ChatFile?
+
+    public init(position: Int64?, outgoing: Bool, text: String?, file: ChatFile? = nil) {
+        self.position = position
+        self.outgoing = outgoing
+        self.text = text
+        self.file = file
+    }
+
+    /// The quoted message is gone here and its quote keeps no text.
+    public var isGone: Bool { position == nil && text == nil }
+}
+
+/// A change of the disappearing timer of a chat, shown as a service line (section 39.8).
+public struct TimerChange: Codable, Hashable, Sendable {
+    public var date: Date
+    public var seconds: Int
+    /// The user set it, not the contact.
+    public var own: Bool
+
+    public init(date: Date, seconds: Int, own: Bool) {
+        self.date = date
+        self.seconds = seconds
+        self.own = own
+    }
 }
 
 /// A file sent or received (section 33.5).
@@ -117,6 +164,10 @@ public struct Chat: Codable, Equatable, Sendable {
     public var draft: String?
     /// The latest profile the contact sent; `name` above stays the local name.
     public var profile: UserProfile?
+    /// The disappearing timer of the chat in seconds, 0 when off (section 39.6).
+    public var timer = 0
+    /// The changes of the timer, oldest first.
+    public var timerChanges: [TimerChange] = []
 }
 
 public enum LinkState: Codable, Equatable, Sendable {
@@ -136,6 +187,8 @@ public struct MessengerState: Codable, Equatable, Sendable {
     public var relay: String
     /// The user's own profile; empty until one is set.
     public var profile = UserProfile()
+    /// Whether contacts get read receipts (section 39.5).
+    public var readReceipts = true
 }
 
 public enum ContactError: Error, Equatable, Sendable {
@@ -176,6 +229,7 @@ public struct NotConnectedError: Error, Equatable, Sendable {}
 public actor Messenger {
     public static let notesFile = "app.json"
     static let pollSeconds = 0.5
+    static let expirySeconds = 1.0
 
     public nonisolated let changes: AsyncStream<MessengerState>
     /// Whether the store held an identity when it was opened.
@@ -194,6 +248,9 @@ public actor Messenger {
     private var runner: Task<Void, Never>?
     private var listener: Task<Void, Never>?
     private var poller: Task<Void, Never>?
+    /// Removes expired messages every `expirySeconds` for the whole life of the messenger,
+    /// also after the transport stopped (protocol section 39.6).
+    private var expirer: Task<Void, Never>?
     /// Commits the pending texts through the transport, one at a time.
     private var flusher: Task<Void, Never>?
     private var flushAgain = false
@@ -235,6 +292,12 @@ public actor Messenger {
                 await self?.pollWaiting()
             }
         }
+        expirer = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.expirySeconds * 1_000_000_000))
+                await self?.expire()
+            }
+        }
         await publish()
     }
 
@@ -242,6 +305,7 @@ public actor Messenger {
     public func close() async {
         await disconnect()
         poller?.cancel()
+        expirer?.cancel()
         sink.finish()
     }
 
@@ -287,12 +351,15 @@ public actor Messenger {
     /// Keeps the text in the store at once, then commits it to the outbox and sends it. A
     /// contact without a session waits for a connection, which fetches its bundle; until then
     /// the text waits among the pending texts, also across a restart.
-    public func send(_ text: String, to userID: String) async throws {
+    /// `replyTo` is the position of the message of the chat that the text answers.
+    public func send(_ text: String, to userID: String, replyTo: Int64? = nil) async throws {
         _ = try Envelope.encodeText(text)
         let contact = try Identity.decodeUserID(userID)
         let madeAt = Self.milliseconds(Date())
         try await withClient { client in
-            try client.store.transaction { _ = try client.store.addPending(contact, text: text, madeAt: madeAt) }
+            try client.store.transaction {
+                _ = try client.store.addPending(contact, text: text, madeAt: madeAt, replyTo: replyTo)
+            }
         }
         if notes.drafts.removeValue(forKey: userID) != nil {
             try notes.save(directory)
@@ -313,15 +380,27 @@ public actor Messenger {
     @discardableResult
     public func sendFile(
         _ file: URL, caption: String = "", to userID: String, mediaType: String? = nil,
-        width: Int = 0, height: Int = 0, thumbnail: Data = Data()
+        width: Int = 0, height: Int = 0, thumbnail: Data = Data(), replyTo: Int64? = nil
     ) async throws -> Int64 {
         guard let transport else {
             throw NotConnectedError()
         }
         let contact = try Identity.decodeUserID(userID)
-        let blobID = try await transport.sendFile(
-            contact, file: file, caption: caption, mediaType: mediaType, width: width, height: height, thumbnail: thumbnail
-        )
+        let replyTo = try await transport.withClient { client in
+            try replyTo.flatMap { try client.store.message($0)?.contact == contact ? $0 : nil }
+        }
+        let blobID: Data
+        do {
+            blobID = try await transport.sendFile(
+                contact, file: file, caption: caption, mediaType: mediaType, width: width, height: height, thumbnail: thumbnail,
+                replyTo: replyTo
+            )
+        } catch ChangeError.noSuchMessage where replyTo != nil {
+            // The quoted message went while the login was awaited: the file goes alone.
+            blobID = try await transport.sendFile(
+                contact, file: file, caption: caption, mediaType: mediaType, width: width, height: height, thumbnail: thumbnail
+            )
+        }
         let position = try await transport.withClient { client -> Int64 in
             guard let sent = try client.store.files().last(where: { !$0.incoming && $0.attachment.blobID == blobID }) else {
                 return 0
@@ -414,6 +493,65 @@ public actor Messenger {
         }
         let contact = try Identity.decodeUserID(userID)
         try await withClient { client in try client.store.transaction { try client.store.renameContact(contact, name: name) } }
+        await publish()
+    }
+
+    /// Edits an own message of the chat: its text, or the caption of its file (protocol
+    /// section 39.3); waits for a connection when the contact has no session.
+    ///
+    /// - Throws: `NotConnectedError` without a transport; `ChangeError`;
+    ///   `EnvelopeError.textTooLong`.
+    public func edit(_ position: Int64, text: String, in userID: String) async throws {
+        guard let transport else {
+            throw NotConnectedError()
+        }
+        try await transport.edit(Identity.decodeUserID(userID), position, text)
+        await publish()
+    }
+
+    /// Deletes an own message here and asks the contact's app to delete it too (protocol
+    /// section 39.4).
+    public func deleteForBoth(_ position: Int64, in userID: String) async throws {
+        guard let transport else {
+            throw NotConnectedError()
+        }
+        try await transport.delete(Identity.decodeUserID(userID), position)
+        notes.times[String(position)] = nil
+        try notes.save(directory)
+        await publish()
+    }
+
+    /// Sets the disappearing timer of the chat, 0 for off, for the messages sent from now on
+    /// by either side (protocol section 39.6).
+    public func setTimer(_ seconds: Int, in userID: String) async throws {
+        guard let transport else {
+            throw NotConnectedError()
+        }
+        try await transport.setTimer(Identity.decodeUserID(userID), seconds: seconds)
+        notes.timerChanges[userID, default: []].append(TimerNote(at: Self.milliseconds(Date()), seconds: seconds, own: true))
+        try notes.save(directory)
+        await publish()
+    }
+
+    /// Turns the read receipts that contacts get on or off (protocol section 39.5).
+    public func setReadReceipts(_ on: Bool) async throws {
+        if let transport {
+            try await transport.setReadReceipts(on)
+        } else {
+            try await withClient { try $0.setReadReceipts(on) }
+        }
+        await publish()
+    }
+
+    /// The user has seen these messages of the chat on screen: their timers start and their
+    /// read receipts are owed (protocol sections 39.5 and 39.6).
+    public func markSeen(_ positions: [Int64], in userID: String) async throws {
+        let contact = try Identity.decodeUserID(userID)
+        if let transport {
+            try await transport.markRead(contact, positions)
+        } else {
+            try await withClient { _ = try $0.markRead(contact, positions) }
+        }
         await publish()
     }
 
@@ -605,6 +743,11 @@ public actor Messenger {
         case is NotConnectedError: "There is no connection to a relay."
         case FileError.filesUnsupported: "The relay does not take files."
         case FileError.fileTooLarge: "The file is too large."
+        case ChangeError.noSuchMessage: "The message is gone."
+        case ChangeError.notOwnMessage: "Only your own messages can be changed."
+        case ChangeError.tooManyEdits: "The message was edited \(Client.maxEdits) times already."
+        case ChangeError.editTooLate: "A message can be edited within a day of sending."
+        case EnvelopeError.badTimer: "The timer is too long."
         case EnvelopeError.badProfileName: "The name is too long or holds a control character."
         case EnvelopeError.avatarTooLarge: "The picture is too large."
         case EnvelopeError.notAnImage: "Choose a picture."
@@ -685,12 +828,26 @@ public actor Messenger {
         case .retrying: link = .connecting
         case .stopped(let reason): link = .stopped(Self.explain(reason))
         case .incoming(let sender, let received):
-            // A profile, or a member of a later part that the client does not know, is no
-            // message (protocol sections 20.3 and 36.3): the chat stays where it is.
-            let isMessage = received.text != nil || received.attachment != nil
-            if isMessage, let userID = try? Identity.encodeUserID(sender), notes.arrived(userID) {
+            // A profile, a change of part 5, or a member of a later part that the client does
+            // not know, is no message (protocol sections 20.3, 36.3 and 39.7): the chat stays
+            // where it is.
+            guard let userID = try? Identity.encodeUserID(sender) else { break }
+            var changed = received.isANewMessage && notes.arrived(userID)
+            if let seconds = received.timer {
+                notes.timerChanges[userID, default: []].append(TimerNote(at: Self.milliseconds(Date()), seconds: seconds, own: false))
+                changed = true
+            }
+            if received.deleted, let position = received.position {
+                notes.times[String(position)] = nil
+                changed = true
+            }
+            if changed {
                 try? notes.save(directory)
             }
+        case .expired(let positions):
+            positions.forEach { notes.times[String($0)] = nil }
+            try? notes.save(directory)
+        case .written, .sent: break
         case .refused, .transferFailed: break
         case .file(let update) where update.avatar:
             if update.state == .sending || update.state == .receiving {
@@ -710,6 +867,23 @@ public actor Messenger {
 
     private func stopped(_ text: String) async {
         link = .stopped(text)
+        await publish()
+    }
+
+    /// The expired messages go, through the transport when there is one, which also ends
+    /// their downloads and deletes their blobs at the relay, else through the client.
+    private func expire() async {
+        var positions: [Int64] = []
+        if let transport {
+            positions = (try? await transport.expireNow()) ?? []
+        } else if let client {
+            positions = (try? client.expireMessages()) ?? []
+        }
+        guard !positions.isEmpty else {
+            return
+        }
+        positions.forEach { notes.times[String($0)] = nil }
+        try? notes.save(directory)
         await publish()
     }
 
@@ -746,7 +920,17 @@ public actor Messenger {
                 break
             }
             do {
-                let messageID = try await transport.sendText(row.contact, row.text, pending: row.position)
+                // A text that waited for a session answers its message only while that one is there.
+                let replyTo = try await transport.withClient { client in
+                    try row.replyTo.flatMap { try client.store.message($0)?.contact == row.contact ? $0 : nil }
+                }
+                let messageID: Data
+                do {
+                    messageID = try await transport.sendText(row.contact, row.text, pending: row.position, replyTo: replyTo)
+                } catch ChangeError.noSuchMessage where replyTo != nil {
+                    // The quoted message went while the bundle was fetched: the text goes alone.
+                    messageID = try await transport.sendText(row.contact, row.text, pending: row.position)
+                }
                 let logged = try await transport.withClient {
                     try $0.store.messages(row.contact).last { $0.messageID == messageID }
                 }
@@ -806,14 +990,38 @@ public actor Messenger {
             let userID = try Identity.encodeUserID(contact.identityKey)
             let added = notes.added[userID] ?? milliseconds
             notes.added[userID] = added
-            let logged = rows.messages[contact.identityKey, default: []].map { row in
+            let rowsOfChat = rows.messages[contact.identityKey, default: []]
+            // The latest message of each author and id, which a quote names (protocol 39.1).
+            var byID: [FileKey: StoredMessage] = [:]
+            for row in rowsOfChat {
+                byID[FileKey(contact: contact.identityKey, outgoing: !row.incoming, messageID: row.messageID)] = row
+            }
+            func chatFile(_ row: StoredMessage) -> ChatFile? {
+                let key = FileKey(contact: contact.identityKey, outgoing: !row.incoming, messageID: row.messageID)
+                return rows.files[key].map { file in
+                    let moved = progress[row.messageID]
+                    return ChatFile(
+                        name: file.attachment.fileName,
+                        size: Int(file.attachment.size),
+                        mediaType: file.attachment.mediaType,
+                        state: file.state,
+                        done: moved?.done ?? file.held,
+                        total: moved?.total ?? (file.state == .receiving ? Blob.blobLength(Int(file.attachment.size)) : 0),
+                        savedAs: file.savedAs,
+                        result: file.result,
+                        width: Int(file.attachment.width),
+                        height: Int(file.attachment.height),
+                        thumbnail: file.attachment.thumbnail
+                    )
+                }
+            }
+            let logged = rowsOfChat.map { row in
                 let time = notes.times[String(row.position)] ?? milliseconds
                 notes.times[String(row.position)] = time
                 let refused = rows.refusals[row.messageID]
                 let outgoing = row.direction == .outgoing
-                let file = rows.files[FileKey(contact: contact.identityKey, outgoing: outgoing, messageID: row.messageID)]
-                let moved = progress[row.messageID]
-                return ChatMessage(
+                let file = chatFile(row)
+                var message = ChatMessage(
                     id: row.position,
                     outgoing: outgoing,
                     text: row.text,
@@ -821,22 +1029,23 @@ public actor Messenger {
                     waiting: outgoing && refused == nil
                         && (rows.waiting.contains(row.messageID) || file?.state == .sending),
                     failure: refused.map(refusal) ?? file.flatMap { $0.state == .notSent ? notSent($0.result) : nil },
-                    file: file.map {
-                        ChatFile(
-                            name: $0.attachment.fileName,
-                            size: Int($0.attachment.size),
-                            mediaType: $0.attachment.mediaType,
-                            state: $0.state,
-                            done: moved?.done ?? $0.held,
-                            total: moved?.total ?? ($0.state == .receiving ? Blob.blobLength(Int($0.attachment.size)) : 0),
-                            savedAs: $0.savedAs,
-                            result: $0.result,
-                            width: Int($0.attachment.width),
-                            height: Int($0.attachment.height),
-                            thumbnail: $0.attachment.thumbnail
-                        )
-                    }
+                    file: file
                 )
+                message.quote = row.quote.map { quote in
+                    let key = FileKey(contact: contact.identityKey, outgoing: !quote.incoming, messageID: quote.messageID)
+                    guard let copy = byID[key] else {
+                        return ChatQuote(position: nil, outgoing: !quote.incoming, text: quote.text)
+                    }
+                    return ChatQuote(position: copy.position, outgoing: !quote.incoming, text: copy.text, file: chatFile(copy))
+                }
+                message.edited = row.edits > 0
+                message.receipt = row.receipt
+                message.expiresAfter = row.expiresAfter
+                message.expiresAt = row.expiresAt.map { Date(timeIntervalSince1970: Double($0)) }
+                if outgoing, let written = row.writtenAt, row.edits < Client.maxEdits, message.failure == nil {
+                    message.editableUntil = Date(timeIntervalSince1970: Double(written + Client.editSeconds))
+                }
+                return message
             }
             let pending = rows.pending[contact.identityKey, default: []].map {
                 ChatMessage(
@@ -868,6 +1077,10 @@ public actor Messenger {
                             )
                         }
                     )
+                },
+                timer: rows.timers[contact.identityKey] ?? 0,
+                timerChanges: notes.timerChanges[userID, default: []].map {
+                    TimerChange(date: date($0.at), seconds: $0.seconds, own: $0.own)
                 }
             )
         }
@@ -885,7 +1098,8 @@ public actor Messenger {
                         picture: $0, thumbnail: own.thumbnail, state: .received
                     )
                 }
-            )
+            ),
+            readReceipts: rows.readReceipts
         )
     }
 
@@ -907,6 +1121,7 @@ struct Progress: Equatable, Sendable {
     }
 }
 
+/// A message or its file by author and id.
 struct FileKey: Hashable, Sendable {
     var contact: Data
     var outgoing: Bool
@@ -926,13 +1141,17 @@ struct Rows: Sendable {
     var profiles: [Data: ContactProfile] = [:]
     /// The files of the avatars of the profiles, by position; no file of the message log.
     var avatarFiles: [Int64: FileRow] = [:]
+    var timers: [Data: Int] = [:]
+    var readReceipts: Bool
 
     init(store: ClientStore) throws {
         identityKey = try store.identity().map { try Identity.deriveIdentityKey(seed: $0.seed) }
         contacts = try store.contacts()
         for contact in contacts {
             messages[contact.identityKey] = try store.messages(contact.identityKey)
+            timers[contact.identityKey] = try store.timer(contact.identityKey)
         }
+        readReceipts = try store.readReceipts()
         for row in try store.pending() {
             pending[row.contact, default: []].append(row)
         }
@@ -965,6 +1184,8 @@ struct Notes: Codable, Equatable {
     var pins: [String] = []
     var muted: Set<String> = []
     var archived: Set<String> = []
+    /// The changes of the disappearing timer of each chat, by user id, oldest first.
+    var timerChanges: [String: [TimerNote]] = [:]
 
     init(relay: String? = nil, read: [String: Int64] = [:]) {
         self.relay = relay
@@ -986,6 +1207,7 @@ struct Notes: Codable, Equatable {
         pins = value(.pins, [])
         muted = value(.muted, [])
         archived = value(.archived, [])
+        timerChanges = value(.timerChanges, [:])
     }
 
     mutating func pin(_ userID: String, _ on: Bool) {
@@ -1017,6 +1239,7 @@ struct Notes: Codable, Equatable {
     /// Drops what is kept for a deleted contact.
     mutating func forget(_ userID: String) {
         drafts[userID] = nil
+        timerChanges[userID] = nil
         pin(userID, false)
         muted.remove(userID)
         archived.remove(userID)
@@ -1037,4 +1260,11 @@ struct Notes: Codable, Equatable {
         try encoder.encode(self).write(to: url, options: .atomic)
         chmod(url.path, ClientStore.fileMode)
     }
+}
+
+/// A change of the timer of a chat as `app.json` keeps it: the time in milliseconds.
+struct TimerNote: Codable, Equatable {
+    var at: Int64
+    var seconds: Int
+    var own: Bool
 }

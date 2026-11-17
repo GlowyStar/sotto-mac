@@ -37,6 +37,30 @@ public enum FileError: Error, Equatable, Sendable {
     }
 }
 
+/// A named local result of part 5 (section 39.11) that the envelope does not give.
+public enum ChangeError: Error, Equatable, Sendable {
+    case noSuchMessage
+    case notOwnMessage
+    case tooManyEdits
+    case editTooLate
+
+    public var result: String {
+        switch self {
+        case .noSuchMessage: "NO_SUCH_MESSAGE"
+        case .notOwnMessage: "NOT_OWN_MESSAGE"
+        case .tooManyEdits: "TOO_MANY_EDITS"
+        case .editTooLate: "EDIT_TOO_LATE"
+        }
+    }
+}
+
+/// The message a reply quotes as the client shows it: the position and the text of its own
+/// copy when it has one, else the text of the quote; no text once it is gone (39.2).
+public struct Quoted: Equatable, Sendable {
+    public var position: Int64?
+    public var text: String?
+}
+
 /// The id of the client's own identity is never a contact (section 16.1).
 public struct OwnIdentityError: Error, Equatable, Sendable {
     public init() {}
@@ -56,8 +80,12 @@ public struct Delivered: Equatable, Sendable {
 }
 
 /// What a Deliver gives: a text or an attachment to show, a profile that replaced the
-/// sender's earlier one, or the named result of section 24.2. `missing` is the GAP of
-/// section 20.3: the skipped keys that this message removed without use.
+/// sender's earlier one, a change of part 5, or the named result of section 24.2.
+///
+/// `missing` is the GAP of section 20.3: the skipped keys that this message removed without
+/// use. `position` is the message of the log that the Deliver added, or the one that an edit
+/// (`edited`, the new text in `text`) or a deletion (`deleted`) changed. `marked` are the own
+/// messages that a receipt moved, to delivered or `read`; `timer` is a new timer of the chat.
 public struct Received: Equatable, Sendable {
     public var ack: Bool
     public var text: String?
@@ -65,6 +93,14 @@ public struct Received: Equatable, Sendable {
     public var missing: Int
     public var attachment: Sotto_Attachment?
     public var profile: Sotto_Profile?
+    public var position: Int64?
+    public var quote: Quoted?
+    public var expiresAfter = 0
+    public var edited = false
+    public var deleted = false
+    public var marked: [Int64] = []
+    public var read = false
+    public var timer: Int?
 
     public init(
         ack: Bool, text: String?, result: String?, missing: Int = 0, attachment: Sotto_Attachment? = nil,
@@ -77,18 +113,30 @@ public struct Received: Equatable, Sendable {
         self.attachment = attachment
         self.profile = profile
     }
+
+    /// A message of the chat that entered the log: a text or an attachment (section 39.7).
+    public var isANewMessage: Bool {
+        position != nil && !edited && !deleted
+    }
 }
 
-/// The fields of a Send; a repeated Send carries them unchanged (section 22.2).
+/// The fields of a Send; a repeated Send carries them unchanged (section 22.2). `position`
+/// is the message of the log that the Send carries, when it carries one; it is no field of
+/// the Send and takes no part in equality.
 public struct Outgoing: Equatable, Sendable {
     public var messageID: Data
     public var recipient: Data
     public var payload: Data
+    public var position: Int64?
 
     public init(messageID: Data, recipient: Data, payload: Data) {
         self.messageID = messageID
         self.recipient = recipient
         self.payload = payload
+    }
+
+    public static func == (left: Outgoing, right: Outgoing) -> Bool {
+        left.messageID == right.messageID && left.recipient == right.recipient && left.payload == right.payload
     }
 }
 
@@ -113,6 +161,8 @@ public final class Client {
     public static let oneTimePrekeyRefillBelow = 50
     public static let oneTimePrekeyCap = 100
     public static let oneTimePrekeyHeldMax = 1000
+    public static let maxEdits = 10
+    public static let editSeconds: Int64 = 86400
 
     public let store: ClientStore
     public let identityKey: Data
@@ -139,6 +189,8 @@ public final class Client {
         }
         identityKey = try Identity.deriveIdentityKey(seed: identity.seed)
         identityDHKey = try Identity.deriveX25519PublicKey(identity.identityDHPrivateKey)
+        // The messages that expired while the client did not run (section 39.6).
+        try expireMessages()
     }
 
     public static func systemRandomBytes(_ count: Int) -> Data {
@@ -224,10 +276,14 @@ public final class Client {
         }
     }
 
-    /// Deletes the seen ids older than `seenIDSeconds`, at a login (section 20.4).
+    /// Deletes the seen ids and the traces of part 5 older than `seenIDSeconds`, at a login
+    /// (sections 20.4 and 39.7).
     public func forgetSeenIDs() throws {
         let seenAtOrBefore = now() - Self.seenIDSeconds
-        try store.transaction { try store.deleteSeenIDs(seenAtOrBefore: seenAtOrBefore) }
+        try store.transaction {
+            try store.deleteSeenIDs(seenAtOrBefore: seenAtOrBefore)
+            try store.forgetTraces(writtenAtOrBefore: seenAtOrBefore)
+        }
     }
 
     /// Adds the identity of a user id under a local name and returns its identity key; a
@@ -305,13 +361,35 @@ public final class Client {
         }
     }
 
-    /// L1 of section 20.2: the bytes of a Send, committed to the outbox first. A contact
-    /// without a session needs a fetched bundle. `pending` names a row of the pending texts
-    /// that the same commit removes.
-    public func sendText(_ contact: Data, _ text: String, bundle: PrekeyBundle? = nil, pending: Int64? = nil) throws -> Outgoing {
-        try send(contact, paddedPlaintext: Envelope.encodeText(text), text: text, bundle: bundle, pending: pending)
+    /// L1 of section 20.2: the bytes of a Send, committed to the outbox first, with the
+    /// position of the logged message. A contact without a session needs a fetched bundle.
+    /// `pending` names a row of the pending texts that the same commit removes. The text
+    /// carries the timer of the chat and, with `replyTo`, a quote of that message of the chat
+    /// (section 39.2).
+    ///
+    /// - Throws: `EnvelopeError.textTooLong`, nothing else ran; `ChangeError.noSuchMessage`
+    ///   when `replyTo` names no message of the chat with the contact.
+    public func sendText(
+        _ contact: Data, _ text: String, bundle: PrekeyBundle? = nil, pending: Int64? = nil, replyTo: Int64? = nil
+    ) throws -> Outgoing {
+        let quote = try replyTo.map { try self.quote(contact, $0) }
+        let expiresAfter = try store.timer(contact)
+        let plaintext = try Envelope.encodeText(text, quote: quote, expiresAfter: expiresAfter)
+        let sealed = try seal(contact, plaintext, bundle: bundle, messageID: randomBytes(Frames.messageIDLength))
+        var outgoing = sealed.outgoing
+        outgoing.position = try store.transaction {
+            try commit(sealed)
+            let position = try logOwn(sealed.outgoing, text, quote, expiresAfter: expiresAfter, sent: true)
+            if let pending {
+                try store.removePending(pending)
+            }
+            return position
+        }
+        return outgoing
     }
 
+    /// SEND of a padded plaintext logged under `text`, without part 5: for tests of a
+    /// plaintext that no encoder makes.
     func send(_ contact: Data, paddedPlaintext: Data, text: String, bundle: PrekeyBundle?, pending: Int64? = nil) throws -> Outgoing {
         let sealed = try seal(contact, paddedPlaintext, bundle: bundle, messageID: randomBytes(Frames.messageIDLength))
         try store.transaction {
@@ -322,6 +400,223 @@ public final class Client {
             }
         }
         return sealed.outgoing
+    }
+
+    /// Sends an edit of an own message of the chat and replaces its text, the caption of an
+    /// attachment (section 39.3).
+    ///
+    /// - Throws: `ChangeError` when the position names no own message of the chat, the
+    ///   message was edited `maxEdits` times or sent more than `editSeconds` ago;
+    ///   `EnvelopeError.textTooLong` when the text does not fit an edit or a caption.
+    public func edit(_ contact: Data, _ position: Int64, _ text: String, bundle: PrekeyBundle? = nil) throws -> Outgoing {
+        let message = try ownMessage(contact, position)
+        let now = now()
+        guard message.edits < Self.maxEdits else {
+            throw ChangeError.tooManyEdits
+        }
+        guard let written = message.writtenAt, now - written <= Self.editSeconds else {
+            throw ChangeError.editTooLate
+        }
+        let isAFile = try !store.files(ofMessageAt: position).isEmpty
+        if isAFile && text.utf8.count > Envelope.maxCaptionBytes {
+            throw EnvelopeError.textTooLong
+        }
+        let plaintext = try Envelope.encodeEdit(messageID: message.messageID, text: text)
+        let sealed = try seal(contact, plaintext, bundle: bundle, messageID: randomBytes(Frames.messageIDLength))
+        try store.transaction {
+            try commit(sealed)
+            try store.editMessage(message, text: text, at: now)
+        }
+        return sealed.outgoing
+    }
+
+    /// Sends the request that both sides delete an own message of the chat, deletes it here
+    /// with its file and saves the DeleteBlob of its blob (section 39.4).
+    ///
+    /// - Throws: `ChangeError` when the position names no own message of the chat.
+    public func delete(_ contact: Data, _ position: Int64, bundle: PrekeyBundle? = nil) throws -> Outgoing {
+        let message = try ownMessage(contact, position)
+        let plaintext = try Envelope.encodeDeletion(messageID: message.messageID)
+        let sealed = try seal(contact, plaintext, bundle: bundle, messageID: randomBytes(Frames.messageIDLength))
+        try store.transaction {
+            try commit(sealed)
+            for file in try remove(message) {
+                try store.addBlobDeletion(uploader: identityKey, blobID: file.attachment.blobID)
+            }
+        }
+        return sealed.outgoing
+    }
+
+    public func timer(_ contact: Data) throws -> Int {
+        try store.timer(contact)
+    }
+
+    /// Sends a new timer of the chat, 0 for none, and keeps it (section 39.6).
+    ///
+    /// - Throws: `EnvelopeError.badTimer` above `Envelope.maxTimerSeconds`.
+    public func setTimer(_ contact: Data, seconds: Int, bundle: PrekeyBundle? = nil) throws -> Outgoing {
+        let plaintext = try Envelope.encodeTimer(seconds: seconds)
+        let sealed = try seal(contact, plaintext, bundle: bundle, messageID: randomBytes(Frames.messageIDLength))
+        try store.transaction {
+            try commit(sealed)
+            try store.setTimer(contact, seconds: seconds)
+        }
+        return sealed.outgoing
+    }
+
+    public func readReceipts() throws -> Bool {
+        try store.readReceipts()
+    }
+
+    /// Turns read receipts on or off; off, the read receipts still owed go out as delivery
+    /// receipts (section 39.5).
+    public func setReadReceipts(_ on: Bool) throws {
+        try store.transaction {
+            try store.setReadReceipts(on)
+            if !on {
+                try store.oweDeliveryForRead()
+            }
+        }
+    }
+
+    /// The user has seen these messages of the chat: their timer starts, and a read receipt
+    /// is owed unless read receipts are off (sections 39.5 and 39.6). Returns whether any was
+    /// not seen before.
+    @discardableResult
+    public func markRead(_ contact: Data, _ positions: [Int64]) throws -> Bool {
+        let now = now()
+        let sendsReadReceipts = try store.readReceipts()
+        return try store.transaction {
+            var changed = false
+            for position in positions {
+                guard let message = try store.message(position), message.contact == contact, message.incoming,
+                    message.readAt == nil
+                else {
+                    continue
+                }
+                let expiresAt = message.expiresAfter > 0 ? now + Int64(message.expiresAfter) : nil
+                let owed = sendsReadReceipts ? .read : message.owed
+                try store.setRead(message, readAt: now, expiresAt: expiresAt, owed: owed)
+                changed = true
+            }
+            return changed
+        }
+    }
+
+    /// Whether a receipt is owed to a contact that has a session.
+    public func owesReceipts() throws -> Bool {
+        try store.owedReceipts().contains { try hasSession($0.contact) }
+    }
+
+    /// Seals the receipts owed to contacts with a session, one message per contact and kind
+    /// for up to `Envelope.maxReceiptIDs` messages, each committed with its debt cleared.
+    public func sendOwedReceipts() throws -> [Outgoing] {
+        var order: [ReceiptBatchKey] = []
+        var owed: [ReceiptBatchKey: [Data]] = [:]
+        for row in try store.owedReceipts() {
+            let key = ReceiptBatchKey(contact: row.contact, read: row.kind == .read)
+            if owed[key] == nil {
+                order.append(key)
+            }
+            owed[key, default: []].append(row.messageID)
+        }
+        var outgoing: [Outgoing] = []
+        for key in order where try hasSession(key.contact) {
+            let messageIDs = owed[key]!
+            for start in stride(from: 0, to: messageIDs.count, by: Envelope.maxReceiptIDs) {
+                let batch = Array(messageIDs[start..<min(start + Envelope.maxReceiptIDs, messageIDs.count)])
+                let plaintext = try Envelope.encodeReceipt(messageIDs: batch, read: key.read)
+                let sealed = try seal(key.contact, plaintext, bundle: nil, messageID: randomBytes(Frames.messageIDLength))
+                try store.transaction {
+                    try commit(sealed)
+                    try store.clearOwed(key.contact, batch)
+                }
+                outgoing.append(sealed.outgoing)
+            }
+        }
+        return outgoing
+    }
+
+    /// Removes the messages whose timer ran out, their files included, and returns their
+    /// positions (section 39.6).
+    @discardableResult
+    public func expireMessages() throws -> [Int64] {
+        let expired = try store.expiredMessages(now())
+        guard !expired.isEmpty else {
+            return []
+        }
+        let files = try store.transaction {
+            try expired.flatMap(remove)
+        }
+        Self.deleteSavedFiles(files)
+        return expired.map(\.position)
+    }
+
+    /// The position of the own message of the log with this id, while no receipt has
+    /// reached it.
+    public func sentPosition(_ messageID: Data) throws -> Int64? {
+        try store.ownMessageWithoutReceipt(messageID)
+    }
+
+    /// Logs an own message of the chat in the caller's transaction; with `sent` its timer
+    /// runs from now (section 39.6), else from `markSent`.
+    private func logOwn(_ outgoing: Outgoing, _ text: String, _ quote: Sotto_Quote?, expiresAfter: Int, sent: Bool) throws -> Int64 {
+        let now = now()
+        let position = try store.logMessage(outgoing.recipient, direction: .outgoing, messageID: outgoing.messageID, text: text)
+        let state = NewState(
+            writtenAt: now,
+            expiresAfter: expiresAfter,
+            expiresAt: sent && expiresAfter > 0 ? now + Int64(expiresAfter) : nil,
+            quote: quote.map { StoredQuote(incoming: !$0.own, messageID: $0.messageID, text: $0.text) }
+        )
+        try store.saveState(outgoing.recipient, incoming: false, messageID: outgoing.messageID, state: state)
+        return position
+    }
+
+    /// A quote of a message of the chat, cut to `Envelope.maxQuoteBytes` (section 39.2).
+    private func quote(_ contact: Data, _ position: Int64) throws -> Sotto_Quote {
+        let quoted = try messageOf(contact, position)
+        var quote = Sotto_Quote()
+        quote.messageID = quoted.messageID
+        quote.own = !quoted.incoming
+        quote.text = Envelope.cut(quoted.text, to: Envelope.maxQuoteBytes)
+        return quote
+    }
+
+    private func messageOf(_ contact: Data, _ position: Int64) throws -> StoredMessage {
+        guard let message = try store.message(position), message.contact == contact else {
+            throw ChangeError.noSuchMessage
+        }
+        return message
+    }
+
+    private func ownMessage(_ contact: Data, _ position: Int64) throws -> StoredMessage {
+        let message = try messageOf(contact, position)
+        guard !message.incoming else {
+            throw ChangeError.notOwnMessage
+        }
+        return message
+    }
+
+    /// Deletes a message of the log in the caller's transaction and returns its files: the
+    /// upload of an own file ends with the DeleteBlob of its blob, and so does the blob of a
+    /// received file that was not downloaded (sections 39.4 and 39.6).
+    private func remove(_ message: StoredMessage) throws -> [FileRow] {
+        let files = try store.files(ofMessageAt: message.position)
+        try saveBlobDeletions(files)
+        try store.removeMessage(message, at: now())
+        return files
+    }
+
+    /// Removes the received files of messages that are gone, after their commit; a file that
+    /// cannot be removed stays where it is (section 39.4). The file a sent one was read from
+    /// is the user's own and stays.
+    static func deleteSavedFiles(_ files: [FileRow]) {
+        for file in files where file.incoming {
+            if let path = file.savedAs {
+                try? FileManager.default.removeItem(atPath: path)
+            }
+        }
     }
 
     /// The Sends that the relay has not confirmed, to be sent again as they are.
@@ -397,9 +692,11 @@ public final class Client {
         width: Int = 0,
         height: Int = 0,
         thumbnail: Data = Data(),
-        localPath: String? = nil
+        localPath: String? = nil,
+        replyTo: Int64? = nil
     ) throws -> UploadRow {
         try checkFile(contact, size: file.count, blobMaxBytes: blobMaxBytes)
+        let quote = try replyTo.map { try self.quote(contact, $0) }
         var (attachment, blob) = try encryptFile(file)
         attachment.mediaType = mediaType
         attachment.fileName = fileName
@@ -407,7 +704,7 @@ public final class Client {
         attachment.width = UInt32(clamping: width)
         attachment.height = UInt32(clamping: height)
         attachment.thumbnail = thumbnail
-        _ = try Envelope.encodeAttachment(attachment)
+        _ = try Envelope.encodeAttachment(attachment, quote: quote)
 
         let upload = UploadRow(
             blobID: attachment.blobID, contact: contact, messageID: randomBytes(Frames.messageIDLength),
@@ -419,7 +716,8 @@ public final class Client {
                 contact, incoming: false, messageID: upload.messageID, attachment: attachment, state: .sending,
                 savedAs: localPath
             )
-            try store.logMessage(contact, direction: .outgoing, messageID: upload.messageID, text: caption)
+            let outgoing = Outgoing(messageID: upload.messageID, recipient: contact, payload: Data())
+            _ = try logOwn(outgoing, caption, quote, expiresAfter: 0, sent: false)
         }
         return upload
     }
@@ -432,12 +730,14 @@ public final class Client {
         try store.hasUpload(blobID)
     }
 
-    /// Deletes a logged message, with its file, inside the caller's transaction: an upload of
-    /// it ends as a cancel of section 33.2 and its blob, like the blob of a received file not
-    /// downloaded yet, is saved for a DeleteBlob.
+    /// Deletes a logged message here only, with its file, inside the caller's transaction: an
+    /// upload of it ends as a cancel of section 33.2 and its blob, like the blob of a received
+    /// file not downloaded yet, is saved for a DeleteBlob. It leaves a trace, so that a later
+    /// change of the message is dropped, as for a deletion for both.
     public func deleteMessage(_ position: Int64) throws {
-        try saveBlobDeletions(try store.files(ofMessageAt: position))
-        try store.deleteMessage(position)
+        if let message = try store.message(position) {
+            _ = try remove(message)
+        }
     }
 
     /// Deletes the logged and the pending messages of a contact, with their files, as
@@ -484,15 +784,32 @@ public final class Client {
         guard try store.hasUpload(upload.blobID) else {
             throw InvalidInputError(message: "the upload was given up")
         }
-        let plaintext = upload.profile
-            ? try Envelope.encodeProfile(name: store.ownProfile().name, avatar: upload.attachment)
-            : try Envelope.encodeAttachment(upload.attachment)
+        let message = upload.profile ? nil : try store.message(upload.contact, incoming: false, messageID: upload.messageID)
+        let expiresAfter = upload.profile ? 0 : try store.timer(upload.contact)
+        let plaintext: Data
+        if upload.profile {
+            plaintext = try Envelope.encodeProfile(name: store.ownProfile().name, avatar: upload.attachment)
+        } else {
+            let quote = message?.quote.map { stored in
+                var quote = Sotto_Quote()
+                quote.messageID = stored.messageID
+                quote.own = !stored.incoming
+                quote.text = stored.text ?? ""
+                return quote
+            }
+            plaintext = try Envelope.encodeAttachment(upload.attachment, quote: quote, expiresAfter: expiresAfter)
+        }
         let sealed = try seal(upload.contact, plaintext, bundle: bundle, messageID: upload.messageID)
+        var outgoing = sealed.outgoing
+        outgoing.position = message?.position
         try store.transaction {
             try commit(sealed)
             try store.deleteUpload(upload.blobID)
+            if let message {
+                try store.setSent(message, at: now(), expiresAfter: expiresAfter)
+            }
         }
-        return sealed.outgoing
+        return outgoing
     }
 
     /// Ends an upload as not sent: deletes it, saves the DeleteBlob of its blob and notes the
@@ -879,9 +1196,10 @@ public final class Client {
             signedPrekeyPrivateKey: signedPrekeyPrivateKey
         )
         let decrypted = try decrypt(state, agreement.associatedData, delivered, envelope)
-        let content = Self.readContent(decrypted.paddedPlaintext)
+        let (content, result) = Self.readContent(decrypted.paddedPlaintext)
 
-        let dropped = try store.transaction {
+        var files: [FileRow] = []
+        let (dropped, saved) = try store.transaction {
             let sessionID = try store.addSession(
                 delivered.sender,
                 associatedData: agreement.associatedData,
@@ -902,41 +1220,160 @@ public final class Client {
                 try store.setPin(delivered.sender, identityDHKey: initialHeader.identityDhKey)
             }
             try oweProfileToANewSession(delivered.sender)
-            try saveReceived(delivered, content)
-            return dropped
+            return (dropped, try saveReceived(delivered, content, removed: &files))
         }
-        return Received(
-            ack: true, text: content.text, result: content.result, missing: decrypted.purged + dropped,
-            attachment: content.attachment, profile: content.profile
-        )
+        Self.deleteSavedFiles(files)
+        var received = saved
+        received.result = result
+        received.missing = decrypted.purged + dropped
+        return received
     }
 
     /// ACCEPT of section 20.3.
     private func accept(_ delivered: Delivered, _ session: StoredSession, _ decrypted: Decrypted) throws -> Received {
-        let content = Self.readContent(decrypted.paddedPlaintext)
-        try store.transaction {
+        let (content, result) = Self.readContent(decrypted.paddedPlaintext)
+        var files: [FileRow] = []
+        var received = try store.transaction {
             try store.acceptOnSession(session.sessionID, state: decrypted.state)
-            try saveReceived(delivered, content)
+            return try saveReceived(delivered, content, removed: &files)
         }
-        return Received(
-            ack: true, text: content.text, result: content.result, missing: decrypted.purged,
-            attachment: content.attachment, profile: content.profile
-        )
+        Self.deleteSavedFiles(files)
+        received.result = result
+        received.missing = decrypted.purged
+        return received
     }
 
-    private func saveReceived(_ delivered: Delivered, _ content: Content) throws {
-        try store.addSeenID(sender: delivered.sender, messageID: delivered.messageID, seenAt: now())
-        if let profile = content.profile {
-            return try saveProfile(delivered, profile)
+    /// Saves what an accepted message changes, in the caller's transaction; the files of a
+    /// message that a deletion removed go into `removed`.
+    private func saveReceived(_ delivered: Delivered, _ content: Sotto_Content?, removed: inout [FileRow]) throws -> Received {
+        let sender = delivered.sender
+        try store.addSeenID(sender: sender, messageID: delivered.messageID, seenAt: now())
+        var nothing = Received(ack: true, text: nil, result: nil)
+        switch content?.body {
+        case nil:
+            return nothing
+        case .text, .attachment:
+            return try saveMessage(delivered, content!)
+        case .profile(let profile):
+            try saveProfile(delivered, profile)
+            nothing.profile = profile
+            return nothing
+        case .edit(let edit):
+            return try applyEdit(sender, edit)
+        case .deletion(let deletion):
+            return try applyDeletion(sender, deletion, removed: &removed)
+        case .receipt(let receipt):
+            return try applyReceipt(sender, receipt)
+        case .timer(let timer):
+            try store.setTimer(sender, seconds: Int(timer.seconds))
+            nothing.timer = Int(timer.seconds)
+            return nothing
         }
-        if let text = content.text ?? content.attachment?.caption {
-            try store.logMessage(delivered.sender, direction: .incoming, messageID: delivered.messageID, text: text)
+    }
+
+    /// A text or an attachment of the chat (section 39): logged with its quote and its timer
+    /// and a delivery receipt owed, unless a deletion came first; an edit that came first
+    /// gives its text.
+    private func saveMessage(_ delivered: Delivered, _ content: Sotto_Content) throws -> Received {
+        let (sender, messageID) = (delivered.sender, delivered.messageID)
+        let trace = try store.trace(sender, incoming: true, messageID: messageID)
+        if trace?.gone == true {
+            return Received(ack: true, text: nil, result: nil)
         }
-        if let attachment = content.attachment {
-            try store.addFile(
-                delivered.sender, incoming: true, messageID: delivered.messageID, attachment: attachment, state: .offered
-            )
+        var attachment: Sotto_Attachment?
+        if case .attachment(let sent) = content.body {
+            attachment = sent
         }
+        var text = attachment?.caption ?? content.text
+        if let early = trace?.earlyText {
+            text = early
+            attachment?.caption = early
+        }
+        let quote = content.hasQuote ? try receivedQuote(sender, content.quote) : nil
+        let expiresAfter = Int(content.expiresAfter)
+
+        let position = try store.logMessage(sender, direction: .incoming, messageID: messageID, text: text)
+        let state = NewState(writtenAt: now(), expiresAfter: expiresAfter, quote: quote, owed: .delivered)
+        try store.saveState(sender, incoming: true, messageID: messageID, state: state)
+        if let attachment {
+            try store.addFile(sender, incoming: true, messageID: messageID, attachment: attachment, state: .offered)
+        }
+        var received = Received(ack: true, text: attachment == nil ? text : nil, result: nil, attachment: attachment)
+        received.position = position
+        received.quote = try quote.map { try shownQuote(sender, $0) }
+        received.expiresAfter = expiresAfter
+        return received
+    }
+
+    /// The quote of a received reply; `own` means that its sender wrote the quoted message.
+    /// The text of a quote of a message that is gone here is not kept (section 39.2).
+    private func receivedQuote(_ sender: Data, _ quote: Sotto_Quote) throws -> StoredQuote {
+        let isGone = try store.trace(sender, incoming: quote.own, messageID: quote.messageID)?.gone == true
+        return StoredQuote(incoming: quote.own, messageID: quote.messageID, text: isGone ? nil : quote.text)
+    }
+
+    /// The client's own copy of the quoted message when it has one (section 39.2).
+    private func shownQuote(_ contact: Data, _ quote: StoredQuote) throws -> Quoted {
+        guard let copy = try store.message(contact, incoming: quote.incoming, messageID: quote.messageID) else {
+            return Quoted(position: nil, text: quote.text)
+        }
+        return Quoted(position: copy.position, text: copy.text)
+    }
+
+    /// An edit of a message of the sender's own (section 39.3); one that comes before its
+    /// message is kept for it, one of a message that is gone is dropped (section 39.7).
+    private func applyEdit(_ sender: Data, _ edit: Sotto_Edit) throws -> Received {
+        let nothing = Received(ack: true, text: nil, result: nil)
+        let now = now()
+        guard let message = try store.message(sender, incoming: true, messageID: edit.messageID) else {
+            let trace = try store.trace(sender, incoming: true, messageID: edit.messageID)
+            if trace?.gone != true, (trace?.edits ?? 0) < Self.maxEdits {
+                try store.countEdit(sender, messageID: edit.messageID, at: now, earlyText: edit.text)
+            }
+            return nothing
+        }
+        guard message.edits < Self.maxEdits else {
+            return nothing
+        }
+        try store.editMessage(message, text: edit.text, at: now)
+        var received = Received(ack: true, text: edit.text, result: nil)
+        received.position = message.position
+        received.edited = true
+        return received
+    }
+
+    /// Deletes a message of the sender's own; one that has not arrived is deleted when it
+    /// comes (section 39.4).
+    private func applyDeletion(_ sender: Data, _ deletion: Sotto_Deletion, removed: inout [FileRow]) throws -> Received {
+        guard let message = try store.message(sender, incoming: true, messageID: deletion.messageID) else {
+            try store.leaveTrace(sender, incoming: true, messageID: deletion.messageID, at: now())
+            return Received(ack: true, text: nil, result: nil)
+        }
+        removed += try remove(message)
+        var received = Received(ack: true, text: nil, result: nil)
+        received.position = message.position
+        received.deleted = true
+        return received
+    }
+
+    /// Moves the own messages that a receipt names forward: delivered, then read; a read
+    /// receipt also counts as delivered, and a mark never goes back (section 39.5).
+    private func applyReceipt(_ sender: Data, _ receipt: Sotto_Receipt) throws -> Received {
+        let mark: ReceiptKind = receipt.read ? .read : .delivered
+        var received = Received(ack: true, text: nil, result: nil)
+        for messageID in receipt.messageIds {
+            // A message logged before part 5 takes no mark (section 39.10).
+            guard let message = try store.message(sender, incoming: false, messageID: messageID), message.writtenAt != nil else {
+                continue
+            }
+            let movesForward = message.receipt == nil || (receipt.read && message.receipt == .delivered)
+            if movesForward {
+                try store.setReceipt(message, mark)
+                received.marked.append(message.position)
+            }
+        }
+        received.read = receipt.read
+        return received
     }
 
     /// Section 36.3: the profile replaces the earlier one of its sender whole and logs no
@@ -1040,26 +1477,21 @@ public final class Client {
         }
     }
 
-    /// The text, the attachment or the profile of a message that decrypted, or the result
-    /// that it has none (section 20.3).
-    private static func readContent(_ paddedPlaintext: Data) -> Content {
+    /// The content of a message that decrypted, or the result that it has none (section
+    /// 20.3).
+    private static func readContent(_ paddedPlaintext: Data) -> (Sotto_Content?, String?) {
         do {
-            switch try Envelope.decodeContent(paddedPlaintext) {
-            case .text(let text): return Content(text: text)
-            case .attachment(let attachment): return Content(attachment: attachment)
-            case .profile(let profile): return Content(profile: profile)
-            }
+            return (try Envelope.openContent(paddedPlaintext), nil)
         } catch {
-            return Content(result: (error as? EnvelopeError)?.result ?? EnvelopeError.badContent.result)
+            return (nil, (error as? EnvelopeError)?.result ?? EnvelopeError.badContent.result)
         }
     }
 }
 
-private struct Content {
-    var text: String?
-    var attachment: Sotto_Attachment?
-    var profile: Sotto_Profile?
-    var result: String?
+/// The receipts of one kind owed to one contact.
+private struct ReceiptBatchKey: Hashable {
+    let contact: Data
+    let read: Bool
 }
 
 /// A message encrypted on the head session of a contact, not yet committed.

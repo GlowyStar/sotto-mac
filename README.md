@@ -19,6 +19,12 @@ interoperate with sotto's command-line client byte for byte.
 - The profile (part 4 of the protocol): a display name and an avatar sent, encrypted, to
   every contact with a session, and the latest profile of each contact kept and shown; the
   app and sotto's command-line client exchange them both ways (`scripts/app-interop.py`).
+- Replies, edits, delete for both, delivery and read receipts and disappearing messages
+  (part 5 of the protocol) are in the core, the command-line tool and the app; both
+  `scripts/interop.py` and `scripts/app-interop.py` exercise each of them both ways with
+  sotto's client. Delete for both and the timer are requests that the other side's client
+  honours; nothing can make it do so, and nothing protects a message from the person who
+  received it.
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
 
@@ -44,7 +50,14 @@ sotto-mac contacts
 sotto-mac chat bob --relay ws://127.0.0.1:8765/ws   # /quit or end of input ends
 sotto-mac reset bob                 # start a new session with bob
 sotto-mac send-file bob photo.jpg --caption "hi"   # waits until it is sent or not sent
+sotto-mac read-receipts [on|off]    # show or set the read receipts contacts get
 ```
+
+`chat` prints every message with its number in the log (`#12 bob: hi`), the marks of the
+own ones (`#12 sent`, `#12 delivered`, `#12 read`) and one line when the contact edits or
+deletes a message or changes the timer; a printed message counts as read. It takes the
+commands of sotto's `chat`: `/reply N text`, `/edit N text`, `/delete N` (for both sides)
+and `/timer [off|30s|5m|1h|1d|1w]`.
 
 Received files are saved into the folder `received` of the data directory, under the name
 the sender gave when it is a plain file name, never over a file that is there; a file whose
@@ -122,12 +135,14 @@ Launch arguments of the app:
 | --- | --- |
 | `--data-dir <dir>` | the directory of the identity (default `~/Library/Application Support/Sotto`, made with mode 0700) |
 | `--relay <url>` | the relay (default `ws://127.0.0.1:8765/ws`); an address saved in Settings wins over it |
-| `--snapshot <folder>` | draws the window into PNG files and exits; with `--data-dir` from that store, without a connection, otherwise from mock data |
+| `--snapshot <folder>` | draws the window into PNG files and exits; with `--data-dir` from that store, without a connection, otherwise from mock data; `--only <prefix>` draws only the shots whose name starts with it |
 | `--dump` | with `--data-dir`: prints the chats of that store as JSON and exits |
 | `--demo` | mock data and no store, with a "Mock" menu; `--first-launch` adds the first-launch screen |
 | `--send <name> <text>` | a scripting aid, any number of times: once connected, sends the text to the contact of that local name through the same action as the compose bar |
 | `--send-file <name> <path>` | the same for a file, through the action of the send box; a picture goes as a photo |
 | `--profile <name> <path>` | a scripting aid: once connected, sets the own profile through the action of "Save" on the Edit profile page, the picture cut to its centered square; an empty path is no picture |
+| `--read <name>` | a scripting aid: the chat of that contact counts as open on the screen for the whole run, so its messages are seen as they arrive (their read receipts and timers start) |
+| `--reply <name> <text>`, `--edit <name> <text>`, `--delete <name>`, `--timer <name> <seconds>` | scripting aids: once connected, a reply to the newest message of the contact, an edit of the newest own message that can still be edited, a delete for both of the newest own message, and the timer of the chat, each through the action of the screen |
 
 A text sent to a contact without a session (nobody has written yet) waits in the store
 with a clock until a connection fetches the contact's keys, also across a restart. A
@@ -178,6 +193,19 @@ and the contact panel shows the name the contact set under it. A profile is neve
 no row, no unread count, no notification, and an archived chat stays archived. A lost photo
 comes back only with the contact's next change or the next new session.
 
+Replies, edits and receipts: a right click on a message offers Reply, Edit (an own message,
+up to ten times within a day of sending; also the Up arrow in an empty field) and Delete,
+whose box asks whether to delete an own message for the contact too. A reply shows the
+quoted message in its bubble, and a click on the quote scrolls to it. An own message shows
+a clock while it waits, one check once the relay stored it, two checks once the contact's
+app has it and two in the full colour once the contact has seen it; a message counts as
+seen when it is on the screen in the open chat of the front window. Read receipts can be
+turned off in Settings, Privacy and security; the contact then sees "delivered" only.
+Disappearing messages are set per chat from the chat header's menu or the contact panel
+(off, 30 seconds up to 4 weeks): an own message goes that long after it was sent, one of the
+contact that long after it was seen, with its file, also after a restart; the header and
+each such message show the timer, and a change of the timer shows as a line in the chat.
+
 A local passcode locks the window at launch, after the auto-lock time, on Cmd+L and on
 sleep. It only hides the window: the store is not encrypted with it, and it cannot be
 recovered.
@@ -186,8 +214,9 @@ The end-to-end check of the app (a relay on a free port; the Python client writi
 app while it runs and while it is closed; the app sending with `--send` to the running
 Python client, right after a restart, and while the Python client is away; a photo and a
 file each way, compared byte for byte; a large upload and a large download of the app, each
-cut by killing the app in the middle and ended whole after its next start; then a dump and
-a snapshot of its store):
+cut by killing the app in the middle and ended whole after its next start; the profiles
+both ways; a reply, an edit, a delete for both, the read marks and a message under a short
+timer each way; then a dump and a snapshot of its store):
 
 ```sh
 ../../python/sotto/.venv/bin/python scripts/app-interop.py [--keep DIR]
@@ -205,7 +234,8 @@ Limits as they are:
   of each notification in its own notification database, outside the data directory.
 - One device per identity: when the same identity logs in elsewhere, the relay closes the
   older connection and the app says so instead of reconnecting.
-- One-to-one chats with texts, photos and files. No groups, no albums. The command-line
+- One-to-one chats with texts, photos and files. No groups, no albums, no reactions or
+  forwards. Nothing proves that the contact's app deleted a message. The command-line
   tool prints a profile that arrives but cannot set its own. "Ask where to save
   each file" and the storage figures and "Clear cache" of Data and storage are shown but do
   nothing yet. A new auto-download size or download folder holds for the files that arrive

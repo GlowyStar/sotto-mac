@@ -727,16 +727,65 @@ public nonisolated struct Sotto_Content: Sendable {
     set {body = .profile(newValue)}
   }
 
+  public var edit: Sotto_Edit {
+    get {
+      if case .edit(let v)? = body {return v}
+      return Sotto_Edit()
+    }
+    set {body = .edit(newValue)}
+  }
+
+  public var deletion: Sotto_Deletion {
+    get {
+      if case .deletion(let v)? = body {return v}
+      return Sotto_Deletion()
+    }
+    set {body = .deletion(newValue)}
+  }
+
+  public var receipt: Sotto_Receipt {
+    get {
+      if case .receipt(let v)? = body {return v}
+      return Sotto_Receipt()
+    }
+    set {body = .receipt(newValue)}
+  }
+
+  public var timer: Sotto_Timer {
+    get {
+      if case .timer(let v)? = body {return v}
+      return Sotto_Timer()
+    }
+    set {body = .timer(newValue)}
+  }
+
+  public var quote: Sotto_Quote {
+    get {_quote ?? Sotto_Quote()}
+    set {_quote = newValue}
+  }
+  /// Returns true if `quote` has been explicitly set.
+  public var hasQuote: Bool {self._quote != nil}
+  /// Clears the value of `quote`. Subsequent reads from it will return its default value.
+  public mutating func clearQuote() {self._quote = nil}
+
+  public var expiresAfter: UInt32 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Body: Equatable, Sendable {
     case text(String)
     case attachment(Sotto_Attachment)
     case profile(Sotto_Profile)
+    case edit(Sotto_Edit)
+    case deletion(Sotto_Deletion)
+    case receipt(Sotto_Receipt)
+    case timer(Sotto_Timer)
 
   }
 
   public init() {}
+
+  fileprivate var _quote: Sotto_Quote? = nil
 }
 
 /// A file that travels as a blob of the relay (section 32).
@@ -792,6 +841,79 @@ public nonisolated struct Sotto_Profile: Sendable {
   public init() {}
 
   fileprivate var _avatar: Sotto_Attachment? = nil
+}
+
+/// The message that a text or an attachment answers (section 38).
+public nonisolated struct Sotto_Quote: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var messageID: Data = Data()
+
+  public var own: Bool = false
+
+  public var text: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// A new text for a message of the sender's own (section 38).
+public nonisolated struct Sotto_Edit: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var messageID: Data = Data()
+
+  public var text: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// The sender asks that both sides delete a message of its own (section 38).
+public nonisolated struct Sotto_Deletion: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var messageID: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Messages of the receiver that the sender's client holds, or that its user has read.
+public nonisolated struct Sotto_Receipt: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var read: Bool = false
+
+  public var messageIds: [Data] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// The disappearing timer of the chat in seconds; 0 turns it off (section 38).
+public nonisolated struct Sotto_Timer: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var seconds: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
@@ -2087,7 +2209,7 @@ nonisolated extension Sotto_InitialHeader: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Sotto_Content: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Content"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{1}attachment\0\u{1}profile\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{1}attachment\0\u{1}profile\0\u{1}edit\0\u{1}deletion\0\u{1}receipt\0\u{1}timer\0\u{1}quote\0\u{3}expires_after\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2129,6 +2251,60 @@ nonisolated extension Sotto_Content: SwiftProtobuf.Message, SwiftProtobuf._Messa
           self.body = .profile(v)
         }
       }()
+      case 4: try {
+        var v: Sotto_Edit?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .edit(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .edit(v)
+        }
+      }()
+      case 5: try {
+        var v: Sotto_Deletion?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .deletion(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .deletion(v)
+        }
+      }()
+      case 6: try {
+        var v: Sotto_Receipt?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .receipt(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .receipt(v)
+        }
+      }()
+      case 7: try {
+        var v: Sotto_Timer?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .timer(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .timer(v)
+        }
+      }()
+      case 8: try { try decoder.decodeSingularMessageField(value: &self._quote) }()
+      case 9: try { try decoder.decodeSingularUInt32Field(value: &self.expiresAfter) }()
       default: break
       }
     }
@@ -2152,13 +2328,37 @@ nonisolated extension Sotto_Content: SwiftProtobuf.Message, SwiftProtobuf._Messa
       guard case .profile(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
     }()
+    case .edit?: try {
+      guard case .edit(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    }()
+    case .deletion?: try {
+      guard case .deletion(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    }()
+    case .receipt?: try {
+      guard case .receipt(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    }()
+    case .timer?: try {
+      guard case .timer(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+    }()
     case nil: break
+    }
+    try { if let v = self._quote {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+    } }()
+    if self.expiresAfter != 0 {
+      try visitor.visitSingularUInt32Field(value: self.expiresAfter, fieldNumber: 9)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Sotto_Content, rhs: Sotto_Content) -> Bool {
     if lhs.body != rhs.body {return false}
+    if lhs._quote != rhs._quote {return false}
+    if lhs.expiresAfter != rhs.expiresAfter {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2273,6 +2473,176 @@ nonisolated extension Sotto_Profile: SwiftProtobuf.Message, SwiftProtobuf._Messa
   public static func ==(lhs: Sotto_Profile, rhs: Sotto_Profile) -> Bool {
     if lhs.name != rhs.name {return false}
     if lhs._avatar != rhs._avatar {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_Quote: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Quote"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{1}own\0\u{1}text\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.messageID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.own) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.messageID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.messageID, fieldNumber: 1)
+    }
+    if self.own != false {
+      try visitor.visitSingularBoolField(value: self.own, fieldNumber: 2)
+    }
+    if !self.text.isEmpty {
+      try visitor.visitSingularStringField(value: self.text, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_Quote, rhs: Sotto_Quote) -> Bool {
+    if lhs.messageID != rhs.messageID {return false}
+    if lhs.own != rhs.own {return false}
+    if lhs.text != rhs.text {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_Edit: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Edit"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{1}text\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.messageID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.messageID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.messageID, fieldNumber: 1)
+    }
+    if !self.text.isEmpty {
+      try visitor.visitSingularStringField(value: self.text, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_Edit, rhs: Sotto_Edit) -> Bool {
+    if lhs.messageID != rhs.messageID {return false}
+    if lhs.text != rhs.text {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_Deletion: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Deletion"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.messageID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.messageID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.messageID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_Deletion, rhs: Sotto_Deletion) -> Bool {
+    if lhs.messageID != rhs.messageID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_Receipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Receipt"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}read\0\u{3}message_ids\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBoolField(value: &self.read) }()
+      case 2: try { try decoder.decodeRepeatedBytesField(value: &self.messageIds) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.read != false {
+      try visitor.visitSingularBoolField(value: self.read, fieldNumber: 1)
+    }
+    if !self.messageIds.isEmpty {
+      try visitor.visitRepeatedBytesField(value: self.messageIds, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_Receipt, rhs: Sotto_Receipt) -> Bool {
+    if lhs.read != rhs.read {return false}
+    if lhs.messageIds != rhs.messageIds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_Timer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Timer"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}seconds\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.seconds) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.seconds != 0 {
+      try visitor.visitSingularUInt32Field(value: self.seconds, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_Timer, rhs: Sotto_Timer) -> Bool {
+    if lhs.seconds != rhs.seconds {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

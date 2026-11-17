@@ -12,7 +12,7 @@ private let protocolDir = URL(fileURLWithPath: #filePath)
     let lines = manifest.split(separator: "\n")
     #expect(lines.first?.hasPrefix("sotto ") == true)
     let entries = lines.dropFirst()
-    #expect(entries.count == 6)
+    #expect(entries.count == 7)
     for line in entries {
         let parts = line.split(separator: " ", omittingEmptySubsequences: true)
         try #require(parts.count == 2)

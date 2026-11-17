@@ -189,7 +189,13 @@ message Content {
     string text = 1;
     Attachment attachment = 2;
     Profile profile = 3;
+    Edit edit = 4;
+    Deletion deletion = 5;
+    Receipt receipt = 6;
+    Timer timer = 7;
   }
+  Quote quote = 8;
+  uint32 expires_after = 9;
 }
 
 // A file that travels as a blob of the relay (section 32).
@@ -210,4 +216,33 @@ message Attachment {
 message Profile {
   string name = 1;
   Attachment avatar = 2;
+}
+
+// The message that a text or an attachment answers (section 38).
+message Quote {
+  bytes message_id = 1;
+  bool own = 2;
+  string text = 3;
+}
+
+// A new text for a message of the sender's own (section 38).
+message Edit {
+  bytes message_id = 1;
+  string text = 2;
+}
+
+// The sender asks that both sides delete a message of its own (section 38).
+message Deletion {
+  bytes message_id = 1;
+}
+
+// Messages of the receiver that the sender's client holds, or that its user has read.
+message Receipt {
+  bool read = 1;
+  repeated bytes message_ids = 2;
+}
+
+// The disappearing timer of the chat in seconds; 0 turns it off (section 38).
+message Timer {
+  uint32 seconds = 1;
 }

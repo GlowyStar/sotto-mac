@@ -63,12 +63,64 @@ public enum MessageDirection: String, Sendable {
     case outgoing = "out"
 }
 
-/// A row of the message log; `position` grows with every new row.
+/// What a receipt says of a message (section 39.5), as the store keeps it.
+public enum ReceiptKind: String, Codable, Sendable {
+    case delivered
+    case read
+}
+
+/// The message a reply quotes, by its direction in this store and its id, and the text of
+/// the quote, nil once that message is gone (section 39.2).
+public struct StoredQuote: Equatable, Sendable {
+    public var incoming: Bool
+    public var messageID: Data
+    public var text: String?
+
+    public init(incoming: Bool, messageID: Data, text: String?) {
+        self.incoming = incoming
+        self.messageID = messageID
+        self.text = text
+    }
+}
+
+/// A row of the message log, a text or an attachment with its caption as `text`, and what
+/// part 5 keeps of it (section 39.10). `position` is above every position that a message of
+/// the log ever had (section 39.8); `writtenAt` is nil for a message logged before part 5.
 public struct StoredMessage: Equatable, Sendable {
     public var position: Int64
+    public var contact: Data
     public var direction: MessageDirection
     public var messageID: Data
     public var text: String
+    public var writtenAt: Int64?
+    public var edits = 0
+    public var expiresAfter = 0
+    public var expiresAt: Int64?
+    public var readAt: Int64?
+    /// The last receipt of the peer for an own message.
+    public var receipt: ReceiptKind?
+    /// The receipt owed for a received message.
+    public var owed: ReceiptKind?
+    public var quote: StoredQuote?
+
+    public var incoming: Bool { direction == .incoming }
+}
+
+/// What part 5 keeps of a message when it enters the log.
+public struct NewState: Equatable, Sendable {
+    public var writtenAt: Int64
+    public var expiresAfter = 0
+    public var expiresAt: Int64?
+    public var quote: StoredQuote?
+    public var owed: ReceiptKind?
+}
+
+/// The part 5 state of a message that is not in the log: gone, or edited before it arrived
+/// (section 39.7).
+public struct Trace: Equatable, Sendable {
+    public var gone: Bool
+    public var earlyText: String?
+    public var edits: Int
 }
 
 /// A text typed to a contact without a session, kept until the session exists and the text
@@ -80,6 +132,8 @@ public struct PendingText: Equatable, Sendable {
     /// Milliseconds since 1970.
     public var madeAt: Int64
     public var failure: String?
+    /// The position of the message of the chat that the text answers.
+    public var replyTo: Int64?
 }
 
 /// The states of a file of section 33.5, as the store keeps them.
@@ -197,6 +251,12 @@ public final class ClientStore {
         try transaction {
             for table in Schema.tables {
                 try change(table)
+            }
+            // A store of a version before the counter holds its highest positions only in its
+            // rows: the counter starts there, so that deleting the newest row first gives its
+            // position to no later row (section 39.8).
+            for table in ["messages", "pending", "files"] {
+                try change("INSERT OR IGNORE INTO row_numbers SELECT '\(table)', coalesce(max(position), 0) FROM \(table)")
             }
         }
     }
@@ -319,23 +379,69 @@ public final class ClientStore {
 
     /// The logged messages of a contact, oldest first.
     public func messages(_ contact: Data) throws -> [StoredMessage] {
+        try query(Schema.readMessages + " WHERE m.contact = ? ORDER BY m.position", [.blob(contact)]).map(Self.message)
+    }
+
+    public func message(_ position: Int64) throws -> StoredMessage? {
+        try query(Schema.readMessages + " WHERE m.position = ?", [.integer(position)]).first.map(Self.message)
+    }
+
+    /// The latest message of the log that has this author and id (section 39.1).
+    public func message(_ contact: Data, incoming: Bool, messageID: Data) throws -> StoredMessage? {
         try query(
-            "SELECT position, direction, message_id, text FROM messages WHERE contact = ? ORDER BY position",
-            [.blob(contact)]
-        ).map {
-            StoredMessage(
-                position: $0[0].integer!,
-                direction: MessageDirection(rawValue: $0[1].text!)!,
-                messageID: $0[2].data!,
-                text: $0[3].text!
-            )
-        }
+            Schema.readMessages + " WHERE m.contact = ? AND m.direction = ? AND m.message_id = ? ORDER BY m.position DESC",
+            [.blob(contact), .text(Self.direction(incoming)), .blob(messageID)]
+        ).first.map(Self.message)
+    }
+
+    /// The messages whose timer ran out at `now` (section 39.6).
+    public func expiredMessages(_ now: Int64) throws -> [StoredMessage] {
+        try query(Schema.readMessages + " WHERE s.expires_at <= ? ORDER BY m.position", [.integer(now)]).map(Self.message)
+    }
+
+    public func trace(_ contact: Data, incoming: Bool, messageID: Data) throws -> Trace? {
+        try query(
+            "SELECT gone, early_text, edits FROM message_states WHERE contact = ? AND direction = ? AND message_id = ?",
+            [.blob(contact), .text(Self.direction(incoming)), .blob(messageID)]
+        ).first.map { Trace(gone: $0[0].integer! == 1, earlyText: $0[1].text, edits: Int($0[2].integer!)) }
+    }
+
+    /// The receipts to send, as (contact, message id, kind), in the order of the log.
+    public func owedReceipts() throws -> [(contact: Data, messageID: Data, kind: ReceiptKind)] {
+        try query(
+            "SELECT s.contact, s.message_id, s.owed FROM message_states s JOIN messages m USING (contact, direction, message_id) "
+                + "WHERE s.direction = 'in' AND s.owed IS NOT NULL ORDER BY m.position"
+        ).map { (contact: $0[0].data!, messageID: $0[1].data!, kind: ReceiptKind(rawValue: $0[2].text!)!) }
+    }
+
+    /// The position of an own message of the log that no receipt has reached yet.
+    public func ownMessageWithoutReceipt(_ messageID: Data) throws -> Int64? {
+        try query(
+            "SELECT m.position FROM messages m LEFT JOIN message_states s USING (contact, direction, message_id) "
+                + "WHERE m.direction = 'out' AND m.message_id = ? AND s.receipt IS NULL",
+            [.blob(messageID)]
+        ).first?[0].integer
+    }
+
+    /// The disappearing timer of the chat with a contact in seconds, 0 when off.
+    public func timer(_ contact: Data) throws -> Int {
+        Int(try query("SELECT seconds FROM timers WHERE contact = ?", [.blob(contact)]).first?[0].integer ?? 0)
+    }
+
+    public func readReceipts() throws -> Bool {
+        try query("SELECT read_receipts FROM settings").first.map { $0[0].integer == 1 } ?? true
     }
 
     /// The texts that wait for a session, oldest first.
     public func pending() throws -> [PendingText] {
-        try query("SELECT position, contact, text, made_at, failure FROM pending ORDER BY position").map {
-            PendingText(position: $0[0].integer!, contact: $0[1].data!, text: $0[2].text!, madeAt: $0[3].integer!, failure: $0[4].text)
+        try query(
+            "SELECT p.position, p.contact, p.text, p.made_at, p.failure, r.reply_to FROM pending p "
+                + "LEFT JOIN pending_replies r USING (position) ORDER BY p.position"
+        ).map {
+            PendingText(
+                position: $0[0].integer!, contact: $0[1].data!, text: $0[2].text!, madeAt: $0[3].integer!, failure: $0[4].text,
+                replyTo: $0[5].integer
+            )
         }
     }
 
@@ -510,6 +616,8 @@ public final class ClientStore {
         try change("DELETE FROM files WHERE position IN \(avatarFile)", [.blob(contact)])
         try change("DELETE FROM profiles WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM profile_sends WHERE contact = ?", [.blob(contact)])
+        try change("DELETE FROM timers WHERE contact = ?", [.blob(contact)])
+        try change("DELETE FROM message_states WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM sessions WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM contacts WHERE identity_key = ?", [.blob(contact)])
         try change(Schema.deleteOrphanRecords)
@@ -526,37 +634,153 @@ public final class ClientStore {
             [.blob(contact)]
         )
         try change("DELETE FROM messages WHERE contact = ?", [.blob(contact)])
+        try change("DELETE FROM pending_replies WHERE position IN (SELECT position FROM pending WHERE contact = ?)", [.blob(contact)])
         try change("DELETE FROM pending WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM downloads WHERE position IN (SELECT position FROM files WHERE contact = ?)", [.blob(contact)])
         try change("DELETE FROM files WHERE contact = ?", [.blob(contact)])
     }
 
-    public func deleteMessage(_ position: Int64) throws {
+    /// Deletes a message of the log with its files, their downloaded bytes and its refusal,
+    /// leaves its trace and forgets the text of every quote of it (sections 39.4 and 39.6).
+    public func removeMessage(_ message: StoredMessage, at time: Int64) throws {
+        let key: [SQLValue] = [.blob(message.contact), .text(message.direction.rawValue), .blob(message.messageID)]
         try change(
-            "DELETE FROM downloads WHERE position IN (SELECT f.position FROM files f JOIN messages m USING (contact, direction, message_id) WHERE m.position = ?)",
-            [.integer(position)]
+            "DELETE FROM downloads WHERE position IN (SELECT position FROM files WHERE contact = ? AND direction = ? AND message_id = ?)",
+            key
         )
+        try change("DELETE FROM files WHERE contact = ? AND direction = ? AND message_id = ?", key)
+        if !message.incoming {
+            try change("DELETE FROM refusals WHERE message_id = ?", [.blob(message.messageID)])
+        }
+        try change("DELETE FROM messages WHERE position = ?", [.integer(message.position)])
+        try leaveTrace(message.contact, incoming: message.incoming, messageID: message.messageID, at: time)
+    }
+
+    /// Marks a message as gone, whether it is in the log or not yet, and forgets the text of
+    /// every quote of it; the trace keeps nothing of the content (section 39.4).
+    public func leaveTrace(_ contact: Data, incoming: Bool, messageID: Data, at time: Int64) throws {
+        let direction = SQLValue.text(Self.direction(incoming))
+        try change(Schema.leaveTrace, [.blob(contact), direction, .blob(messageID), .integer(time)])
         try change(
-            "DELETE FROM files WHERE (contact, direction, message_id) IN (SELECT contact, direction, message_id FROM messages WHERE position = ?)",
-            [.integer(position)]
+            "UPDATE message_states SET quote_text = NULL WHERE contact = ? AND quote_direction = ? AND quote_id = ?",
+            [.blob(contact), direction, .blob(messageID)]
         )
+    }
+
+    /// Saves what part 5 keeps of a message just logged; the text of an edit that came before
+    /// it is dropped, its count of edits stays.
+    public func saveState(_ contact: Data, incoming: Bool, messageID: Data, state: NewState) throws {
+        let quote = state.quote
         try change(
-            "DELETE FROM refusals WHERE message_id IN (SELECT message_id FROM messages WHERE position = ?)",
-            [.integer(position)]
+            Schema.saveState,
+            [
+                .blob(contact), .text(Self.direction(incoming)), .blob(messageID), .integer(state.writtenAt),
+                quote.map { .text(Self.direction($0.incoming)) } ?? .null, quote.map { .blob($0.messageID) } ?? .null,
+                quote?.text.map(SQLValue.text) ?? .null, .integer(Int64(state.expiresAfter)),
+                state.expiresAt.map(SQLValue.integer) ?? .null, state.owed.map { .text($0.rawValue) } ?? .null,
+            ]
         )
-        try change("DELETE FROM messages WHERE position = ?", [.integer(position)])
+    }
+
+    /// The timer of an own message from its SEND on: `writtenAt` is when it was sent.
+    public func setSent(_ message: StoredMessage, at time: Int64, expiresAfter: Int) throws {
+        try change(
+            "UPDATE message_states SET written_at = ?, expires_after = ?, expires_at = ? WHERE contact = ? AND direction = ? AND message_id = ?",
+            [
+                .integer(time), .integer(Int64(expiresAfter)), expiresAfter > 0 ? .integer(time + Int64(expiresAfter)) : .null,
+                .blob(message.contact), .text(message.direction.rawValue), .blob(message.messageID),
+            ]
+        )
+    }
+
+    /// Counts an edit of an incoming message that is not in the log; `earlyText` is the text
+    /// it waits with (section 39.7).
+    public func countEdit(_ contact: Data, messageID: Data, at time: Int64, earlyText: String?) throws {
+        try change(Schema.countEdit, [.blob(contact), .text("in"), .blob(messageID), .integer(time), earlyText.map(SQLValue.text) ?? .null])
+    }
+
+    /// Replaces the text of a logged message, an attachment's caption included, and counts
+    /// the edit (section 39.3).
+    public func editMessage(_ message: StoredMessage, text: String, at time: Int64) throws {
+        try change("UPDATE messages SET text = ? WHERE position = ?", [.text(text), .integer(message.position)])
+        for file in try files(ofMessageAt: message.position) {
+            var attachment = file.attachment
+            attachment.caption = text
+            try change(
+                "UPDATE files SET attachment = ? WHERE position = ?", [.blob(try attachment.serializedBytes()), .integer(file.position)]
+            )
+        }
+        try change(
+            Schema.countEdit,
+            [.blob(message.contact), .text(message.direction.rawValue), .blob(message.messageID), .integer(time), .null]
+        )
+    }
+
+    public func setReceipt(_ message: StoredMessage, _ receipt: ReceiptKind) throws {
+        try change(
+            "UPDATE message_states SET receipt = ? WHERE contact = ? AND direction = ? AND message_id = ?",
+            [.text(receipt.rawValue), .blob(message.contact), .text(message.direction.rawValue), .blob(message.messageID)]
+        )
+    }
+
+    /// The user has seen a received message: its read time, its expiry and what it owes.
+    public func setRead(_ message: StoredMessage, readAt: Int64, expiresAt: Int64?, owed: ReceiptKind?) throws {
+        try change(
+            Schema.setRead,
+            [
+                .blob(message.contact), .blob(message.messageID), .integer(readAt), .integer(readAt),
+                expiresAt.map(SQLValue.integer) ?? .null, owed.map { .text($0.rawValue) } ?? .null,
+            ]
+        )
+    }
+
+    public func clearOwed(_ contact: Data, _ messageIDs: [Data]) throws {
+        for messageID in messageIDs {
+            try change(
+                "UPDATE message_states SET owed = NULL WHERE contact = ? AND direction = 'in' AND message_id = ?",
+                [.blob(contact), .blob(messageID)]
+            )
+        }
+    }
+
+    /// Turns the read receipts still owed into delivery receipts (section 39.5).
+    public func oweDeliveryForRead() throws {
+        try change("UPDATE message_states SET owed = 'delivered' WHERE owed = 'read'")
+    }
+
+    /// Forgets the traces written at or before the time, with the seen ids (section 39.7).
+    public func forgetTraces(writtenAtOrBefore: Int64) throws {
+        try change(Schema.forgetTraces, [.integer(writtenAtOrBefore)])
+    }
+
+    public func setTimer(_ contact: Data, seconds: Int) throws {
+        try change(
+            "INSERT INTO timers VALUES (?, ?) ON CONFLICT (contact) DO UPDATE SET seconds = excluded.seconds",
+            [.blob(contact), .integer(Int64(seconds))]
+        )
+    }
+
+    public func setReadReceipts(_ on: Bool) throws {
+        try change(
+            "INSERT INTO settings VALUES (1, ?) ON CONFLICT (only_row) DO UPDATE SET read_receipts = excluded.read_receipts",
+            [.integer(on ? 1 : 0)]
+        )
     }
 
     /// Keeps a text that waits for a session before it can be encrypted; returns its position.
-    public func addPending(_ contact: Data, text: String, madeAt: Int64) throws -> Int64 {
-        try change(
-            "INSERT INTO pending (contact, text, made_at) VALUES (?, ?, ?) RETURNING position",
-            [.blob(contact), .text(text), .integer(madeAt)]
-        )[0][0].integer!
+    public func addPending(_ contact: Data, text: String, madeAt: Int64, replyTo: Int64? = nil) throws -> Int64 {
+        let position = try insertNumbered(
+            "pending", columns: "contact, text, made_at", [.blob(contact), .text(text), .integer(madeAt)]
+        )
+        if let replyTo {
+            try change("INSERT INTO pending_replies VALUES (?, ?)", [.integer(position), .integer(replyTo)])
+        }
+        return position
     }
 
     public func removePending(_ position: Int64) throws {
         try change("DELETE FROM pending WHERE position = ?", [.integer(position)])
+        try change("DELETE FROM pending_replies WHERE position = ?", [.integer(position)])
     }
 
     /// Marks a pending text as one that is not sent, with a reason for a person.
@@ -639,9 +863,12 @@ public final class ClientStore {
         try change("DELETE FROM outbox WHERE message_id = ?", [.blob(messageID)])
     }
 
-    public func logMessage(_ contact: Data, direction: MessageDirection, messageID: Data, text: String) throws {
-        try change(
-            "INSERT INTO messages (contact, direction, message_id, text) VALUES (?, ?, ?, ?)",
+    /// Adds a message to the log and returns its position, which is above every position
+    /// that a message of the log ever had (section 39.8).
+    @discardableResult
+    public func logMessage(_ contact: Data, direction: MessageDirection, messageID: Data, text: String) throws -> Int64 {
+        try insertNumbered(
+            "messages", columns: "contact, direction, message_id, text",
             [.blob(contact), .text(direction.rawValue), .blob(messageID), .text(text)]
         )
     }
@@ -705,13 +932,13 @@ public final class ClientStore {
         _ contact: Data, incoming: Bool, messageID: Data, attachment: Sotto_Attachment, state: FileState,
         savedAs: String? = nil
     ) throws -> Int64 {
-        try change(
-            "INSERT INTO files (contact, direction, message_id, attachment, state, saved_as) VALUES (?, ?, ?, ?, ?, ?) RETURNING position",
+        try insertNumbered(
+            "files", columns: "contact, direction, message_id, attachment, state, saved_as",
             [
-                .blob(contact), .text((incoming ? MessageDirection.incoming : .outgoing).rawValue), .blob(messageID),
+                .blob(contact), .text(Self.direction(incoming)), .blob(messageID),
                 .blob(try attachment.serializedBytes()), .text(state.rawValue), savedAs.map(SQLValue.text) ?? .null,
             ]
-        )[0][0].integer!
+        )
     }
 
     /// Sets the state of a file and drops its downloaded bytes; a nil `savedAs` keeps the path.
@@ -754,6 +981,29 @@ public final class ClientStore {
 
     public func deleteBlobDeletion(uploader: Data, blobID: Data) throws {
         try change("DELETE FROM blob_deletions WHERE uploader = ? AND blob_id = ?", [.blob(uploader), .blob(blobID)])
+    }
+
+    /// Inserts a row at a position above every position the table ever had, so that a
+    /// position of a row that is gone is never given to another one (section 39.8). SQLite
+    /// gives the highest `INTEGER PRIMARY KEY` again once its row is deleted.
+    private func insertNumbered(_ table: String, columns: String, _ values: [SQLValue]) throws -> Int64 {
+        let marks = Array(repeating: "?", count: values.count).joined(separator: ", ")
+        let position = try change(
+            """
+            INSERT INTO \(table) (position, \(columns)) VALUES (
+                max(
+                    coalesce((SELECT max(position) FROM \(table)), 0),
+                    coalesce((SELECT last_number FROM row_numbers WHERE name = '\(table)'), 0)
+                ) + 1, \(marks)
+            ) RETURNING position
+            """,
+            values
+        )[0][0].integer!
+        try change(
+            "INSERT INTO row_numbers VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET last_number = excluded.last_number",
+            [.text(table), .integer(position)]
+        )
+        return position
     }
 
     // MARK: SQLite
@@ -894,6 +1144,28 @@ public final class ClientStore {
             result: row[8].text,
             avatar: row[9].integer! == 1
         )
+    }
+
+    private static func message(_ row: [SQLValue]) -> StoredMessage {
+        StoredMessage(
+            position: row[0].integer!,
+            contact: row[1].data!,
+            direction: MessageDirection(rawValue: row[2].text!)!,
+            messageID: row[3].data!,
+            text: row[4].text!,
+            writtenAt: row[5].integer,
+            edits: Int(row[6].integer!),
+            expiresAfter: Int(row[7].integer!),
+            expiresAt: row[8].integer,
+            readAt: row[9].integer,
+            receipt: row[10].text.flatMap(ReceiptKind.init),
+            owed: row[11].text.flatMap(ReceiptKind.init),
+            quote: row[12].text.map { StoredQuote(incoming: $0 == "in", messageID: row[13].data!, text: row[14].text) }
+        )
+    }
+
+    private static func direction(_ incoming: Bool) -> String {
+        (incoming ? MessageDirection.incoming : .outgoing).rawValue
     }
 
     private static func profile(_ row: [SQLValue]) -> ContactProfile {
@@ -1125,7 +1397,100 @@ private enum Schema {
             blob_id BLOB UNIQUE
         ) STRICT, WITHOUT ROWID
         """,
+        // Part 5 (section 39.10): what is kept of a message of the log, by the id its sender
+        // chose. A row without its message is a trace: a change that came first, or a
+        // message that is gone. `receipt` is what the peer reported of an own message,
+        // `owed` the receipt to send.
+        """
+        CREATE TABLE IF NOT EXISTS message_states (
+            contact BLOB NOT NULL,
+            direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+            message_id BLOB NOT NULL,
+            written_at INTEGER NOT NULL,
+            quote_direction TEXT CHECK (quote_direction IN ('in', 'out')),
+            quote_id BLOB,
+            quote_text TEXT,
+            edits INTEGER NOT NULL DEFAULT 0,
+            early_text TEXT,
+            gone INTEGER NOT NULL DEFAULT 0,
+            receipt TEXT CHECK (receipt IN ('delivered', 'read')),
+            owed TEXT CHECK (owed IN ('delivered', 'read')),
+            read_at INTEGER,
+            expires_after INTEGER NOT NULL DEFAULT 0,
+            expires_at INTEGER,
+            PRIMARY KEY (contact, direction, message_id)
+        ) STRICT, WITHOUT ROWID
+        """,
+        "CREATE INDEX IF NOT EXISTS messages_by_id ON messages (contact, direction, message_id)",
+        "CREATE INDEX IF NOT EXISTS message_states_by_expiry ON message_states (expires_at)",
+        """
+        CREATE TABLE IF NOT EXISTS timers (
+            contact BLOB PRIMARY KEY,
+            seconds INTEGER NOT NULL
+        ) STRICT, WITHOUT ROWID
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            only_row INTEGER PRIMARY KEY CHECK (only_row = 1),
+            read_receipts INTEGER NOT NULL
+        ) STRICT
+        """,
+        // This client's own: the highest position that a row of `messages`, `pending` and
+        // `files` ever had (section 39.8), and the message a pending text answers.
+        """
+        CREATE TABLE IF NOT EXISTS row_numbers (
+            name TEXT PRIMARY KEY,
+            last_number INTEGER NOT NULL
+        ) STRICT, WITHOUT ROWID
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS pending_replies (
+            position INTEGER PRIMARY KEY,
+            reply_to INTEGER NOT NULL
+        ) STRICT
+        """,
     ]
+
+    static let readMessages = """
+        SELECT m.position, m.contact, m.direction, m.message_id, m.text, s.written_at, coalesce(s.edits, 0),
+            coalesce(s.expires_after, 0), s.expires_at, s.read_at, s.receipt, s.owed, s.quote_direction, s.quote_id,
+            s.quote_text
+        FROM messages m LEFT JOIN message_states s
+            ON s.contact = m.contact AND s.direction = m.direction AND s.message_id = m.message_id
+        """
+    static let saveState = """
+        INSERT INTO message_states (contact, direction, message_id, written_at, quote_direction, quote_id, quote_text,
+            expires_after, expires_at, owed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (contact, direction, message_id) DO UPDATE SET
+            written_at = excluded.written_at, quote_direction = excluded.quote_direction, quote_id = excluded.quote_id,
+            quote_text = excluded.quote_text, expires_after = excluded.expires_after, expires_at = excluded.expires_at,
+            owed = excluded.owed, early_text = NULL
+        """
+    static let countEdit = """
+        INSERT INTO message_states (contact, direction, message_id, written_at, edits, early_text)
+        VALUES (?, ?, ?, ?, 1, ?)
+        ON CONFLICT (contact, direction, message_id) DO UPDATE SET edits = edits + 1, early_text = excluded.early_text
+        """
+    static let leaveTrace = """
+        INSERT INTO message_states (contact, direction, message_id, written_at, gone)
+        VALUES (?, ?, ?, ?, 1)
+        ON CONFLICT (contact, direction, message_id) DO UPDATE SET
+            written_at = excluded.written_at, gone = 1, quote_direction = NULL, quote_id = NULL, quote_text = NULL,
+            early_text = NULL, receipt = NULL, owed = NULL, read_at = NULL, expires_after = 0, expires_at = NULL
+        """
+    static let setRead = """
+        INSERT INTO message_states (contact, direction, message_id, written_at, read_at, expires_at, owed)
+        VALUES (?, 'in', ?, ?, ?, ?, ?)
+        ON CONFLICT (contact, direction, message_id) DO UPDATE SET
+            read_at = excluded.read_at, expires_at = excluded.expires_at, owed = excluded.owed
+        """
+    static let forgetTraces = """
+        DELETE FROM message_states WHERE written_at <= ? AND NOT EXISTS (
+            SELECT 1 FROM messages m WHERE m.contact = message_states.contact
+                AND m.direction = message_states.direction AND m.message_id = message_states.message_id
+        )
+        """
 
     static let readFiles = """
         SELECT position, contact, direction, message_id, attachment, state, held, saved_as, result,

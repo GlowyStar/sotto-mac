@@ -6,9 +6,10 @@ import UniformTypeIdentifiers
 
 /// Mock contacts and chats that exercise the layout: short and long messages, several lines,
 /// a link, emoji, Russian and English, groups, several days, unread counts, an empty chat,
-/// outgoing messages in both states, pinned, muted and archived chats and a draft; two chats
+/// outgoing messages in every state, pinned, muted and archived chats and a draft; two chats
 /// hold photos and files in every state, drawn in code into a temporary folder; the user and
-/// several contacts have a profile, most with a photo drawn in code.
+/// several contacts have a profile, most with a photo drawn in code; one chat holds replies,
+/// edits, a quote of a deleted message, the marks of part 5 and messages with a timer.
 @MainActor
 enum MockData {
     /// A stable 64-hex id made from a name.
@@ -54,14 +55,14 @@ enum MockData {
             [
                 inc("Привет! Ты уже посмотрел черновик?", day(2, 18, 4)),
                 inc("Там всего пара страниц", day(2, 18, 5)),
-                out("Ещё нет, вечером гляну", day(2, 19, 30)),
-                out("Скинь ссылку ещё раз, пожалуйста", day(2, 19, 31)),
+                out("Ещё нет, вечером гляну", day(2, 19, 30), .read),
+                out("Скинь ссылку ещё раз, пожалуйста", day(2, 19, 31), .read),
                 inc("https://example.com/drafts/sotto-notes", day(2, 19, 40)),
-                out("Прочитал. В целом хорошо, но третий раздел я бы сократил вдвое: там повторяется то, что уже сказано во введении, и теряется главная мысль про ключи на устройстве.", day(1, 9, 12)),
+                out("Прочитал. В целом хорошо, но третий раздел я бы сократил вдвое: там повторяется то, что уже сказано во введении, и теряется главная мысль про ключи на устройстве.", day(1, 9, 12), .read),
                 inc("Согласна 👍", day(1, 9, 20)),
                 inc("Сокращу сегодня", day(1, 9, 20)),
-                out("Отлично, спасибо! 🙌", day(1, 9, 25)),
-                out("Call at 5?", ago(95)),
+                out("Отлично, спасибо! 🙌", day(1, 9, 25), .read),
+                out("Call at 5?", ago(95), .delivered),
                 inc("Да, давай", ago(40)),
                 inc("Only I might be a few minutes late, the train is slow today 🚆", ago(39)),
                 inc("Позвоню как буду на месте", ago(38)),
@@ -135,8 +136,20 @@ enum MockData {
             $0.archived = true
             $0.muted = true
         }
-        add("Vera Lindqvist", added: day(6, 9, 0), photoMessages())
-        add("Leo Fischer", added: day(6, 9, 0), fileMessages())
+        var vera = photoMessages()
+        if let index = vera.firstIndex(where: { $0.id == "vera-7" }), let quoted = vera.first(where: { $0.id == "vera-2" }) {
+            vera[index].quote = MessageQuote(messageID: quoted.id, outgoing: false, text: quoted.text, file: quoted.file)
+        }
+        var leo = fileMessages()
+        if let index = leo.firstIndex(where: { $0.id == "leo-6" }), let quoted = leo.first(where: { $0.id == "leo-1" }) {
+            leo[index].quote = MessageQuote(messageID: quoted.id, outgoing: false, text: quoted.text, file: quoted.file)
+        }
+        add("Vera Lindqvist", added: day(6, 9, 0), vera)
+        add("Leo Fischer", added: day(6, 9, 0), leo)
+        add("Nora Weiss", unread: 1, added: day(6, 9, 0), changeMessages())
+        let nora = id(for: "Nora Weiss")
+        model.timers = [nora: 86400]
+        model.timerChanges = [nora: [TimerChange(date: ago(26), seconds: 86400, own: false)]]
 
         // Profiles: photos received, a thumbnail only, a picture gone, a name alone.
         set("Anna Petrova") { $0.profile = UserProfile(name: "Anya", avatar: portrait("anna", hue: 0.95)) }
@@ -321,6 +334,44 @@ enum MockData {
             media("vera-7", out: true, ago(20), photo(tower, .sent, size: 3_400_000)),
             media("vera-8", out: true, ago(5), photo(lake, .notSent, size: 1_843_200), .failed(failed)),
             media("vera-9", out: true, ago(1), photo(dusk, .sending, size: 954_000, done: 0.6), .waiting),
+        ]
+    }
+
+    /// Replies, edits, a quote of a message that is gone, every mark of an own message and
+    /// messages with a timer (DESIGN.md 20).
+    static func changeMessages() -> [Message] {
+        func message(
+            _ id: String, out: Bool, _ text: String, _ date: Date, _ state: MessageState = .stored,
+            quote: MessageQuote? = nil, edited: Bool = false, timer: Int = 0, expiresAt: Date? = nil
+        ) -> Message {
+            var message = Message(id: id, outgoing: out, text: text, date: date, state: state)
+            message.quote = quote
+            message.edited = edited
+            message.expiresAfter = timer
+            message.expiresAt = expiresAt
+            message.editableUntil = out ? date.addingTimeInterval(86400) : nil
+            return message
+        }
+        let venue = "Can you send me the address of the venue? I lost the invitation"
+        let answer = "Sure: Lindenstrasse 12, second floor"
+        let plan = ChatFile(name: "Seating plan.pdf", size: 240_000, mediaType: "application/pdf", state: .received)
+        return [
+            message("nora-1", out: false, venue, day(1, 17, 40)),
+            message("nora-2", out: true, answer, day(1, 17, 52), .read,
+                    quote: MessageQuote(messageID: "nora-1", outgoing: false, text: venue), edited: true),
+            message("nora-3", out: false, "Thanks! And when do the doors open?", day(1, 17, 55),
+                    quote: MessageQuote(messageID: "nora-2", outgoing: true, text: answer)),
+            message("nora-4", out: true, "At 6:30, the talk starts at 7", day(1, 17, 58), .read),
+            message("nora-5", out: false, "Never mind the photo, I sent the wrong one", ago(60),
+                    quote: MessageQuote(messageID: nil, outgoing: false, text: nil)),
+            message("nora-6", out: true, "Is this the plan you meant?", ago(55), .delivered,
+                    quote: MessageQuote(messageID: nil, outgoing: false, text: "", file: plan)),
+            message("nora-7", out: false, "Yes. Let's keep this chat tidy, I turned on the timer", ago(25),
+                    timer: 86400, expiresAt: ago(20).addingTimeInterval(86400)),
+            message("nora-8", out: true, "Good idea", ago(20), .read, timer: 86400, expiresAt: ago(20).addingTimeInterval(86400)),
+            message("nora-9", out: true, "See you there", ago(8), .stored, timer: 86400, expiresAt: ago(8).addingTimeInterval(86400)),
+            message("nora-10", out: true, "Bring the badge", ago(1), .waiting, timer: 86400),
+            message("nora-11", out: false, "Will do", ago(0.5), timer: 86400),
         ]
     }
 

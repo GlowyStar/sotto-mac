@@ -509,18 +509,32 @@ func nextEvent(_ transport: Transport, _ matches: @escaping @Sendable (Transport
     }
 }
 
+/// The next Deliver that is more than a receipt of part 5 (section 39.5), which every
+/// message of the chat now brings back to its sender.
 func nextIncoming(_ transport: Transport) async throws -> (sender: Data, received: Received) {
     guard case .incoming(let sender, let received) = try await nextEvent(transport, {
-        if case .incoming = $0 { true } else { false }
+        if case .incoming(_, let received) = $0 { !isAReceipt(received) } else { false }
     }) else {
         throw Timeout()
     }
     return (sender, received)
 }
 
+/// A Deliver that changed nothing but the marks of own messages, or nothing at all.
+func isAReceipt(_ received: Received) -> Bool {
+    received.text == nil && received.attachment == nil && received.profile == nil && received.result == nil
+        && received.missing == 0 && received.position == nil && received.timer == nil
+}
+
+/// The next Deliver that is more than a receipt, or a copy of one that a relay delivered
+/// again (a receipt can come twice around a restart of the relay).
 func nextText(_ transport: Transport) async throws -> (Data, String?) {
-    let incoming = try await nextIncoming(transport)
-    return (incoming.sender, incoming.received.text)
+    while true {
+        let incoming = try await nextIncoming(transport)
+        if incoming.received.result != SessionError.duplicate.result {
+            return (incoming.sender, incoming.received.text)
+        }
+    }
 }
 
 /// Waits until `condition` holds, polling.

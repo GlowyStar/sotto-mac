@@ -12,6 +12,7 @@ public enum EnvelopeError: Error, Equatable, Sendable {
     case badProfileName
     case avatarTooLarge
     case notAnImage
+    case badTimer
 
     public var result: String {
         switch self {
@@ -24,15 +25,17 @@ public enum EnvelopeError: Error, Equatable, Sendable {
         case .badProfileName: "BAD_PROFILE_NAME"
         case .avatarTooLarge: "AVATAR_TOO_LARGE"
         case .notAnImage: "NOT_AN_IMAGE"
+        case .badTimer: "BAD_TIMER"
         }
     }
 }
 
-/// The peer envelope and the plaintext of docs/protocol.md, sections 19, 32 and 35.
+/// The peer envelope and the plaintext of docs/protocol.md, sections 19, 32, 35 and 38.
 public enum Envelope {
     public static let version: UInt32 = 1
     public static let paddingBlock = 256
     public static let maxTextBytes = 65019
+    public static let maxContentBytes = 65023
     public static let paddingMark: UInt8 = 0x80
     public static let sealingOverhead = Ratchet.messageNonceLength + Ratchet.tagLength
     public static let maxMediaTypeBytes = 127
@@ -41,6 +44,10 @@ public enum Envelope {
     public static let maxCaptionBytes = 4096
     public static let maxProfileNameBytes = 256
     public static let maxAvatarBytes = 1_048_576
+    public static let messageIDLength = 16
+    public static let maxQuoteBytes = 256
+    public static let maxTimerSeconds = 2_419_200
+    public static let maxReceiptIDs = 1000
     /// The media types of an avatar and the first bytes of each (section 35.2).
     public static let avatarSignatures: [(mediaType: String, signature: [UInt8])] = [
         ("image/jpeg", [0xff, 0xd8, 0xff]),
@@ -64,24 +71,125 @@ public enum Envelope {
         return Data(padded[padded.startIndex..<last])
     }
 
-    /// Returns the padded plaintext of a text.
-    public static func encodeText(_ text: String) throws -> Data {
+    /// Returns the padded plaintext of a text, a reply when it has a quote (section 38.2).
+    ///
+    /// - Throws: `EnvelopeError.textTooLong` when the text is longer than `maxTextBytes`, or
+    ///   the content with its quote and timer longer than `maxContentBytes`;
+    ///   `EnvelopeError.badTimer` when `expiresAfter` is above `maxTimerSeconds`;
+    ///   `InvalidInputError` when the quote breaks its limits of section 38.2.
+    public static func encodeText(_ text: String, quote: Sotto_Quote? = nil, expiresAfter: Int = 0) throws -> Data {
         guard text.utf8.count <= maxTextBytes else {
             throw EnvelopeError.textTooLong
         }
         var content = Sotto_Content()
         content.text = text
-        return pad(try content.serializedBytes())
+        return try paddedMessage(content, quote, expiresAfter)
     }
 
     /// Returns the padded plaintext of an attachment that the client filled (section 32.1).
     ///
-    /// - Throws: `InvalidInputError` when a field is beyond its limit of section 32.1.
-    public static func encodeAttachment(_ attachment: Sotto_Attachment) throws -> Data {
+    /// - Throws: `InvalidInputError` when a field is beyond its limit of section 32.1 or the
+    ///   quote beyond its limits of section 38.2; `EnvelopeError.badTimer`.
+    public static func encodeAttachment(_ attachment: Sotto_Attachment, quote: Sotto_Quote? = nil, expiresAfter: Int = 0) throws -> Data {
         try checkLimits(attachment)
         var content = Sotto_Content()
         content.attachment = attachment
-        return pad(try content.serializedBytes())
+        return try paddedMessage(content, quote, expiresAfter)
+    }
+
+    /// Returns the padded plaintext of an edit (section 38.2).
+    ///
+    /// - Throws: `EnvelopeError.textTooLong` when the content is longer than
+    ///   `maxContentBytes`; `InvalidInputError` when the id is not `messageIDLength` bytes.
+    public static func encodeEdit(messageID: Data, text: String) throws -> Data {
+        try requireMessageID(messageID)
+        var content = Sotto_Content()
+        content.edit.messageID = messageID
+        content.edit.text = text
+        return try padded(content)
+    }
+
+    /// Returns the padded plaintext of a deletion for both (section 38.2).
+    public static func encodeDeletion(messageID: Data) throws -> Data {
+        try requireMessageID(messageID)
+        var content = Sotto_Content()
+        content.deletion.messageID = messageID
+        return try padded(content)
+    }
+
+    /// Returns the padded plaintext of a delivery or a read receipt (section 38.2).
+    ///
+    /// - Throws: `InvalidInputError` when an id is not `messageIDLength` bytes or there are
+    ///   more than `maxReceiptIDs`.
+    public static func encodeReceipt(messageIDs: [Data], read: Bool) throws -> Data {
+        guard messageIDs.count <= maxReceiptIDs else {
+            throw InvalidInputError(message: "a receipt names at most \(maxReceiptIDs) messages")
+        }
+        try messageIDs.forEach(requireMessageID)
+        var content = Sotto_Content()
+        content.receipt.read = read
+        content.receipt.messageIds = messageIDs
+        return try padded(content)
+    }
+
+    /// Returns the padded plaintext of a change of the chat timer, 0 for none (section 38.2).
+    ///
+    /// - Throws: `EnvelopeError.badTimer` when the seconds are above `maxTimerSeconds`.
+    public static func encodeTimer(seconds: Int) throws -> Data {
+        try requireTimer(seconds)
+        var content = Sotto_Content()
+        content.timer.seconds = UInt32(seconds)
+        return try padded(content)
+    }
+
+    /// The longest start of `text` that is at most `limit` bytes of UTF-8.
+    public static func cut(_ text: String, to limit: Int) -> String {
+        var cut = ""
+        var count = 0
+        for scalar in text.unicodeScalars {
+            count += String(scalar).utf8.count
+            guard count <= limit else {
+                break
+            }
+            cut.unicodeScalars.append(scalar)
+        }
+        return cut
+    }
+
+    /// A text or an attachment with the quote and the timer of part 5, padded.
+    private static func paddedMessage(_ message: Sotto_Content, _ quote: Sotto_Quote?, _ expiresAfter: Int) throws -> Data {
+        try requireTimer(expiresAfter)
+        var content = message
+        if let quote {
+            try requireMessageID(quote.messageID)
+            guard quote.text.utf8.count <= maxQuoteBytes else {
+                throw InvalidInputError(message: "a quote holds at most \(maxQuoteBytes) bytes of text")
+            }
+            content.quote = quote
+        }
+        content.expiresAfter = UInt32(expiresAfter)
+        return try padded(content)
+    }
+
+    /// The padded plaintext of a content that fits a message whatever its session (38.4).
+    private static func padded(_ content: Sotto_Content) throws -> Data {
+        let serialized: Data = try content.serializedBytes()
+        guard serialized.count <= maxContentBytes else {
+            throw EnvelopeError.textTooLong
+        }
+        return pad(serialized)
+    }
+
+    private static func requireMessageID(_ messageID: Data) throws {
+        guard messageID.count == messageIDLength else {
+            throw InvalidInputError(message: "a message id is \(messageIDLength) bytes, not \(messageID.count)")
+        }
+    }
+
+    private static func requireTimer(_ seconds: Int) throws {
+        guard (0...maxTimerSeconds).contains(seconds) else {
+            throw EnvelopeError.badTimer
+        }
     }
 
     /// Returns the padded plaintext of the client's own profile (section 35.2).
@@ -154,10 +262,23 @@ public enum Envelope {
         return text
     }
 
-    /// Returns the body of a padded plaintext by sections 19.5, 19.6, 32.2 and 35.3: a text,
-    /// an attachment whose lengths hold, or a profile that passes the checks of 35.3.
+    /// Returns the body of a padded plaintext that `openContent` checked.
     public static func decodeContent(_ padded: Data) throws -> Sotto_Content.OneOf_Body {
-        let content: Sotto_Content
+        guard let body = try openContent(padded).body else {
+            throw EnvelopeError.unknownContent
+        }
+        return body
+    }
+
+    /// Returns the content of a padded plaintext by sections 19.5, 19.6, 32.2, 35.3 and 38.3;
+    /// `quote` and `expiresAfter` are cleared unless the body is a text or an attachment,
+    /// which alone they go with.
+    ///
+    /// - Throws: `EnvelopeError.badPadding`; `.badContent` when the content does not parse, a
+    ///   string that is not UTF-8 included, or a member breaks a check of section 32.2, 35.3
+    ///   or 38.3; `.unknownContent` when it sets no member that this client knows.
+    public static func openContent(_ padded: Data) throws -> Sotto_Content {
+        var content: Sotto_Content
         do {
             content = try Sotto_Content(serializedBytes: try unpad(padded))
         } catch let error as EnvelopeError {
@@ -166,11 +287,15 @@ public enum Envelope {
             throw EnvelopeError.badContent
         }
         switch content.body {
-        case .text(let text):
-            return .text(text)
-        case .attachment(let attachment):
-            try checkReceived(attachment)
-            return .attachment(attachment)
+        case .text, .attachment:
+            if case .attachment(let attachment) = content.body {
+                try checkReceived(attachment)
+            }
+            if content.hasQuote {
+                try checkMessageID(content.quote.messageID)
+            }
+            try checkSeconds(content.expiresAfter)
+            return content
         case .profile(let profile):
             guard isProfileName(profile.name) else {
                 throw EnvelopeError.badContent
@@ -182,9 +307,31 @@ public enum Envelope {
                     throw EnvelopeError.badContent
                 }
             }
-            return .profile(profile)
+        case .edit(let edit):
+            try checkMessageID(edit.messageID)
+        case .deletion(let deletion):
+            try checkMessageID(deletion.messageID)
+        case .receipt(let receipt):
+            try receipt.messageIds.forEach(checkMessageID)
+        case .timer(let timer):
+            try checkSeconds(timer.seconds)
         case nil:
             throw EnvelopeError.unknownContent
+        }
+        content.clearQuote()
+        content.expiresAfter = 0
+        return content
+    }
+
+    private static func checkMessageID(_ messageID: Data) throws {
+        guard messageID.count == messageIDLength else {
+            throw EnvelopeError.badContent
+        }
+    }
+
+    private static func checkSeconds(_ seconds: UInt32) throws {
+        guard seconds <= maxTimerSeconds else {
+            throw EnvelopeError.badContent
         }
     }
 

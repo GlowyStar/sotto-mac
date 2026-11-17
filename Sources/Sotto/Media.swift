@@ -92,18 +92,43 @@ struct TimeMark: View {
 
     var body: some View {
         let out = message.outgoing
+        let color = overlay ? Color.mediaOverlayFg : out ? Color.msgOutDateFg : Color.msgInDateFg
         HStack(spacing: 3) {
-            Text(time)
+            if message.expiresAfter > 0 {
+                TimerLabel(seconds: message.expiresAfter, color: color)
+                    .help(Self.timerHelp(message))
+            }
+            Text(message.edited ? "edited " + time : time)
                 .font(Fonts.message(settings.textSize))
-                .foregroundStyle(overlay ? Color.mediaOverlayFg : out ? Color.msgOutDateFg : Color.msgInDateFg)
+                .foregroundStyle(color)
             if out {
                 StatusMark(
                     state: message.state,
                     waitingColor: overlay ? .mediaOverlayFg : .msgSendingIconFg,
-                    storedColor: overlay ? .mediaOverlayFg : .msgStoredIconFg)
+                    storedColor: overlay ? .mediaOverlayFg : .msgStoredIconFg,
+                    deliveredColor: overlay ? .mediaOverlayFg.opacity(0.7) : .msgDeliveredIconFg)
             }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    /// The room a bubble keeps on its last line for the time, the marks and the timer: a
+    /// transparent copy of the time line in figure spaces (DESIGN.md 5.4 and 20.4).
+    static func reserve(_ message: Message, time: String) -> String {
+        var line = " \u{2007}" + (message.edited ? "edited " : "") + time
+        if message.expiresAfter > 0 {
+            line = " \u{2007}\u{2007}" + TimerChoices.short(message.expiresAfter) + line
+        }
+        return line + (message.outgoing ? "\u{2007}\u{2007}\u{2007}" : "")
+    }
+
+    private static func timerHelp(_ message: Message) -> String {
+        let title = TimerChoices.title(message.expiresAfter)
+        guard let at = message.expiresAt else {
+            return message.outgoing ? "Disappears \(title) after it is sent" : "Disappears \(title) after you read it"
+        }
+        let left = max(0, Int(at.timeIntervalSinceNow.rounded(.up)))
+        return "Disappears in \(TimerChoices.title(left) == "Off" ? "a moment" : TimerChoices.title(left))"
     }
 }
 
@@ -208,12 +233,20 @@ struct PhotoBubble<Caption: View>: View {
     let time: String
     let connected: Bool
     let tap: () -> Void
+    /// The quote of a reply, over the picture (DESIGN.md 20.3).
+    var header: AnyView?
     @ViewBuilder let caption: () -> Caption
 
     var body: some View {
         let size = Media.photoFrame(file, maxWidth: maxWidth)
         let captioned = !message.text.isEmpty
         VStack(alignment: .leading, spacing: 0) {
+            if let header {
+                header
+                    .padding(.horizontal, Metrics.quoteInset)
+                    .padding(.vertical, Metrics.quoteTop)
+                    .frame(width: size.width)
+            }
             Button(action: tap) {
                 picture(size, underTail: shape.tail && !captioned)
                     .overlay { circle }
@@ -290,6 +323,8 @@ struct FileBubble<Caption: View>: View {
     let time: String
     let connected: Bool
     let tap: () -> Void
+    /// The quote of a reply, over the file (DESIGN.md 20.3).
+    var header: AnyView?
     @ViewBuilder let caption: () -> Caption
 
     var body: some View {
@@ -297,6 +332,11 @@ struct FileBubble<Caption: View>: View {
         let captioned = !message.text.isEmpty
         let widest = min(Metrics.mediaMax, maxWidth)
         VStack(alignment: .leading, spacing: 0) {
+            if let header {
+                header
+                    .padding(.horizontal, Metrics.quoteInset)
+                    .padding(.top, Metrics.quoteTop)
+            }
             Button(action: tap) {
                 HStack(alignment: .top, spacing: Metrics.fileTextX) {
                     MediaCircle(
@@ -359,7 +399,8 @@ struct FileBubble<Caption: View>: View {
     /// The room of the time and the mark, plus the 10 the status line keeps from them.
     private var timeReserve: CGFloat {
         let width = (time as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width
-        return width.rounded(.up) + (message.outgoing ? 15 : 0) + Metrics.timeRight - Metrics.filePad.trailing + 10
+        let reserve = (TimeMark.reserve(message, time: time) as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width
+        return max(width, reserve).rounded(.up) + (message.outgoing ? 15 : 0) + Metrics.timeRight - Metrics.filePad.trailing + 10
     }
 
     private var status: String {

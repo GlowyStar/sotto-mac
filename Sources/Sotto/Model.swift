@@ -42,29 +42,81 @@ enum MessageState: Hashable {
     case waiting
     /// Stored by the relay.
     case stored
+    /// A delivery receipt of the contact names it (protocol section 39.5).
+    case delivered
+    /// A read receipt of the contact names it.
+    case read
     /// Not sent, with the reason for a person.
     case failed(String)
 
     init(_ message: ChatMessage) {
         if let failure = message.failure {
             self = .failed(failure)
+        } else if message.waiting {
+            self = .waiting
         } else {
-            self = message.waiting ? .waiting : .stored
+            switch message.receipt {
+            case .read: self = .read
+            case .delivered: self = .delivered
+            case nil: self = .stored
+            }
         }
+    }
+}
+
+/// The message a reply answers as a bubble shows it (DESIGN.md 20.3): the id of the copy in
+/// the chat when there is one, its current text and file, else the text the quote carried;
+/// neither once it is gone.
+struct MessageQuote: Hashable {
+    var messageID: String?
+    /// The quoted message is the user's own.
+    let outgoing: Bool
+    var text: String?
+    var file: ChatFile?
+
+    var isGone: Bool { messageID == nil && text == nil }
+
+    /// The line of the quote: the kind of a photo or a file with its caption.
+    var preview: String? {
+        guard let text else { return nil }
+        return Alerts.preview(text, file: file)
     }
 }
 
 struct Message: Identifiable, Hashable {
     var id = UUID().uuidString
     let outgoing: Bool
-    let text: String
+    var text: String
     let date: Date
     var state: MessageState = .stored
     /// The photo or file of the message; `text` is then its caption.
     var file: ChatFile?
+    var quote: MessageQuote?
+    /// The text was changed after it was sent.
+    var edited = false
+    /// The timer of the message in seconds, 0 for none.
+    var expiresAfter = 0
+    var expiresAt: Date?
+    /// Until when an own message can be edited; nil when it cannot be.
+    var editableUntil: Date?
 
     /// The text of the message for a list row: a photo or a file says so.
     var preview: String { Alerts.preview(text, file: file) }
+
+    /// The position of a logged message; nil for a text waiting for a session, a file that
+    /// is not logged yet and a message of the mock data.
+    var position: Int64? { Int64(id).flatMap { $0 > 0 ? $0 : nil } }
+
+    func canEdit(at now: Date = Date()) -> Bool {
+        outgoing && (editableUntil.map { $0 > now } ?? false)
+    }
+}
+
+/// An edit of an own message in the compose bar; the draft of the chat waits under it.
+struct EditDraft: Hashable {
+    let messageID: String
+    let original: String
+    let savedDraft: String?
 }
 
 enum ConnectionState: Hashable {
@@ -131,10 +183,14 @@ enum Modal: Hashable {
     case delete(String)
     /// The send box of the files in `AppModel.picks` (DESIGN.md 14.2).
     case sendFiles
+    /// The delete box of a message: chat, message (DESIGN.md 20.6).
+    case deleteMessage(String, String)
+    /// The disappearing timer of a chat (DESIGN.md 20.7).
+    case timer(String)
 
     var isWide: Bool {
         switch self {
-        case .addContact, .myID, .settings, .contactInfo, .sendFiles: true
+        case .addContact, .myID, .settings, .contactInfo, .sendFiles, .timer: true
         default: false
         }
     }
@@ -163,6 +219,14 @@ struct Launch {
     /// `--profile NAME PATH`: the profile set once the app is connected, through the action of
     /// the Edit profile page; an empty PATH is no picture.
     var profile: (name: String, path: String)?
+    /// `--read NAME`: the chat of that name counts as open on the screen for the whole run, so
+    /// that every message of the contact is seen as it arrives (DESIGN.md 20.5).
+    var readChats: [String] = []
+    /// `--reply NAME TEXT`, `--edit NAME TEXT`, `--delete NAME` and `--timer NAME SECONDS`:
+    /// once the app is connected, a reply to the newest message of the contact, an edit of the
+    /// newest own message that can be edited, a delete for both of the newest own message and
+    /// a timer of the chat, each through the action of the screen.
+    var changes: [ScriptedChange] = []
 
     static let current = Launch(CommandLine.arguments)
 
@@ -171,6 +235,15 @@ struct Launch {
             if argument == "--send" { sends.append((arguments[index + 1], arguments[index + 2])) }
             if argument == "--send-file" { fileSends.append((arguments[index + 1], arguments[index + 2])) }
             if argument == "--profile" { profile = (arguments[index + 1], arguments[index + 2]) }
+            if argument == "--reply" { changes.append(.reply(arguments[index + 1], arguments[index + 2])) }
+            if argument == "--edit" { changes.append(.edit(arguments[index + 1], arguments[index + 2])) }
+            if argument == "--timer", let seconds = Int(arguments[index + 2]) {
+                changes.append(.timer(arguments[index + 1], seconds))
+            }
+        }
+        for (index, argument) in arguments.enumerated() where index + 1 < arguments.count {
+            if argument == "--read" { readChats.append(arguments[index + 1]) }
+            if argument == "--delete" { changes.append(.delete(arguments[index + 1])) }
         }
         func value(after flag: String) -> String? {
             guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
@@ -188,6 +261,20 @@ struct Launch {
         dataDirectory
             ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Sotto", isDirectory: true)
+    }
+}
+
+/// An action of part 5 that a launch flag asks for, by the local name of the chat.
+enum ScriptedChange {
+    case reply(String, String)
+    case edit(String, String)
+    case delete(String)
+    case timer(String, Int)
+
+    var chatName: String {
+        switch self {
+        case .reply(let name, _), .edit(let name, _), .delete(let name), .timer(let name, _): name
+        }
     }
 }
 
@@ -276,6 +363,22 @@ final class AppModel {
     @ObservationIgnored var localSends: [String: [LocalSend]] = [:]
     /// The last file handed to the messenger; the next waits for it, so files keep their order.
     @ObservationIgnored var lastFileSend: Task<Void, Never>?
+    /// The disappearing timer of each chat in seconds (DESIGN.md 20.7).
+    var timers: [String: Int] = [:]
+    /// The changes of the timer of each chat, shown as service lines.
+    var timerChanges: [String: [TimerChange]] = [:]
+    /// Whether contacts get read receipts (DESIGN.md 20.9).
+    var readReceipts = true
+    /// The message each chat answers in its compose bar (DESIGN.md 20.2).
+    var replies: [String: String] = [:]
+    /// The own message each chat edits in its compose bar (DESIGN.md 20.4).
+    var edits: [String: EditDraft] = [:]
+    /// The incoming messages of each chat that the list shows on screen.
+    @ObservationIgnored var onScreen: [String: [String]] = [:]
+    /// The messages already reported as seen to the messenger.
+    @ObservationIgnored var reportedSeen: Set<String> = []
+    @ObservationIgnored var scriptedReads: [String] = []
+    @ObservationIgnored var scriptedChanges: [ScriptedChange] = []
 
     private var toastTask: Task<Void, Never>?
     private var scriptedSends: [(name: String, text: String)] = []
@@ -310,6 +413,8 @@ final class AppModel {
         scriptedSends = Launch.current.sends
         scriptedFileSends = Launch.current.fileSends
         scriptedProfile = Launch.current.profile
+        scriptedReads = Launch.current.readChats
+        scriptedChanges = Launch.current.changes
         attach(messenger)
     }
 
@@ -374,10 +479,11 @@ final class AppModel {
                 id: $0.userID, name: $0.name, added: $0.added, unread: $0.userID == quiet ? 0 : $0.unread,
                 pinned: $0.pinned, muted: $0.muted, archived: $0.archived, profile: $0.profile)
         }
+        timers = Dictionary(uniqueKeysWithValues: state.chats.map { ($0.userID, $0.timer) })
+        timerChanges = Dictionary(uniqueKeysWithValues: state.chats.map { ($0.userID, $0.timerChanges) })
+        readReceipts = state.readReceipts
         messages = Dictionary(uniqueKeysWithValues: state.chats.map { chat in
-            let logged = chat.messages.map {
-                Message(id: String($0.id), outgoing: $0.outgoing, text: $0.text, date: $0.date, state: MessageState($0), file: $0.file)
-            }
+            let logged = chat.messages.map(Message.init)
             let ids = Set(logged.map(\.id))
             localSends[chat.userID]?.removeAll { $0.resolved.map(ids.contains) ?? false }
             return (chat.userID, logged + (localSends[chat.userID] ?? []).filter { !$0.cancelled }.map(\.message))
@@ -385,9 +491,18 @@ final class AppModel {
         if let quiet, state.chats.contains(where: { $0.userID == quiet && $0.unread > 0 }) {
             run { try await $0.markRead(quiet) }
         }
+        dropGoneComposeModes()
+        if let quiet { reportSeen(in: quiet) }
+        for name in scriptedReads {
+            if let contact = contacts.first(where: { $0.name == name }) {
+                onScreen[contact.id] = messages[contact.id, default: []].filter { !$0.outgoing }.map(\.id)
+                reportSeen(in: contact.id)
+            }
+        }
         if messenger != nil {
             Alerts.make(old: lastState, new: state, settings: settings, quietChat: quiet, locked: locked)
                 .forEach { alerts?.post($0) }
+            alerts?.remove(Alerts.changed(old: lastState, new: state))
             updateBadge(state)
         }
         lastState = state
@@ -413,6 +528,11 @@ final class AppModel {
                 }
             }
             scriptedFileSends = []
+        }
+        if connection == .connected, !scriptedChanges.isEmpty {
+            let changes = scriptedChanges
+            scriptedChanges = []
+            changes.forEach(runScripted)
         }
     }
 
@@ -662,7 +782,10 @@ final class AppModel {
 
     /// The window came to the front or was unlocked: the open chat is read now.
     func windowBecameKey() {
-        if let id = openChatID { markRead(id) }
+        if let id = openChatID {
+            markRead(id)
+            if id == quietChat { reportSeen(in: id) }
+        }
         if let lastState { updateBadge(lastState) }
         alerts?.refresh(ask: false)
     }
@@ -694,10 +817,12 @@ final class AppModel {
     /// again with the next change.
     func saveDrafts() {
         guard let messenger else { return }
-        let changed = Set(drafts.keys).union(savedDrafts.keys).filter { drafts[$0] != savedDrafts[$0] }
+        // A chat in edit mode keeps the draft that waits under the edit, never the edited text.
+        func kept(_ id: String) -> String? { edits[id].map(\.savedDraft) ?? drafts[id] }
+        let changed = Set(drafts.keys).union(savedDrafts.keys).union(edits.keys).filter { kept($0) != savedDrafts[$0] }
         guard !changed.isEmpty else { return }
-        let writes = changed.map { ($0, drafts[$0] ?? "") }
-        changed.forEach { savedDrafts[$0] = drafts[$0] }
+        let writes = changed.map { ($0, kept($0) ?? "") }
+        changed.forEach { savedDrafts[$0] = kept($0) }
         let previous = draftWrite
         draftWrite = Task { [weak self] in
             await previous?.value
@@ -779,16 +904,22 @@ final class AppModel {
     }
 
     func send(_ text: String, to id: String) {
+        if edits[id] != nil {
+            return saveEdit(text, in: id)
+        }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         drafts[id] = nil
+        let replyID = replies.removeValue(forKey: id)
         if messenger != nil {
-            run({ try await $0.send(trimmed, to: id) }, failed: { [weak self] in
+            let replyTo = replyID.flatMap { Int64($0) }
+            run({ try await $0.send(trimmed, to: id, replyTo: replyTo) }, failed: { [weak self] in
                 if self?.drafts[id] == nil { self?.drafts[id] = trimmed }
             })
             return
         }
-        let message = Message(outgoing: true, text: trimmed, date: Date(), state: .waiting)
+        var message = Message(outgoing: true, text: trimmed, date: Date(), state: .waiting)
+        message.quote = replyID.flatMap { quote(of: $0, in: id) }
         withAnimation(Motion.reorder) {
             messages[id, default: []].append(message)
         }
@@ -806,7 +937,9 @@ final class AppModel {
         }
     }
 
+    /// Deletes a message on this Mac only (Delete for me).
     func deleteMessage(_ messageID: String, in chat: String) {
+        endComposeModes(for: messageID, in: chat)
         if let index = localSends[chat]?.firstIndex(where: { $0.message.id == messageID }) {
             localSends[chat]?[index].cancelled = true
             localSends[chat]?[index].task?.cancel()
@@ -964,6 +1097,8 @@ final class AppModel {
             modal = nil
         } else if chatSearch != nil {
             chatSearch = nil
+        } else if let id = openChatID, replies[id] != nil || edits[id] != nil {
+            cancelComposeMode(in: id)
         } else if searchFocused {
             if search.isEmpty { searchFocused = false } else { search = "" }
         } else if archiveOpen {

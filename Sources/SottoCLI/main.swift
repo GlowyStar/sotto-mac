@@ -4,7 +4,9 @@ import SottoCore
 // The command line of the client: `sotto-mac`, one data directory per identity, the same
 // commands, output lines and exit codes as the `sotto` command of the reference. Peer text
 // reaches the terminal only through `printable`. Received files go into the folder
-// `received` of the data directory (section 32.2).
+// `received` of the data directory (section 32.2). `chat` prints every message with its
+// position in the log, which the commands of part 5 take (section 39.8), and counts a
+// message as read once it printed it.
 
 let defaultRelay = "ws://127.0.0.1:8765/ws"
 let defaultDataDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".sotto-mac").path
@@ -14,8 +16,11 @@ let quitGraceSeconds = 2.0
 let silentResults: Set<String> = ["DUPLICATE", "NOT_A_CONTACT", "UNKNOWN_CONTENT"]
 let receivedFolder = "received"
 let progressSteps = 10
+let chatCommands = "commands: /reply N text, /edit N text, /delete N, /timer [off|30s|5m|1h|1d|1w], /quit"
+let timerUnits: [(unit: String, seconds: Int)] = [("w", 604_800), ("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
+let quoteShown = 60
 let usage = """
-    usage: sotto-mac [-h] [--data-dir DATA_DIR] {init,id,add,contacts,chat,reset,send-file} ...
+    usage: sotto-mac [-h] [--data-dir DATA_DIR] {init,id,add,contacts,chat,reset,send-file,read-receipts} ...
     """
 let help = """
     \(usage)
@@ -27,9 +32,11 @@ let help = """
       id                    print the user id of the identity
       add NAME USER_ID      add a contact by its user id under a local name
       contacts              list the contacts
-      chat NAME             chat with a contact; /quit or end of input ends
+      chat NAME             chat with a contact; /quit or end of input ends; \(chatCommands)
       reset NAME            start a new session with a contact
       send-file NAME PATH   send a file to a contact and wait until it is sent or not sent
+      read-receipts [on|off]
+                            show, or turn on or off, the read receipts contacts get
 
     options:
       -h, --help            show this help message and exit
@@ -93,7 +100,9 @@ func parse(_ words: [String]) throws -> Arguments {
     guard let command = rest.popFirst() else {
         throw UsageError(message: "the following arguments are required: command")
     }
-    let positionalCounts = ["init": 0, "id": 0, "add": 2, "contacts": 0, "chat": 1, "reset": 1, "send-file": 2]
+    let positionalCounts = [
+        "init": 0, "id": 0, "add": 2, "contacts": 0, "chat": 1, "reset": 1, "send-file": 2, "read-receipts": 1,
+    ]
     guard let wanted = positionalCounts[command] else {
         throw UsageError(message: "argument command: invalid choice: '\(command)'")
     }
@@ -119,6 +128,12 @@ func parse(_ words: [String]) throws -> Arguments {
         } else {
             arguments.positionals.append(word)
         }
+    }
+    if command == "read-receipts" {
+        guard arguments.positionals.allSatisfy({ $0 == "on" || $0 == "off" }) else {
+            throw UsageError(message: "argument state: invalid choice: '\(arguments.positionals[0])' (choose from 'on', 'off')")
+        }
+        return arguments
     }
     guard arguments.positionals.count == wanted else {
         throw UsageError(message: "the following arguments are required: \(["add": "name, user_id", "chat": "name", "reset": "name", "send-file": "name, path"][command]!)")
@@ -192,16 +207,14 @@ func printEvent(_ event: TransportEvent, _ names: [Data: String], _ progress: in
         if received.missing > 0 {
             say("\(name): \(received.missing) earlier messages can never be read")
         }
-        if let text = received.text {
-            say("\(name): \(printable(text))")
-        } else if let attachment = received.attachment {
-            let caption = attachment.caption.isEmpty ? "" : ": \(printable(attachment.caption))"
-            say("\(name): file \(printable(attachment.fileName)), \(attachment.size) bytes\(caption)")
-        } else if let profile = received.profile {
-            say("\(name): \(describeProfile(profile))")
-        } else if let result = received.result, !silentResults.contains(result) {
-            say("\(name): a message could not be read (\(result))")
-        }
+        printReceived(received, name)
+    case .written(_, let position, let text, let replyTo, let expiresAfter):
+        let reply = replyTo.map { ", replying to #\($0)" } ?? ""
+        say("\(messageHead(position, "you", expiresAfter))\(reply): \(printable(text))")
+    case .sent(let position):
+        say("#\(position) sent")
+    case .expired(let positions):
+        positions.forEach { say("#\($0) disappeared") }
     case .refused(let result, nil):
         say("the relay refused the prekey upload (\(result))")
     case .refused(let result, let contact?):
@@ -215,6 +228,77 @@ func printEvent(_ event: TransportEvent, _ names: [Data: String], _ progress: in
     case .file(let update):
         printFileUpdate(update, displayName(update.contact, names), &progress)
     }
+}
+
+/// One line for a message, a change of part 5 or a failure; several for a receipt.
+func printReceived(_ received: Received, _ name: String) {
+    if received.edited {
+        say("#\(received.position ?? 0) \(name) edited: \(printable(received.text ?? ""))")
+    } else if received.deleted {
+        say("#\(received.position ?? 0) \(name) deleted the message")
+    } else if !received.marked.isEmpty {
+        received.marked.forEach { say("#\($0) \(received.read ? "read" : "delivered")") }
+    } else if let timer = received.timer {
+        say("\(name) set the timer: \(describeTimer(timer))")
+    } else if let text = received.text {
+        say("\(receivedHead(received, name)): \(printable(text))")
+    } else if let profile = received.profile {
+        say("\(name): \(describeProfile(profile))")
+    } else if let attachment = received.attachment {
+        let caption = attachment.caption.isEmpty ? "" : ": \(printable(attachment.caption))"
+        say("\(receivedHead(received, name)): file \(printable(attachment.fileName)), \(attachment.size) bytes\(caption)")
+    } else if let result = received.result, !silentResults.contains(result) {
+        say("\(name): a message could not be read (\(result))")
+    }
+}
+
+func receivedHead(_ received: Received, _ name: String) -> String {
+    let head = messageHead(received.position, name, received.expiresAfter)
+    guard let quote = received.quote else {
+        return head
+    }
+    return "\(head), replying to \(describeQuote(quote))"
+}
+
+/// `#12 alice`, with the timer of the message as `(1h)` behind it when it has one.
+func messageHead(_ position: Int64?, _ who: String, _ expiresAfter: Int) -> String {
+    var head = position.map { "#\($0) \(who)" } ?? who
+    if expiresAfter > 0 {
+        head += " (\(describeTimer(expiresAfter)))"
+    }
+    return head
+}
+
+func describeQuote(_ quote: Quoted) -> String {
+    guard let text = quote.text else {
+        return "a message that is gone"
+    }
+    let shown = String(text.prefix(quoteShown)) + (text.count > quoteShown ? "..." : "")
+    let quoted = "\"\(printable(shown))\""
+    return quote.position.map { "#\($0) \(quoted)" } ?? quoted
+}
+
+/// `off`, or the seconds in the largest unit that divides them.
+func describeTimer(_ seconds: Int) -> String {
+    guard seconds > 0 else {
+        return "off"
+    }
+    let unit = timerUnits.first { seconds % $0.seconds == 0 }!
+    return "\(seconds / unit.seconds)\(unit.unit)"
+}
+
+/// The seconds of `off` or of a number with a unit, such as `5m`.
+func parseTimer(_ text: String) throws -> Int {
+    if text == "off" {
+        return 0
+    }
+    guard let unit = timerUnits.first(where: { text.hasSuffix($0.unit) }),
+        case let digits = text.dropLast(), (1...7).contains(digits.count), digits.allSatisfy(\.isASCII),
+        let count = Int(digits), count >= 0
+    else {
+        throw CommandError(message: chatCommands)
+    }
+    return count * unit.seconds
 }
 
 /// One line about a profile that arrived, as the reference prints it.
@@ -287,18 +371,86 @@ func readLines() -> (lines: AsyncStream<String>, leaving: AsyncStream<Void>) {
 
 func sendLine(_ transport: Transport, _ contact: Data, _ line: String) async {
     do {
-        try await transport.sendText(contact, line)
+        try await runLine(transport, contact, line)
+    } catch let error as CommandError {
+        say(error.message)
     } catch EnvelopeError.textTooLong {
         say("not sent: the text is too long")
     } catch let error as RefusedError {
         say("not sent: the relay refused the bundle (\(error.result))")
     } catch let error as CryptoError {
         say("not sent: \(error.result)")
+    } catch let error as ChangeError {
+        say("not sent: \(error.result)")
+    } catch let error as EnvelopeError {
+        say("not sent: \(error.result)")
+    } catch let error as SessionError {
+        say("not sent: \(error.result)")
     } catch is CancellationError {
         return
     } catch {
         complain("sotto-mac: \(error)")
         exit(1)
+    }
+}
+
+/// Sends a typed line as a text, or runs the chat command of part 5 that it starts with.
+func runLine(_ transport: Transport, _ contact: Data, _ line: String) async throws {
+    guard line.hasPrefix("/") else {
+        try await transport.sendText(contact, line)
+        return
+    }
+    let (command, rest) = split(line)
+    switch command {
+    case "/reply":
+        let (position, text) = try positionAndText(rest)
+        try await transport.sendText(contact, text, replyTo: position)
+    case "/edit":
+        let (position, text) = try positionAndText(rest)
+        try await transport.edit(contact, position, text)
+        say("#\(position) you edited: \(printable(text))")
+    case "/delete":
+        let position = try number(rest)
+        try await transport.delete(contact, position)
+        say("#\(position) deleted for both")
+    case "/timer":
+        if !rest.isEmpty {
+            try await transport.setTimer(contact, seconds: parseTimer(rest))
+        }
+        say("timer: \(describeTimer(try await transport.withClient { try $0.timer(contact) }))")
+    default:
+        throw CommandError(message: chatCommands)
+    }
+}
+
+/// The text up to the first space, and the text after it.
+func split(_ text: String) -> (String, String) {
+    guard let space = text.firstIndex(of: " ") else {
+        return (text, "")
+    }
+    return (String(text[..<space]), String(text[text.index(after: space)...]))
+}
+
+func positionAndText(_ rest: String) throws -> (Int64, String) {
+    let (position, text) = split(rest)
+    guard !text.isEmpty else {
+        throw CommandError(message: chatCommands)
+    }
+    return (try number(position), text)
+}
+
+func number(_ text: String) throws -> Int64 {
+    guard !text.isEmpty, text.allSatisfy({ $0.isASCII && $0.isNumber }), let value = Int64(text) else {
+        throw CommandError(message: chatCommands)
+    }
+    return value
+}
+
+/// Prints an event of `chat`; a message of the chat that it printed counts as read (39.5).
+func show(_ transport: Transport, _ event: TransportEvent, _ names: [Data: String], _ progress: inout [Data: Int]) async {
+    printEvent(event, names, &progress)
+    if case .incoming(let sender, let received) = event, received.isANewMessage, let position = received.position {
+        try? await transport.markRead(sender, [position])
     }
 }
 
@@ -323,13 +475,14 @@ func chat(_ arguments: Arguments) async throws -> Int32 {
     let client = try openClient(arguments)
     let contact = try contactNamed(client, arguments.positionals[0])
     let names = try names(client)
+    say("timer: \(describeTimer(try client.timer(contact)))")
     let transport = try makeTransport(client, arguments)
 
     let runner = Task { try await transport.run() }
     let printer = Task {
         var progress: [Data: Int] = [:]
         for await event in transport.events {
-            printEvent(event, names, &progress)
+            await show(transport, event, names, &progress)
         }
     }
     let (lines, leaving) = readLines()
@@ -490,6 +643,12 @@ func run(_ arguments: Arguments) async throws -> Int32 {
         }
     case "chat":
         return try await chat(arguments)
+    case "read-receipts":
+        let client = try openClient(arguments)
+        if let state = arguments.positionals.first {
+            try client.setReadReceipts(state == "on")
+        }
+        say("read receipts: \(try client.readReceipts() ? "on" : "off")")
     case "send-file":
         return try await sendFile(arguments)
     default:

@@ -108,13 +108,15 @@ extension AppModel {
     func sendPicks(caption: String) {
         guard let chat = openChatID else { return }
         modal = nil
-        send(picks, caption: caption.trimmingCharacters(in: .whitespacesAndNewlines), asFile: sendAsFile, to: chat)
+        let replyTo = replies.removeValue(forKey: chat)
+        send(picks, caption: caption.trimmingCharacters(in: .whitespacesAndNewlines), asFile: sendAsFile, to: chat, replyTo: replyTo)
         picks = []
     }
 
     /// Sends files as separate messages in their order. A picture goes as a photo with its
     /// size and thumbnail; as a file it goes with an empty media type, so it shows as a file.
-    func send(_ picks: [Pick], caption: String, asFile: Bool, to chat: String) {
+    /// The first file answers the message `replyTo` when one is given (DESIGN.md 20.2).
+    func send(_ picks: [Pick], caption: String, asFile: Bool, to chat: String, replyTo: String? = nil) {
         let jobs = picks.filter { $0.problem == nil }.enumerated().map { index, pick in
             let photo = pick.isPicture && !asFile ? Thumbnail.make(pick.url) : nil
             let mediaType = pick.isPicture && asFile ? "" : Pick.mediaType(pick.url)
@@ -122,9 +124,12 @@ extension AppModel {
                 name: pick.url.lastPathComponent, size: pick.size, mediaType: mediaType ?? "",
                 state: messenger == nil ? .sent : .sending, savedAs: pick.url.path,
                 width: photo?.width ?? 0, height: photo?.height ?? 0, thumbnail: photo?.jpeg ?? Data())
-            let message = Message(
+            var message = Message(
                 id: "local-\(UUID().uuidString)", outgoing: true, text: index == 0 ? caption : "", date: Date(),
                 state: .waiting, file: file)
+            if index == 0 {
+                message.quote = replyTo.flatMap { quote(of: $0, in: chat) }
+            }
             return (message, pick.url, mediaType, photo)
         }
         withAnimation(Motion.reorder) {
@@ -145,7 +150,8 @@ extension AppModel {
                     try Task.checkCancellation()
                     let position = try await messenger.sendFile(
                         url, caption: message.text, to: chat, mediaType: mediaType,
-                        width: photo?.width ?? 0, height: photo?.height ?? 0, thumbnail: photo?.jpeg ?? Data())
+                        width: photo?.width ?? 0, height: photo?.height ?? 0, thumbnail: photo?.jpeg ?? Data(),
+                        replyTo: message.quote?.messageID.flatMap { Int64($0) })
                     // Cancelled while the upload was being made: its message goes at once.
                     if Task.isCancelled || position == 0 {
                         if position != 0 { try? await messenger.deleteMessage(position) }

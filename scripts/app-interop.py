@@ -18,7 +18,11 @@ whole after the next start of the app, going on from where it stopped. Then prof
 `sotto profile set` gives the Python client a name and an avatar, which the app receives
 and keeps byte for byte; the app sets its own with `--profile`, which `sotto contacts` and
 `sotto profile show` print and save byte for byte; a rename and a removed avatar of each
-side reach the other, and none of it becomes a message. The store is read back with
+side reach the other, and none of it becomes a message. Then part 5: the app started with
+`--read python` sees what arrives as a chat open on the screen would; Python and the app
+(`--reply`, `--edit`, `--delete`, `--send`, `--timer`) each reply with a quote, see their
+messages read, edit, delete for both, and send a message under a 3 second timer that
+disappears from both stores; a timer change is no message. The store is read back with
 `Sotto --dump` and drawn with `Sotto --snapshot`. The app's own `app.json` turns
 notifications off before the first start, so that a run posts nothing on the screen, and
 names a download folder of the run. Exits 0 only if every text and file arrived; stops
@@ -55,6 +59,13 @@ TEXT_TO_RUNNING = "hello python, from the app"
 TEXT_AFTER_RESTART = "sent right after a restart"
 TEXT_WHILE_AWAY = "written while python was away"
 PICTURES = ["real-list.png", "real-chat.png", "real-chat-dark.png"]
+WAVE_TWO = "wave two from python"
+ANSWER_OF_APP = "answer from the app"
+ANSWER_OF_PYTHON = "answer from python"
+EDITED_BY_PYTHON = "edited by python"
+EDITED_BY_APP = "edited by the app"
+VANISHING_FROM_PYTHON = "vanishing from python"
+VANISHING_FROM_APP = "vanishing from the app"
 PYTHON_NAME = "Пайтон Python"
 PYTHON_RENAMED = "Python, renamed"
 APP_NAME = "Приложение App"
@@ -191,10 +202,10 @@ async def run(run_folder: Path) -> None:
             print("ok   the app was closed again")
 
             apps.append(App(app_dir, url, log, "--send", "python", TEXT_TO_RUNNING))
-            await python.expect(f"app: {TEXT_TO_RUNNING}")
+            await python.expect_message("app", TEXT_TO_RUNNING)
             apps[-1].stop()
             apps.append(App(app_dir, url, log, "--send", "python", TEXT_AFTER_RESTART))
-            await python.expect(f"app: {TEXT_AFTER_RESTART}")
+            await python.expect_message("app", TEXT_AFTER_RESTART)
             apps[-1].stop()
             print("ok   the app sent to the running python, also right after a restart")
 
@@ -206,11 +217,12 @@ async def run(run_folder: Path) -> None:
             )
             apps[-1].stop()
             python = await start_python(url)
-            await python.expect(f"app: {TEXT_WHILE_AWAY}")
+            await python.expect_message("app", TEXT_WHILE_AWAY)
             await python.quit()
 
             await files_both_ways(run_folder, url, app_dir, python_dir, downloads, log, apps, start_python)
             await profiles_both_ways(run_folder, url, app_dir, python_dir, app_id, log, apps, start_python)
+            await part_five_both_ways(url, app_dir, python_dir, log, apps, start_python)
 
         code, dumped, errors = await outcome(APP, "--data-dir", app_dir, "--dump")
         if code != 0:
@@ -229,7 +241,7 @@ async def run(run_folder: Path) -> None:
         if states != [(False, "received")] * 3 + [(True, "sent")] * 3:
             raise CheckFailed(f"the files of the chat are {states}")
         print("ok   the store holds the 3 files of each side, received and sent")
-        if incoming != everything:
+        if incoming != everything + [ANSWER_OF_PYTHON]:
             raise CheckFailed(f"the chat holds the incoming texts {incoming}")
         print(f"ok   the store holds the {len(everything)} texts of python in order, as incoming")
         sent = [TEXT_TO_RUNNING, TEXT_AFTER_RESTART, TEXT_WHILE_AWAY]
@@ -242,7 +254,7 @@ async def run(run_folder: Path) -> None:
         if dates != sorted(dates) or not all(isinstance(date, (int, float)) and date > 0 for date in dates):
             raise CheckFailed(f"the message times are {dates}")
         print("ok   every text has a time, in order")
-        if chat["unread"] != len(everything) + 3:
+        if chat["unread"] != len(everything) + 4:
             raise CheckFailed(f"the chat counts {chat['unread']} unread")
         print(f"ok   the chat counts {chat['unread']} unread")
         sent_profile = chat.get("profile", {})
@@ -251,6 +263,13 @@ async def run(run_folder: Path) -> None:
         if state["profile"].get("name") != APP_RENAMED or "avatar" in state["profile"]:
             raise CheckFailed(f"the dump holds the own profile {state['profile']}")
         print("ok   the dump keeps the local name, the last profile of python and the app's own")
+        answer = next(message for message in messages if message["text"] == ANSWER_OF_PYTHON)
+        if answer.get("quote") != {"outgoing": True}:
+            raise CheckFailed(f"the reply of python shows the quote {answer.get('quote')}, not one of a deleted message")
+        changes = [(change["own"], change["seconds"]) for change in chat.get("timerChanges", [])]
+        if chat.get("timer") != 0 or changes != [(False, 3), (True, 0)] or not state.get("readReceipts"):
+            raise CheckFailed(f"the dump holds the timer {chat.get('timer')} and the changes {changes}")
+        print("ok   the dump shows the reply to a deleted message, the timer off and its two changes")
 
         pictures = run_folder / "snapshots"
         code, _, errors = await outcome(APP, "--data-dir", app_dir, "--snapshot", pictures)
@@ -485,6 +504,91 @@ async def profiles_both_ways(
     if messages() != logged:
         raise CheckFailed(f"the profiles logged {messages() - logged} messages in the app")
     print("ok   a rename and a removed avatar reached each side, and no profile became a message")
+
+
+async def part_five_both_ways(
+    url: str, app_dir: Path, python_dir: Path, log: Path, apps: list[App], start_python: object
+) -> None:
+    """A reply, the read marks, an edit, a delete for both and a 3 second timer, each way,
+    with the app started with `--read python` as a chat open on the screen."""
+    app_store, python_store = app_dir / "store.db", python_dir / "store.db"
+
+    def texts_of(store: Path) -> list[str]:
+        return [str(row[0]) for row in read_only(store, "SELECT text FROM messages")]
+
+    def state_of(text: str) -> tuple[object, ...] | None:
+        rows = read_only(
+            app_store,
+            "SELECT s.receipt, s.quote_direction, s.quote_text, s.edits FROM messages m JOIN message_states s"
+            " ON s.contact = m.contact AND s.direction = m.direction AND s.message_id = m.message_id"
+            f" WHERE m.text = '{text}'",
+        )
+        return rows[0] if rows else None
+
+    def timer() -> int | None:
+        rows = read_only(app_store, "SELECT seconds FROM timers")
+        return int(rows[0][0]) if rows else None  # type: ignore[call-overload]
+
+    def app(*arguments: str) -> None:
+        apps.append(App(app_dir, url, log, "--read", "python", *arguments))
+
+    python: Chat = await start_python(url)  # type: ignore[operator]
+    app()
+    await python.type(WAVE_TWO)
+    own_at_python = await python.expect_message("you", WAVE_TWO)
+    await python.expect(f"#{own_at_python} read")
+    apps[-1].stop()
+    print("ok   the app saw the text of python on the screen, and python shows it read")
+
+    app("--reply", "python", ANSWER_OF_APP)
+    answer_at_python = await python.expect_message(f'app, replying to #{own_at_python} "{WAVE_TWO}"', ANSWER_OF_APP)
+    await until("python read the reply of the app, and the app shows it read", lambda: (state_of(ANSWER_OF_APP) or ("",))[0] == "read")
+    await python.type(f"/reply {answer_at_python} {ANSWER_OF_PYTHON}")
+    await until(
+        "the app keeps the reply of python with its quote of the app's message",
+        lambda: (state_of(ANSWER_OF_PYTHON) or (None, None, None))[1:3] == ("out", ANSWER_OF_APP),
+    )
+    await python.type(f"/edit {own_at_python} {EDITED_BY_PYTHON}")
+    await until("the app shows the edit of python", lambda: (state_of(EDITED_BY_PYTHON) or (0, 0, 0, 0))[3] == 1)
+    apps[-1].stop()
+
+    app("--edit", "python", EDITED_BY_APP)
+    await python.expect(f"#{answer_at_python} app edited: {EDITED_BY_APP}")
+    await python.type(f"/delete {own_at_python}")
+    await until("the app deleted the message python deleted for both", lambda: EDITED_BY_PYTHON not in texts_of(app_store))
+    apps[-1].stop()
+
+    app("--delete", "python")
+    await python.expect(f"#{answer_at_python} app deleted the message")
+    await until("the app forgot its message and the quote of it", lambda: state_of(ANSWER_OF_PYTHON)[2] is None)  # type: ignore[index]
+    await python.type("/timer 3s")
+    await until("the app keeps the timer python set", lambda: timer() == 3)
+    await python.type(VANISHING_FROM_PYTHON)
+    vanishing_at_python = await python.expect_message("you (3s)", VANISHING_FROM_PYTHON)
+    await until("the app received the message under the timer", lambda: VANISHING_FROM_PYTHON in texts_of(app_store))
+    await until("the message disappeared from the app 3 seconds after it was read", lambda: VANISHING_FROM_PYTHON not in texts_of(app_store))
+    await python.expect(f"#{vanishing_at_python} disappeared")
+    apps[-1].stop()
+
+    app("--send", "python", VANISHING_FROM_APP)
+    from_app = await python.expect_message("app (3s)", VANISHING_FROM_APP)
+    await python.expect(f"#{from_app} disappeared")
+    await until("the message of the app disappeared from its store", lambda: VANISHING_FROM_APP not in texts_of(app_store))
+    apps[-1].stop()
+
+    app("--timer", "python", "0")
+    await python.expect("app set the timer: off")
+    await until("the app keeps the timer off", lambda: timer() == 0)
+    apps[-1].stop()
+    await python.quit()
+    for label, store in (("app", app_store), ("python", python_store)):
+        left = [
+            text for text in texts_of(store)
+            if text in (WAVE_TWO, ANSWER_OF_APP, EDITED_BY_PYTHON, EDITED_BY_APP, VANISHING_FROM_PYTHON, VANISHING_FROM_APP)
+        ]
+        if left:
+            raise CheckFailed(f"the store of {label} still holds {left}")
+    print("ok   the deleted, replaced and expired texts are in neither store")
 
 
 async def main() -> int:

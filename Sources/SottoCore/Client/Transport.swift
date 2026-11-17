@@ -54,6 +54,12 @@ public enum TransportEvent: Sendable, Equatable {
     case file(FileUpdate)
     /// A transfer stopped on a local failure; the next login starts it again.
     case transferFailed(reason: String)
+    /// An own text entered the log at `position`, before its Send left (section 39).
+    case written(contact: Data, position: Int64, text: String, replyTo: Int64?, expiresAfter: Int)
+    /// The relay stored an own message of the log that no receipt has reached.
+    case sent(position: Int64)
+    /// The timer of these messages ran out, and they are gone (section 39.6).
+    case expired(positions: [Int64])
 }
 
 /// The client transport of docs/protocol.md, section 23, over the session layer.
@@ -69,6 +75,7 @@ public actor Transport {
     public typealias AutoDownload = @Sendable (Sotto_Attachment) -> Bool
 
     public static let retryMaxSeconds = 60.0
+    public static let expiryCheckSeconds = 1.0
     public static let frameRefillSeconds = 1.0
     public static let normalClosure = 1000
     public static let stopCloseCodes: Set<Int> = [1003, 1008, 1009, 3000, 4001]
@@ -101,8 +108,12 @@ public actor Transport {
     private var unblockWaiters: [CheckedContinuation<Void, Never>] = []
     private var requests: [Request] = []
     private var backOffs: [Task<Void, Never>] = []
-    /// The sends of owed profiles that a Deliver started; the end of a connection ends them.
-    private var profileSends: [Task<Void, Never>] = []
+    /// The sends of owed profiles and receipts that a Deliver or a read started; the end of a
+    /// connection ends them.
+    private var owedSends: [Int: Task<Void, Never>] = [:]
+    private var owedSendCount = 0
+    /// Why the expiry of messages failed, which ends `run` (section 39.6).
+    private var expiryFailure: String?
     private var stopping = false
     /// The folder for received files (section 33.3); nil leaves every file offered.
     private var receivedFiles: URL?
@@ -303,6 +314,8 @@ public actor Transport {
     public func run() async throws {
         defer { eventSink.finish() }
         try client.deleteExpiredPrekeys()
+        let expiry = Task { await self.expirePeriodically() }
+        defer { expiry.cancel() }
         var attempt = 0
         while !stopping {
             if attempt > 0 {
@@ -310,7 +323,7 @@ public actor Transport {
                 eventSink.yield(.retrying(seconds: wait))
                 try await sleep(wait)
                 if stopping {
-                    return
+                    break
                 }
             }
             do {
@@ -321,6 +334,42 @@ public actor Transport {
                 return
             }
         }
+        if let expiryFailure {
+            eventSink.yield(.stopped(reason: expiryFailure))
+        }
+    }
+
+    /// Removes the messages whose timer ran out, every `expiryCheckSeconds` while `run` runs;
+    /// a failure ends `run` (section 39.6).
+    private func expirePeriodically() async {
+        while !Task.isCancelled && !stopping {
+            try? await Task.sleep(nanoseconds: UInt64(Self.expiryCheckSeconds * 1_000_000_000))
+            guard !Task.isCancelled else {
+                return
+            }
+            do {
+                try await expireNow()
+            } catch {
+                expiryFailure = "the expiry of messages failed: \(error)"
+                await stop()
+                return
+            }
+        }
+    }
+
+    /// Removes the messages whose timer ran out now: the downloads of their files end, the
+    /// event `.expired` names them while `run` runs, and the DeleteBlob frames go out on a
+    /// live connection (section 39.6). Returns their positions.
+    @discardableResult
+    public func expireNow() async throws -> [Int64] {
+        let positions = try client.expireMessages()
+        guard !positions.isEmpty else {
+            return []
+        }
+        cancelEndedDownloads()
+        eventSink.yield(.expired(positions: positions))
+        await sendBlobDeletions()
+        return positions
     }
 
     /// Ends `run` without an event: closes the connection with 1000 and fails every call
@@ -341,21 +390,92 @@ public actor Transport {
     ///   refused the FetchBundle with a Stop; `CryptoError` or `SessionError` when
     ///   `Client.sendText` failed with the result that it names.
     /// - Returns: The message id.
+    /// `replyTo` is the position of the message of the chat that the text quotes (section
+    /// 39.2); the logged text is reported as `.written`.
     @discardableResult
-    public func sendText(_ contact: Data, _ text: String, pending: Int64? = nil) async throws -> Data {
+    public func sendText(_ contact: Data, _ text: String, pending: Int64? = nil, replyTo: Int64? = nil) async throws -> Data {
         _ = try Envelope.encodeText(text)
-        var bundle: PrekeyBundle?
-        if try !client.hasSession(contact) {
-            bundle = try await fetchBundle(contact)
+        let bundle = try await bundleUnlessInSession(contact)
+        let outgoing = try client.sendText(contact, text, bundle: bundle, pending: pending, replyTo: replyTo)
+        if let position = outgoing.position {
+            eventSink.yield(.written(
+                contact: contact, position: position, text: text, replyTo: replyTo, expiresAfter: try client.timer(contact)
+            ))
         }
-        let outgoing = try client.sendText(contact, text, bundle: bundle, pending: pending)
+        await send(outgoing)
+        return outgoing.messageID
+    }
+
+    /// Sends an edit of an own message (section 39.3).
+    ///
+    /// - Throws: what `Client.edit` throws; `RefusedError` when the relay refused the
+    ///   FetchBundle with a Stop.
+    public func edit(_ contact: Data, _ position: Int64, _ text: String) async throws {
+        let bundle = try await bundleUnlessInSession(contact)
+        await send(try client.edit(contact, position, text, bundle: bundle))
+    }
+
+    /// Deletes an own message for both (section 39.4).
+    ///
+    /// - Throws: what `Client.delete` throws; `RefusedError` as `edit`.
+    public func delete(_ contact: Data, _ position: Int64) async throws {
+        let bundle = try await bundleUnlessInSession(contact)
+        let outgoing = try client.delete(contact, position, bundle: bundle)
+        // Before the first await: a task of a file of the message must not go on.
+        cancelEndedDownloads()
+        await send(outgoing)
+    }
+
+    /// Sets the disappearing timer of the chat, 0 for none (section 39.6).
+    ///
+    /// - Throws: `EnvelopeError.badTimer` before any frame; `RefusedError` as `edit`.
+    public func setTimer(_ contact: Data, seconds: Int) async throws {
+        _ = try Envelope.encodeTimer(seconds: seconds)
+        let bundle = try await bundleUnlessInSession(contact)
+        await send(try client.setTimer(contact, seconds: seconds, bundle: bundle))
+    }
+
+    /// The user has seen these messages: their timer starts, and their read receipt goes out
+    /// once logged in unless read receipts are off (section 39.5).
+    public func markRead(_ contact: Data, _ positions: [Int64]) throws {
+        if try client.markRead(contact, positions) {
+            sendOwedLater()
+        }
+    }
+
+    /// Turns read receipts on or off (section 39.5).
+    public func setReadReceipts(_ on: Bool) throws {
+        try client.setReadReceipts(on)
+        sendOwedLater()
+    }
+
+    private func bundleUnlessInSession(_ contact: Data) async throws -> PrekeyBundle? {
+        if try client.hasSession(contact) {
+            return nil
+        }
+        return try await fetchBundle(contact)
+    }
+
+    /// Sends a committed Send once logged in, then what is owed.
+    private func send(_ outgoing: Outgoing) async {
         if ready {
             await request(Request(frame: Self.sendFrame(outgoing)))
         }
-        if bundle != nil {
-            await sendOwedProfiles()
+        await sendOwed()
+    }
+
+    /// `sendOwed` in a task, so that a held request never stops the reading of frames.
+    private func sendOwedLater() {
+        guard ready else {
+            return
         }
-        return outgoing.messageID
+        owedSendCount += 1
+        let id = owedSendCount
+        // Listed before it can run: the task starts only once this method returns.
+        owedSends[id] = Task {
+            await self.sendOwed()
+            self.owedSends[id] = nil
+        }
     }
 
     /// Steps 1 and 2 of section 33.2 once logged in: reads the file once, makes its blob and
@@ -371,7 +491,7 @@ public actor Transport {
     @discardableResult
     public func sendFile(
         _ contact: Data, file: URL, caption: String = "", mediaType: String? = nil,
-        width: Int = 0, height: Int = 0, thumbnail: Data = Data()
+        width: Int = 0, height: Int = 0, thumbnail: Data = Data(), replyTo: Int64? = nil
     ) async throws -> Data {
         try await waitUntilReady()
         // A sending cancelled while it waited for the login makes nothing.
@@ -384,13 +504,14 @@ public actor Transport {
             contact,
             file: data,
             blobMaxBytes: blobMaxBytes,
-            fileName: Self.cut(file.lastPathComponent, to: Envelope.maxFileNameBytes),
+            fileName: Envelope.cut(file.lastPathComponent, to: Envelope.maxFileNameBytes),
             mediaType: mediaType.utf8.count <= Envelope.maxMediaTypeBytes ? mediaType : "",
             caption: caption,
             width: width,
             height: height,
             thumbnail: thumbnail.count <= Envelope.maxThumbnailBytes ? thumbnail : Data(),
-            localPath: file.path
+            localPath: file.path,
+            replyTo: replyTo
         )
         report(upload, .sending)
         startTransfers()
@@ -430,7 +551,7 @@ public actor Transport {
     public func resetSession(_ contact: Data) async throws -> Int {
         let bundle = try await fetchBundle(contact)
         let missing = try client.startSession(contact, bundle: bundle)
-        await sendOwedProfiles()
+        await sendOwed()
         return missing
     }
 
@@ -444,8 +565,7 @@ public actor Transport {
             transfers.removeValue(forKey: .upload(upload.blobID))?.task.cancel()
         }
         try client.setProfile(profile)
-        await sendBlobDeletions()
-        await sendOwedProfiles()
+        await sendOwed()
     }
 
     /// The bundle of a contact, fetched again after a reconnect until an answer.
@@ -565,7 +685,7 @@ public actor Transport {
         waiters.forEach { $0.resume() }
         eventSink.yield(.connected)
         try endTransfersBeyondTheRelay()
-        await sendOwedProfiles()
+        await sendOwed()
     }
 
     private func serve(_ socket: any RelaySocket) async throws {
@@ -574,8 +694,15 @@ public actor Transport {
             case .deliver(let deliver):
                 try await self.deliver(socket, deliver)
             case .stored(let stored):
-                if take(.send, stored.messageID) != nil, let file = try client.confirmStored(stored.messageID) {
-                    eventSink.yield(.file(Self.update(file, .sent)))
+                if take(.send, stored.messageID) != nil {
+                    let position = try client.sentPosition(stored.messageID)
+                    let file = try client.confirmStored(stored.messageID)
+                    if let position {
+                        eventSink.yield(.sent(position: position))
+                    }
+                    if let file {
+                        eventSink.yield(.file(Self.update(file, .sent)))
+                    }
                 }
             case .bundleStored:
                 if let upload = take(.upload, Data())?.upload {
@@ -602,8 +729,9 @@ public actor Transport {
         let received = try client.receive(
             Delivered(sender: deliver.sender, messageID: deliver.messageID, payload: deliver.payload)
         )
-        if received.profile != nil {
-            // Before the first await: the task of a replaced avatar must not go on.
+        if received.profile != nil || received.deleted {
+            // Before the first await: the task of a replaced avatar or of a deleted file must
+            // not go on.
             cancelEndedDownloads()
         }
         if received.ack {
@@ -626,10 +754,11 @@ public actor Transport {
         if received.profile?.hasAvatar == true {
             startTransfers()
         }
-        // A new session owes the own profile; in a task, so that a held request never stops
-        // the reading of frames.
-        if try !client.store.owedProfiles().isEmpty {
-            profileSends.append(Task { await self.sendOwedProfiles() })
+        // A new session owes the own profile, a message of the chat a delivery receipt, a
+        // deletion maybe a DeleteBlob; in a task, so that a held request never stops the
+        // reading of frames.
+        if try !client.store.owedProfiles().isEmpty || client.owesReceipts() || received.deleted {
+            sendOwedLater()
         }
     }
 
@@ -805,8 +934,8 @@ public actor Transport {
     private func endConnection() throws {
         backOffs.forEach { $0.cancel() }
         backOffs = []
-        profileSends.forEach { $0.cancel() }
-        profileSends = []
+        owedSends.values.forEach { $0.cancel() }
+        owedSends = [:]
         transfers.values.forEach { $0.task.cancel() }
         transfers = [:]
         deletionsSent = [:]
@@ -913,9 +1042,10 @@ public actor Transport {
         }
     }
 
-    /// Section 36.2 once logged in: the owed profiles go out as Sends or as avatar uploads,
-    /// and every transfer without a task gets one.
-    private func sendOwedProfiles() async {
+    /// Sections 36.2 and 39.5 once logged in: the owed profiles go out as Sends or as avatar
+    /// uploads and the owed receipts as Sends, every transfer without a task gets one, and
+    /// the saved DeleteBlob frames go out.
+    private func sendOwed() async {
         guard ready else {
             return
         }
@@ -926,7 +1056,15 @@ public actor Transport {
         } catch {
             eventSink.yield(.transferFailed(reason: "the profile was not sent: \(error)"))
         }
+        do {
+            for outgoing in try client.sendOwedReceipts() {
+                await request(Request(frame: Self.sendFrame(outgoing)))
+            }
+        } catch {
+            eventSink.yield(.transferFailed(reason: "the receipts were not sent: \(error)"))
+        }
         startTransfers()
+        await sendBlobDeletions()
     }
 
     private func track(_ key: TransferKey, _ body: @escaping @Sendable (isolated Transport) async throws -> Void) {
@@ -1014,7 +1152,7 @@ public actor Transport {
         }
         await request(Request(frame: Self.sendFrame(outgoing)))
         if bundle != nil {
-            await sendOwedProfiles()
+            await sendOwed()
         }
     }
 
@@ -1129,15 +1267,6 @@ public actor Transport {
             fileName: file.attachment.fileName, state: state, done: done, total: total, result: result, path: path,
             avatar: file.avatar
         )
-    }
-
-    /// The longest start of `name` that is at most `limit` bytes of UTF-8.
-    static func cut(_ name: String, to limit: Int) -> String {
-        var cut = ""
-        for scalar in name.unicodeScalars where cut.utf8.count + String(scalar).utf8.count <= limit {
-            cut.unicodeScalars.append(scalar)
-        }
-        return cut
     }
 
     private func receiveBinary(_ socket: any RelaySocket) async throws -> Data {

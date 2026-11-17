@@ -280,6 +280,9 @@ struct ContactPanel: View {
             .padding(.top, 24)
             VStack(spacing: 0) {
                 action("pencil", "Rename") { model.modal = .rename(contact.id) }
+                action("timer", "Disappearing messages", value: TimerChoices.title(model.timers[contact.id] ?? 0)) {
+                    model.modal = .timer(contact.id)
+                }
                 action("arrow.triangle.2.circlepath", "Reset session") { model.modal = .reset(contact.id) }
                 action("trash", "Delete contact", danger: true) { model.modal = .delete(contact.id) }
             }
@@ -288,7 +291,9 @@ struct ContactPanel: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func action(_ symbol: String, _ title: String, danger: Bool = false, run: @escaping () -> Void) -> some View {
+    private func action(
+        _ symbol: String, _ title: String, value: String? = nil, danger: Bool = false, run: @escaping () -> Void
+    ) -> some View {
         HoverRow(action: run) {
             HStack(spacing: 0) {
                 Image(systemName: symbol)
@@ -296,8 +301,14 @@ struct ContactPanel: View {
                     .foregroundStyle(danger ? Color.danger : Color.menuIconFg)
                     .frame(width: 36, alignment: .leading)
                 Text(title).font(Fonts.boxBody).foregroundStyle(danger ? Color.danger : Color.windowFg)
+                    .lineLimit(1)
+                if let value {
+                    Spacer(minLength: 8)
+                    Text(value).font(Fonts.boxBody).foregroundStyle(Color.accentText).lineLimit(1)
+                }
             }
             .padding(.leading, Metrics.boxPad)
+            .padding(.trailing, value == nil ? 0 : Metrics.boxPad)
         }
     }
 }

@@ -4,11 +4,11 @@ Build target: SwiftUI, macOS 14+. This file is the single source for the interfa
 
 ## 1. Reference and limits
 
-The layout, sizes, colours and conventions follow Telegram Desktop 7.x (the open source Qt client, GPLv3). Sotto is Apache-2.0, so only facts are taken: sizes, colour values and layout conventions, restated here in new words. Sections 10 to 18 come from Telegram Desktop 7.4.4 and lib_ui, with the sources listed in `thoughts/design-sources.md`.
+The layout, sizes, colours and conventions follow Telegram Desktop 7.x (the open source Qt client, GPLv3). Sotto is Apache-2.0, so only facts are taken: sizes, colour values and layout conventions, restated here in new words. Sections 10 to 18 come from Telegram Desktop 7.4.4 and lib_ui, with the sources listed in `thoughts/design-sources.md`; section 20 lists its own sources (20.12).
 
 Not taken, and never to be added: any code or style-file text, any icon or image asset, the wallpaper patterns, sounds, the logo, the name or the brand. Icons are SF Symbols (section 8). The chat background is a flat colour or a simple two-stop gradient made for Sotto. Avatars are coloured circles with initials. The look will be adjusted later; build every value from the tokens below so a later change is a token edit.
 
-Product scope (do not design anything else): one-to-one chats with text, photos and files, all end-to-end encrypted; contacts added by a 64-hex-character id under a local name; an identity is a key pair made on the device (no phone, no username) with an optional display name and avatar sent to contacts encrypted; an outgoing message is waiting, stored by the relay, or not sent (no delivery or read receipts, no typing, no online status); the app is connected to a relay or reconnecting; a session with a contact can be reset. No groups, channels, stickers, calls, folders or stories.
+Product scope (do not design anything else): one-to-one chats with text, photos and files, all end-to-end encrypted; contacts added by a 64-hex-character id under a local name; an identity is a key pair made on the device (no phone, no username) with an optional display name and avatar sent to contacts encrypted; an outgoing message is waiting, stored by the relay, delivered, read, or not sent (section 20; no typing, no online status); replies with a quote, edits of an own message, delete for both and a disappearing timer per chat (section 20); the app is connected to a relay or reconnecting; a session with a contact can be reset. No groups, channels, stickers, calls, folders, stories, reactions or forwards.
 
 ## 2. Window and layout
 
@@ -297,7 +297,7 @@ The system `.contextMenu` is acceptable for the first build; the custom look bel
 | Shadow | `shadow`, blur 12, y 2 (estimate) |
 | Minimum width | 200 (estimate) |
 
-Message menu: for a photo, Save as... and Copy image; for a file, Save as... and Show in Finder; then Copy text; Delete for me (danger). Chat row menu: Pin or Unpin (disabled for an archived chat); Mute notifications or Unmute; Archive or Unarchive; a separator; Contact info; Delete contact (danger).
+Message menu: Reply and Edit (20.8); for a photo, Save as... and Copy image; for a file, Save as... and Show in Finder; then Copy text; Delete (danger), which opens the box of 20.6. Chat row menu: Pin or Unpin (disabled for an archived chat); Mute notifications or Unmute; Archive or Unarchive; a separator; Contact info; Delete contact (danger).
 
 ### 5.10 Modal box
 
@@ -413,6 +413,7 @@ A right column inside the chat area, toggled by the header button: width 320 (es
 - 24 below: section label "Id" (13 semibold `accentText`, left 24), the id block of 7.2 and a "Copy id" row.
 - Action rows, height 44, icon 18pt `menuIconFg` at left 24, text 14 regular at left 60, hover `windowBgOver`:
   - `pencil` "Rename": a 320 box with the name field, buttons "Cancel", "Save".
+  - `timer` "Disappearing messages", the value at the right ("Off", "1 day"): the box of 20.7.
   - `arrow.triangle.2.circlepath` "Reset session": box "Reset session?", body "A new encrypted session will be started with <name>. Messages already received stay.", buttons "Cancel", "Reset"; then the toast "Session reset".
   - `trash` "Delete contact" in `danger`: box "Delete <name>?", body "The contact and the whole chat history will be deleted from this Mac. This cannot be undone.", buttons "Cancel", "Delete" (destructive); then the chat closes and the toast "Contact deleted" shows.
 
@@ -423,7 +424,7 @@ The settings are the panel of section 11. "Relay" is in 11.7, "Theme" in 11.4 an
 ### 7.6 Connection, outbox, unknown senders, encryption
 
 - Connection: shown only in the connection bar under the list search (5.2). The chat area does not change; a message sent while disconnected waits in the outbox.
-- Outbox state, on every outgoing bubble after the time: `clock` 12pt `msgSendingIconFg` while waiting in the outbox; `checkmark` 12pt `msgStoredIconFg` once the relay stored it; `exclamationmark.circle.fill` 12pt `danger` when it is not sent (the relay refused it, or the contact's keys could not be had), with "Not sent." and the reason as the hover help and in the accessibility label. A text to a contact without a session waits with the clock from the moment it is sent, also across a restart, until a connection gives the session. A message that is not sent stays not sent; it can be deleted. Never a double check: there are no receipts. The same marks stand before the time in a list row whose last message is the user's own (check `rowSentIconFg`, clock `windowSubFg`, both `rowFgActive` in the active row).
+- Outbox state, on every outgoing bubble after the time: `clock` 12pt `msgSendingIconFg` while waiting in the outbox; `checkmark` 12pt `msgStoredIconFg` once the relay stored it; `exclamationmark.circle.fill` 12pt `danger` when it is not sent (the relay refused it, or the contact's keys could not be had), with "Not sent." and the reason as the hover help and in the accessibility label. A text to a contact without a session waits with the clock from the moment it is sent, also across a restart, until a connection gives the session. A message that is not sent stays not sent; it can be deleted. The receipts of part 5 add two marks after the check: delivered and read (20.5). The same marks stand before the time in a list row whose last message is the user's own (checks `rowSentIconFg`, clock `windowSubFg`, both `rowFgActive` in the active row).
 - A message from a sender who is not in the contacts is not shown anywhere: no row, no badge, no notification.
 - "End-to-end encrypted" is stated, not decorated: the header subtitle with a small lock (5.3), the contact panel under the name (7.4) and the first-launch text. No green titles, no locks in list rows, no special bubble colours, no "secret chat" banner: the normal chat look is the encrypted look.
 
@@ -477,6 +478,10 @@ The settings are the panel of section 11. "Relay" is in 11.7, "Theme" in 11.4 an
 | Search in chat (header), archive bar search | `magnifyingglass` | 18 / 16 |
 | Chat search arrows | `chevron.up`, `chevron.down` | 18 |
 | Emoji button | `face.smiling` | 22 |
+| Reply (strip, menu) | `arrowshape.turn.up.left` | 18 / 16 |
+| Edit (strip, menu), save the edit | `pencil`, `checkmark` | 18 / 16, 22 |
+| Disappearing timer (panel row, header, message) | `timer` | 18 / 10 / 10 |
+| Chat header menu | `ellipsis` | 18 |
 
 Symbols use `.symbolRenderingMode(.monochrome)` in the colour token of their place.
 
@@ -580,6 +585,22 @@ Built as 11.2, 12 and 16 say; departures and estimates of the build, worth a loo
 - A contact photo opens in a plain viewer (the picture fitted, a close button, a click or Escape closes), not the media viewer of 15, which is built for the photos of a chat.
 - Not built: the contact photo in the macOS notification (11.3, 16); it would go as an image attachment of each notification, a file written outside the store.
 - The avatar of a contact shows the thumbnail the contact sent until its picture arrives, and when the picture is gone (protocol 36.5); with neither, the initials.
+
+### Added with replies, edits, receipts and the timer (SOTTO-40, 2026-11-18)
+
+Built as 20 says; estimates and departures of the build, worth a look by the owner:
+- Telegram Desktop has no delivered state: its double check means read. Sotto draws two checks for delivered in the lighter colour of the clock and two in the full check colour for read; in the dark theme the two blues are close.
+- The double check is an original shape of two strokes, not a symbol (none exists); the single check of "sent" is the same shape, so the two read alike.
+- The timer choices are those of the protocol's command-line client (off, 30 seconds, 5 minutes, 1 hour, 8 hours, 1 day, 1 week, 4 weeks), not the reference's wheel of days to a year; a value the contact set that is not among them is shown as a further choice.
+- The reference shows the timer neither in the chat header nor on a message; Sotto shows `timer` and the short value after the lock of the header and before the time of every message that carries one, because the protocol asks that a message be shown with its timer.
+- The delete box has a title, "Delete message?", like the other boxes of 5.10; the reference box has none. Its check is checked every time it opens; the reference remembers the last choice. "Delete" is `danger`, as in 5.10.
+- After a delete for both the toast says that the contact's app was asked to delete it, never that it is gone there (the protocol's rule).
+- Escape ends a reply or an edit whatever the field holds, and an edit ends without the "Cancel editing?" question of the reference; the draft of the chat comes back.
+- The edit window is the protocol's: ten edits within a day of sending, no countdown in the strip.
+- The read receipts toggle is Sotto's own (the reference has "Hide read time" on its Last seen page, which works both ways); off, Sotto still shows the contacts' read marks, as the protocol asks.
+- A message counts as seen when its line is inside the visible part of the list of the open chat while the window is in front and unlocked; the reference marks read by its own rules.
+- The quote of a photo or a file sits over the picture or the file row inside the bubble; no thumbnail is drawn in the quote.
+- 19.7 says the highlight holds for 3 s; the reference fades in over 500ms and starts its 3000ms fade out at once. The highlight of a click on a quote uses the existing 19.7 timings.
 
 ## 10. Additions to tokens and existing sections
 
@@ -1121,3 +1142,151 @@ Pin, mute and archive are changed from the row menu (5.9) and kept in `app.json`
 | Archive view in and out | none | instant |
 
 Motion rules of section 6 apply; with reduced motion the scroll to a found message is a jump.
+
+## 20. Replies, edits, receipts and the timer
+
+Protocol part 5 as the user sees it: a reply with a quote, an edit of an own message with its "edited" mark, the marks delivered and read, delete for both, and a disappearing timer per chat. Facts from Telegram Desktop 7.4.4 and lib_ui (20.12), restated; a value marked `(estimate)` was not found there or is Sotto's own. None of these is a message of its own: no unread count, no notification, no move in the list.
+
+### 20.1 New colour tokens
+
+| Token | Light | Dark | Used for |
+|---|---|---|---|
+| `quoteBarIn` | #37a1de | #429bdb | bar and tint of a quote in an incoming bubble, "Deleted message" there |
+| `quoteBarOut` | #5eb854 | #65b9f4 | the same in an outgoing bubble |
+| `quoteNameIn` | #168acd | #71bafa | author line of a quote in an incoming bubble |
+| `quoteNameOut` | #45a32d | #90caff | the same in an outgoing bubble |
+| `replyCancelFg` | #999999 | #737e87 | cross of the reply and edit strip |
+| `replyCancelFgOver` | #8a8a8a | #dcdcdc | the same, hover |
+| `msgDeliveredIconFg` | #98d292 (estimate) | #70a4d2 (estimate) | two checks of a message delivered and not read (the clock colour) |
+
+The tint of a quote is its bar colour at opacity 0.12 and the bar the same at 0.9. Reused as they are: `composeBg`, `accent`, `accentText`, `windowFg`, `windowSubFg`, `msgInFg`, `msgOutFg`, `msgInDateFg`, `msgOutDateFg`, `msgStoredIconFg`, `msgSendingIconFg`, `rowSentIconFg`, `rowFgActive`, `mediaOverlayFg`, `serviceBg`, `serviceFg`, `messageHighlight`, `menuIconFg`, `checkboxFg`, `danger`.
+
+### 20.2 Reply strip
+
+While an answer is written, a strip sits inside the compose bar of 5.8, above the field, on `composeBg`; the bar grows by its height and the list keeps its bottom anchored.
+
+| Item | Value |
+|---|---|
+| Height | 49 |
+| Icon | `arrowshape.turn.up.left` 18pt `accent`, centered in a 32 square at x 7, vertically centered |
+| Text | from x 53: the author of the quoted message ("You" for the user's own, else the local name) 13 semibold `accentText`, under it one line of the message 13 regular `windowFg`, line breaks as spaces, tail truncation; a photo or a file reads as in a list row ("Photo", "File: name", then the caption) |
+| Cancel | a 49 square at the right edge, `xmark` 14pt `replyCancelFg`, hover `replyCancelFgOver` |
+| Click on the strip | scrolls to the quoted message and highlights it (19.7) |
+| Ends | the cross, Escape, sending, the quoted message leaving the chat |
+| Motion | the reference has none; `.smooth(duration: 0.1)` like the field growth (estimate) |
+
+Reply comes from the message menu (20.8); the field takes the focus. Files sent while the strip is shown answer with the first file.
+
+### 20.3 Quote in a bubble
+
+A reply shows the quoted message at the top of its bubble, above the text, the photo or the file row.
+
+| Item | Value |
+|---|---|
+| Block | inset 8 from the bubble sides and 6 from its top (estimate); as wide as the bubble, which takes the wider of the quote and the text, up to the maximum of 5.4 |
+| Paddings inside the block | left 11, top 2, right 6, bottom 2 |
+| Shape | radius 5; the bar of 3 at its left edge, both in `quoteBarIn` / `quoteBarOut` (20.1) |
+| Author line | 13 semibold `quoteNameIn` / `quoteNameOut`, line 18, one line: "You" or the local name |
+| Text line | 13 regular `msgInFg` / `msgOutFg`, line 18, one line, tail truncation; the copy in the chat with its current text when the chat holds it, else the text the quote carried |
+| Quoted message gone | no author line; "Deleted message" 13 regular in the bar colour, centered in the block's height; not a button |
+| Click | when the chat holds the quoted message, the list scrolls it to the center and highlights it (19.7) |
+
+### 20.4 Edit mode and the "edited" mark
+
+| Item | Value |
+|---|---|
+| Start | Edit in the message menu, or the Up arrow in an empty field: the newest own message that can still be edited (protocol: at most ten edits, within a day of sending) |
+| Strip | the strip of 20.2 with `pencil` 18pt, the title "Edit message" and the original text under it |
+| Field | holds the text of the message; the draft of the chat waits and comes back when the edit ends |
+| Save button | the place of the send button, `checkmark` 22pt semibold `accent`, shown even when the field is empty; Enter saves as it sends (11.4) |
+| Saving | an unchanged text ends the edit silently; an empty text is not saved (a photo or a file may have an empty caption) |
+| Escape or the cross | ends the edit without saving |
+| "edited" mark | the word "edited" and a space before the time, the font and colour of the time; the bubble keeps room for it like the time (5.4); the time stays the time of sending |
+
+### 20.5 Marks of an own message
+
+| State | Mark | In a bubble | In a list row | On a photo (time pill) |
+|---|---|---|---|---|
+| Sending | `clock` 12pt | `msgSendingIconFg` | `windowSubFg` | `mediaOverlayFg` |
+| Sent (the relay stored it) | one check, 13 x 11 | `msgStoredIconFg` | `rowSentIconFg` | `mediaOverlayFg` |
+| Delivered (the contact's app holds it) | two checks, 18 x 11 | `msgDeliveredIconFg` (estimate) | `rowSentIconFg` at 0.55 | `mediaOverlayFg` at 0.7 |
+| Read (the contact has seen it) | two checks, 18 x 11 | `msgStoredIconFg` | `rowSentIconFg` | `mediaOverlayFg` |
+| Not sent | `exclamationmark.circle.fill` 12pt | `danger` | `danger` | `danger` |
+
+The checks are one original shape of strokes 1.5 wide with round caps (estimate); in a list row 1 smaller. They stand in the 24 reserved after the time (5.4). Hover help: "Sending", "Sent", "Delivered", "Read", "Not sent. <reason>". In the active row every mark is `rowFgActive`. A message received counts as seen when its line is inside the visible part of the list of the open chat while the window is in front and unlocked; then its read receipt goes out (unless turned off, 20.9) and its timer starts.
+
+### 20.6 Delete box
+
+The box of 5.10, 320 wide, opened by Delete in the message menu.
+
+| Item | Value |
+|---|---|
+| Title | "Delete message?" |
+| Own message that was sent | a check row: the 22 check of 11 (`checkboxFg` off, `accent` on), 12 gap, "Also delete for <local name>" 14 regular `windowFg`; checked when the box opens; 10 below it, 13 regular `windowSubFg`: "Sotto asks the app of <name> to delete it. A copy that <name> made stays.", or "It is deleted on this Mac only." when unchecked |
+| A message of the contact, or one not sent | no check; the body "It is deleted on this Mac only." and "<name> keeps the copy they sent." or "The message was not sent." |
+| Buttons | "Cancel", "Delete" (`danger`, the default) |
+| After | the bubble leaves the list; after a delete for both the toast "Asked <name> to delete it too" |
+
+### 20.7 Disappearing timer
+
+| Item | Value |
+|---|---|
+| Choices | Off, 30 seconds, 5 minutes, 1 hour, 8 hours, 1 day, 1 week, 4 weeks (the protocol's command-line client; estimate against the reference's wheel of 1 day to 1 year) |
+| Where it is set | the chat header menu (`ellipsis` 18pt in a 40 square at the right, after the panel button): a submenu "Disappearing messages" with the choices, a check before the current one, and "Contact info"; the contact panel row of 7.4, which opens the box below |
+| Box | 364 wide (5.10), title "Disappearing messages"; a hint 13 regular `windowSubFg`: "New messages of this chat disappear: yours after they are sent, those of <name> after you read them. The app of <name> is asked to do the same."; the radio rows of 11 (22 radio, 15 gap, 14 regular), a click applies at once; button "Close" |
+| Header | while a timer is on, 8 after "end-to-end encrypted": `timer` 10pt and the short value ("30s", "5m", "1h", "1d", "1w", "4w") 11 regular, `windowSubFg` (estimate; the reference shows nothing there) |
+| A message with a timer | `timer` 10pt and the short value 11 regular before the time, the colour of the time; the bubble keeps room for them; hover help "Disappears 1 hour after it is sent" or "after you read it", or the time left once it runs (estimate; the reference draws no timer on a message) |
+| Service line | one line where the change happened, drawn as the date pill of 5.5 (`serviceBg`, 13 semibold `serviceFg`, paddings 12, 3, 12, 4, margins 10 and 2): "<Name> set messages to disappear after 1 day", "<Name> turned off disappearing messages", "You ..." for the user's own change; centered, wrapping inside the margins of 5.4 |
+| Rule | a change holds for the messages sent after it, on both sides; a message goes, with its file, that long after it was sent (the user's own) or seen (the contact's), also after a restart |
+
+### 20.8 Message menu
+
+| Order | Item | Shown | Symbol |
+|---|---|---|---|
+| 1 | Reply | a message of the log (not one that waits for a session) | `arrowshape.turn.up.left` 16 |
+| 2 | Edit | an own message that can still be edited (20.4) | `pencil` 16 |
+| 3 | Save as..., Copy image or Show in Finder | a photo or a file, as 5.9 | as 5.9 |
+| 4 | Copy text | the message has a text | `doc.on.doc` 16 |
+| 5 | Delete | always, `danger`; opens 20.6 | `trash` 16 |
+
+The reference orders Reply, Edit, Pin, the media items, Copy text, Forward, Delete; Sotto keeps the ones it has. The media viewer keeps "Delete for me" (15).
+
+### 20.9 Read receipts setting
+
+Settings, Privacy and security (11.6), a group "Messages" after "Notifications": the toggle row "Read receipts", on by default, and the hint "When off, contacts see that a message was delivered, never that you read it. Delivery receipts are always sent." Off, read receipts already owed go out as delivery receipts. The setting is kept in the store. Sotto's own (estimate): the reference has only "Hide read time" on its Last seen page.
+
+### 20.10 SF Symbols added
+
+`arrowshape.turn.up.left` (reply), `pencil` and `checkmark` in new places (edit, save), `timer`, `ellipsis`; the checks of 20.5 are a shape, not a symbol. Listed in section 8.
+
+### 20.11 Motion
+
+| Element | Reference | SwiftUI |
+|---|---|---|
+| Reply and edit strip in and out | none (the height changes at once) | `.smooth(duration: 0.1)` (estimate) |
+| Check to two checks | none | instant |
+| A message that disappears or is deleted | none | instant |
+| Highlight of a quoted message reached by a click | in 500ms, out 3000ms | the timings of 19.7 |
+
+Motion rules of section 6 apply; with reduced motion the strip appears at once and the scroll to a quoted message is a jump.
+
+### 20.12 Sources
+
+Only open source was read, at the commits of the earlier sections (tdesktop 9918118a, version 7.4.4; lib_ui 076f74b8); nothing was built or run, and the instruction file for coding tools in the tdesktop clone was neither read nor followed.
+
+| File (tdesktop under `Telegram/`, lib_ui under `ui/`) | Read for |
+|---|---|
+| `SourceFiles/chat_helpers/chat_helpers.style` | the reply strip (height, text start, icon place, cancel button), the timer button of the compose bar, the quote style |
+| `SourceFiles/ui/chat/chat.style`, `ui/chat/chat_style.style`, `ui/chat/chat_style.cpp` | quote paddings and top, the reserved place of the marks, the check sizes, quote tint and bar opacities, service line paddings and margins |
+| `SourceFiles/history/view/history_view_reply.cpp` | the quote layout, the line limit, the deleted state |
+| `SourceFiles/history/view/history_view_bottom_info.cpp` | the "edited" word before the time, which mark is drawn when |
+| `SourceFiles/history/view/controls/history_view_compose_controls.cpp`, `history/history_widget.cpp` (parts) | the strip's icons and texts, the save button, Escape, the Up arrow |
+| `SourceFiles/history/view/history_view_context_menu.cpp`, `ui/menu_icons.style` | order and icons of the message menu |
+| `SourceFiles/boxes/delete_messages_box.cpp`, lib_ui `layers/layers.style`, `widgets/widgets.style` | the delete box and its check |
+| `SourceFiles/menu/menu_ttl.cpp`, `ui/boxes/time_picker_box.cpp`, `settings/sections/settings_global_ttl.cpp`, `window/window_peer_menu.cpp` (parts) | where and how the timer is set |
+| `SourceFiles/dialogs/dialogs.style`, `dialogs/dialogs_row.cpp`, `ui/effects/ttl_icon.cpp` | list marks and the timer badge |
+| `SourceFiles/history/history_view_highlight_manager.cpp`, lib_ui `basic.style` | the highlight timings |
+| lib_ui `colors.palette`; the night palette inside `Resources/night.tdesktop-theme` | light and dark values of the tokens of 20.1 |
+| `Resources/langs/lang.strings` (keys only) | the meaning of the texts, restated; none copied |
+
+Not found: a delivered state, a timer in the chat header or on a message, an animation of the strip, a switch that stops read receipts.

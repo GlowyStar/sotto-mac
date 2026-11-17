@@ -43,6 +43,27 @@ public enum Alerts {
         return alerts
     }
 
+    /// The identifier of the notification of a message.
+    public static func identifier(_ chatID: String, _ messageID: Int64) -> String {
+        "\(chatID)-\(messageID)"
+    }
+
+    /// The notifications to take away: of the incoming messages of `old` that `new` does not
+    /// hold (deleted for both or expired, protocol sections 39.4 and 39.6) or holds with
+    /// another text (edited, 39.3), so that their text stays in no notification.
+    public static func changed(old: MessengerState?, new: MessengerState) -> [String] {
+        guard let old else { return [] }
+        var ids: [String] = []
+        for before in old.chats {
+            let now = new.chats.first { $0.userID == before.userID }
+            let texts = Dictionary((now?.messages ?? []).map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
+            for message in before.messages where !message.outgoing && texts[message.id] != message.text {
+                ids.append(identifier(before.userID, message.id))
+            }
+        }
+        return ids
+    }
+
     /// The text of a message for a person: a photo or a file says so before its caption.
     public static func preview(_ message: ChatMessage) -> String {
         preview(message.text, file: message.file)

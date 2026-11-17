@@ -5,7 +5,8 @@ import SwiftUI
 /// `--snapshot <folder>`: draws the window content for a fixed set of states into PNG files at
 /// 2x, offscreen and without showing a window, then exits (0 when every file was written).
 /// With `--data-dir` the states come from that store, read without a connection; without it,
-/// from the mock data. `--dump` with `--data-dir` prints the state of the store as JSON.
+/// from the mock data. `--only PREFIX` draws only the shots whose name starts with it. `--dump`
+/// with `--data-dir` prints the state of the store as JSON.
 @MainActor
 enum Snapshot {
     private struct Shot {
@@ -250,7 +251,77 @@ enum Snapshot {
             photos(model)
             model.avatarViewer = model.openChat?.profile?.avatar
         },
+        // SOTTO-40: replies, edits, the marks of part 5, delete for both and the timer.
+        Shot(name: "changes-chat", size: CGSize(width: 900, height: 980)) { nora($0) },
+        Shot(name: "changes-chat-dark", size: CGSize(width: 900, height: 980), dark: true) { nora($0) },
+        Shot(name: "changes-reply") { model in
+            nora(model)
+            model.startReply("nora-7", in: model.openChatID ?? "")
+        },
+        Shot(name: "changes-reply-dark", dark: true) { model in
+            nora(model)
+            model.startReply("nora-9", in: model.openChatID ?? "")
+        },
+        Shot(name: "changes-edit") { model in
+            nora(model)
+            model.startEdit("nora-9", in: model.openChatID ?? "")
+        },
+        Shot(name: "changes-edit-dark", dark: true) { model in
+            nora(model)
+            model.startEdit("nora-9", in: model.openChatID ?? "")
+        },
+        Shot(name: "changes-delete-own") { model in
+            nora(model)
+            model.modal = .deleteMessage(model.openChatID ?? "", "nora-9")
+        },
+        Shot(name: "changes-delete-own-dark", dark: true) { model in
+            nora(model)
+            model.modal = .deleteMessage(model.openChatID ?? "", "nora-9")
+        },
+        Shot(name: "changes-delete-incoming") { model in
+            nora(model)
+            model.modal = .deleteMessage(model.openChatID ?? "", "nora-7")
+        },
+        Shot(name: "changes-delete-incoming-dark", dark: true) { model in
+            nora(model)
+            model.modal = .deleteMessage(model.openChatID ?? "", "nora-7")
+        },
+        Shot(name: "changes-timer-box", size: CGSize(width: 900, height: 700)) { model in
+            nora(model)
+            model.modal = .timer(model.openChatID ?? "")
+        },
+        Shot(name: "changes-timer-box-dark", size: CGSize(width: 900, height: 700), dark: true) { model in
+            nora(model)
+            model.modal = .timer(model.openChatID ?? "")
+        },
+        Shot(name: "changes-panel", size: CGSize(width: 1100, height: 700)) { model in
+            nora(model)
+            model.panelOpen = true
+        },
+        Shot(name: "changes-panel-dark", size: CGSize(width: 1100, height: 700), dark: true) { model in
+            nora(model)
+            model.panelOpen = true
+        },
+        Shot(name: "changes-media", size: CGSize(width: 900, height: 2400)) { photos($0) },
+        Shot(name: "changes-media-dark", size: CGSize(width: 900, height: 2400), dark: true) { photos($0) },
+        Shot(name: "changes-files", size: CGSize(width: 900, height: 1100)) { files($0) },
+        Shot(name: "changes-files-dark", size: CGSize(width: 900, height: 1100), dark: true) { files($0) },
+        Shot(name: "changes-privacy", size: CGSize(width: 900, height: 760)) { model in
+            model.readReceipts = false
+            page(model, .privacy)
+        },
+        Shot(name: "changes-privacy-dark", size: CGSize(width: 900, height: 760), dark: true) { page($0, .privacy) },
+        Shot(name: "changes-narrow", size: CGSize(width: 380, height: 700)) { model in
+            nora(model)
+            model.startReply("nora-3", in: model.openChatID ?? "")
+        },
+        Shot(name: "changes-narrow-dark", size: CGSize(width: 380, height: 700), dark: true) { model in
+            nora(model)
+            model.startEdit("nora-8", in: model.openChatID ?? "")
+        },
     ]
+
+    private static func nora(_ model: AppModel) { open(model, "Nora Weiss") }
 
     private static func editProfile(_ model: AppModel) {
         model.openSettings()
@@ -321,6 +392,9 @@ enum Snapshot {
                 FileHandle.standardError.write(Data("snapshot failed: \(error)\n".utf8))
                 exit(1)
             }
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--only"), index + 1 < CommandLine.arguments.count {
+            shots = shots.filter { $0.name.hasPrefix(CommandLine.arguments[index + 1]) }
         }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var failed = false

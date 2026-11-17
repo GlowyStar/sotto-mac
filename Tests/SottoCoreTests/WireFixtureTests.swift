@@ -66,8 +66,8 @@ private func outcome(of frame: Sotto_ServerFrame.OneOf_Frame) throws -> (kind: S
                 #expect(fixture["text"] as? String == text, "\(name)")
             case .attachment(let attachment):
                 #expect(fixture["attachment"] as? String == (try attachment.serializedBytes() as Data).hex, "\(name)")
-            case .profile:
-                Issue.record("\(name) decoded as a profile")
+            case .profile, .edit, .deletion, .receipt, .timer:
+                Issue.record("\(name) decoded as a member that is no message of the chat")
             }
         } catch {
             #expect(fixture["error"] as? String == (error as? EnvelopeError)?.result, "\(name)")

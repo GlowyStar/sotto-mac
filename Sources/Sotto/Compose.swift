@@ -1,7 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The bar under the messages: a growing field and the send button (DESIGN.md 5.8).
+/// The bar under the messages: a growing field and the send button (DESIGN.md 5.8), with the
+/// strip of a reply or an edit above them (DESIGN.md 20.2 and 20.4).
 struct ComposeBar: View {
     @Bindable var model: AppModel
     let chatID: String
@@ -14,10 +15,24 @@ struct ComposeBar: View {
     }
 
     private var canSend: Bool { !text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var editing: Bool { model.edits[chatID] != nil }
+    private var stripShown: Bool { editing || model.replies[chatID] != nil }
 
     var body: some View {
+        VStack(spacing: 0) {
+            ComposeStrip(model: model, chatID: chatID)
+            field
+        }
+        .background(Color.composeBg)
+        .overlay(alignment: .top) { Rectangle().fill(Color.divider).frame(height: 1) }
+        .animation(Motion.pick(Motion.compose, reduce: reduceMotion), value: canSend)
+        .animation(Motion.pick(Motion.compose, reduce: reduceMotion), value: height)
+        .animation(Motion.pick(Motion.compose, reduce: reduceMotion), value: stripShown)
+    }
+
+    private var field: some View {
         let size = model.settings.textSize
-        HStack(alignment: .bottom, spacing: 0) {
+        return HStack(alignment: .bottom, spacing: 0) {
             AttachButton(model: model)
             ZStack(alignment: .topLeading) {
                 if text.wrappedValue.isEmpty {
@@ -32,6 +47,7 @@ struct ComposeBar: View {
                     textSize: size, commandEnterSends: model.settings.sendWithCommandEnter,
                     onSend: { model.send(text.wrappedValue, to: chatID) },
                     onEscape: { model.escape() },
+                    onUpArrow: { model.editLast(in: chatID) },
                     onPasteFiles: { model.stage($0) },
                     onPasteImage: { model.stagePasted($0) }
                 )
@@ -46,28 +62,24 @@ struct ComposeBar: View {
                 DispatchQueue.main.async { NSApp.orderFrontCharacterPalette(nil) }
             }
             .frame(height: Metrics.composeHeight)
-            if canSend {
+            if canSend || editing {
                 Button {
                     model.send(text.wrappedValue, to: chatID)
                 } label: {
-                    Image(systemName: "paperplane.fill")
-                        .font(.system(size: 22))
+                    Image(systemName: editing ? "checkmark" : "paperplane.fill")
+                        .font(.system(size: 22, weight: editing ? .semibold : .regular))
                         .foregroundStyle(Color.accent)
                         .frame(width: Metrics.sendWidth, height: Metrics.composeHeight)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .padding(.trailing, Metrics.sendRight)
-                .accessibilityLabel("Send")
+                .accessibilityLabel(editing ? "Save the edit" : "Send")
                 .transition(.opacity)
             } else {
                 Color.clear.frame(width: Metrics.sendWidth + Metrics.sendRight, height: Metrics.composeHeight)
             }
         }
-        .background(Color.composeBg)
-        .overlay(alignment: .top) { Rectangle().fill(Color.divider).frame(height: 1) }
-        .animation(Motion.pick(Motion.compose, reduce: reduceMotion), value: canSend)
-        .animation(Motion.pick(Motion.compose, reduce: reduceMotion), value: height)
     }
 }
 
@@ -113,6 +125,8 @@ struct GrowingTextView: NSViewRepresentable {
     var commandEnterSends = false
     let onSend: () -> Void
     let onEscape: () -> Void
+    /// The Up arrow in an empty field; true when it was taken (DESIGN.md 20.4).
+    var onUpArrow: () -> Bool = { false }
     var onPasteFiles: ([URL]) -> Void = { _ in }
     /// A picture pasted without text, as PNG bytes.
     var onPasteImage: (Data) -> Void = { _ in }
@@ -120,6 +134,7 @@ struct GrowingTextView: NSViewRepresentable {
     final class Field: NSTextView {
         var focusChanged: ((Bool) -> Void)?
         var commandReturn: (() -> Void)?
+        var upArrow: (() -> Bool)?
         var pasteFiles: (([URL]) -> Void)?
         var pasteImage: ((Data) -> Void)?
         var appliedSize = 0
@@ -139,8 +154,11 @@ struct GrowingTextView: NSViewRepresentable {
             }
         }
         override func keyDown(with event: NSEvent) {
+            let isPlainUp = event.keyCode == 126 && event.modifierFlags.intersection([.command, .option, .shift, .control]).isEmpty
             if [36, 76].contains(event.keyCode), event.modifierFlags.contains(.command) {
                 commandReturn?()
+            } else if isPlainUp, string.isEmpty, upArrow?() == true {
+                return
             } else {
                 super.keyDown(with: event)
             }
@@ -223,6 +241,7 @@ struct GrowingTextView: NSViewRepresentable {
         field.autoresizingMask = [.width]
         field.textContainer?.widthTracksTextView = true
         field.commandReturn = { [weak coordinator = context.coordinator] in coordinator?.parent.onSend() }
+        field.upArrow = { [weak coordinator = context.coordinator] in coordinator?.parent.onUpArrow() ?? false }
         field.pasteFiles = { [weak coordinator = context.coordinator] in coordinator?.parent.onPasteFiles($0) }
         field.pasteImage = { [weak coordinator = context.coordinator] in coordinator?.parent.onPasteImage($0) }
         field.string = text

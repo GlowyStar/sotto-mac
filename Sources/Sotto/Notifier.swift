@@ -40,8 +40,15 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         content.threadIdentifier = alert.chatID
         content.userInfo = ["chat": alert.chatID]
         if alert.sound { content.sound = .default }
-        let request = UNNotificationRequest(identifier: "\(alert.chatID)-\(alert.messageID)", content: content, trigger: nil)
+        let request = UNNotificationRequest(identifier: Alerts.identifier(alert.chatID, alert.messageID), content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// Takes away the notifications of messages that were deleted or edited, by the
+    /// identifiers of `Alerts.changed`.
+    func remove(_ ids: [String]) {
+        guard Self.available, !ids.isEmpty else { return }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
     }
 
     /// Takes away the notifications of a chat that was read.

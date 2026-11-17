@@ -237,9 +237,10 @@ struct ChatRow: View {
                                 StatusMark(
                                     state: last.state,
                                     waitingColor: active ? .rowFgActive : .windowSubFg,
-                                    storedColor: active ? .rowFgActive : .rowSentIconFg
+                                    storedColor: active ? .rowFgActive : .rowSentIconFg,
+                                    small: true
                                 )
-                                .frame(width: Metrics.rowMarkBox, height: Metrics.rowMarkBox)
+                                .frame(height: Metrics.rowMarkBox)
                             }
                             Text(Formats.row(last.date, h24: model.clock24))
                                 .font(Fonts.rowText)

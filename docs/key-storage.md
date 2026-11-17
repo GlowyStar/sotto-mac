@@ -14,6 +14,15 @@ and received file with its file key, and the bytes of a download so far. A recei
 is written in readable form into the folder the caller names (`received` in the data
 directory of `sotto-mac`), mode 0600 in a folder of mode 0700.
 
+## Deleted and expired messages
+
+A delete for both, an expired timer and a delete for me remove the message row, its file
+rows and downloaded bytes in one transaction, with `secure_delete` on, and leave a trace
+of the author and the id only (section 39.4 of the protocol); the text of every quote of
+the message is cleared in the same transaction. After a delete for both or an expiry, a
+received file that was saved into a folder is removed after the commit; the file a sent
+one was read from is the user's own and stays.
+
 ## What was observed
 
 A small app was signed ad hoc with a designated requirement by identifier

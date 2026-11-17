@@ -308,6 +308,8 @@ struct TransportTests {
         try await until { try await isRegistered(aliceLink.transport) }
         try await aliceLink.transport.sendText(bob, "one")
         try await until { await relay.kinds(of: alice).contains("send") }
+        // The delivery receipt of Bob goes first, so that the refusal is of a text of Alice.
+        try await until { await relay.kinds(of: bob).contains("send") }
 
         await relay.refuseSends([code.rawValue])
         try await aliceLink.transport.sendText(bob, "two")
@@ -433,6 +435,7 @@ struct TransportTests {
         #expect(try await nextText(aliceLink.transport) == (bob, "reply"))
         await aliceLink.stop()
 
+        let seenBefore = Int64(folder.clock.now)
         folder.clock.advance(Client.seenIDSeconds)
         _ = try folder.open("alice").sendText(bob, "second")
         aliceLink = try await run(folder.open("alice"), relay)
@@ -445,8 +448,12 @@ struct TransportTests {
         // Bob holds connection 1; Alice's three runs are connections 2, 3 and 4.
         #expect(await relay.connections == 4)
         #expect(Array(await relay.kinds(2).prefix(4)) == ["login", "upload_bundle", "fetch_bundle", "send"])
-        #expect(await relay.kinds(3) == ["login", "upload_bundle", "send"])
-        #expect(await relay.kinds(4) == ["login"])
+        // The acks are of the delivery receipt of Bob, whenever it arrives, and a second send
+        // may be the delivery receipt Alice owed Bob for "reply" (section 39.5).
+        let third = await relay.kinds(3).filter { $0 != "ack" }
+        #expect(Array(third.prefix(3)) == ["login", "upload_bundle", "send"])
+        #expect(third.count <= 4 && third.dropFirst(2).allSatisfy { $0 == "send" })
+        #expect(await relay.kinds(4).filter { $0 != "ack" } == ["login"])
         let uploads = await relay.sentToRelay.filter { $0.link.number > 1 }.compactMap { sent -> Sotto_UploadBundle? in
             guard case .uploadBundle(let upload) = try? Sotto_ClientFrame(serializedBytes: sent.frame).frame else {
                 return nil
@@ -458,7 +465,7 @@ struct TransportTests {
         #expect(uploads[0].signedPrekey.id != uploads[1].signedPrekey.id)
 
         let store = try ClientStore(directory: folder.url.appendingPathComponent("alice"))
-        #expect(try store.query("SELECT count(*) FROM seen_ids")[0][0].integer == 0)
+        #expect(try store.query("SELECT count(*) FROM seen_ids WHERE seen_at <= ?", [.integer(seenBefore)])[0][0].integer == 0)
         let identity = try #require(try store.identity())
         var privateKeys = [identity.seed, identity.identityDHPrivateKey]
         for table in ["signed_prekeys", "one_time_prekeys"] {

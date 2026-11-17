@@ -169,3 +169,15 @@ private func chat(_ id: String, _ messages: [ChatMessage], unread: Int = 0, mute
     #expect(!rule(attachment(1_000_001, "image/jpeg")))
     #expect(!rule(attachment(1, "application/pdf")), "0 is off")
 }
+
+@Test func notificationsOfDeletedExpiredAndEditedMessagesAreNamedForRemoval() {
+    let before = state([
+        chat("a", [incoming(1, "kept"), incoming(2, "deleted"), incoming(3, "before the edit")]),
+        chat("b", [incoming(4, "gone too")]),
+    ])
+    let after = state([chat("a", [incoming(1, "kept"), incoming(3, "after the edit"), incoming(5, "new")])])
+
+    #expect(Alerts.changed(old: nil, new: after).isEmpty)
+    #expect(Alerts.changed(old: before, new: after) == ["a-2", "a-3", "b-4"])
+    #expect(Alerts.changed(old: after, new: after).isEmpty)
+}
