@@ -1,5 +1,6 @@
 import Foundation
 import SwiftProtobuf
+import UniformTypeIdentifiers
 
 /// The three actions of section 11.1.
 public enum TransportAction: String, Sendable {
@@ -18,6 +19,22 @@ public struct RefusedError: Error, Equatable, Sendable {
     public let result: String
 }
 
+/// A file of section 33.5 changed its state or its progress. `contact` is the recipient of a
+/// file being sent and the sender of a received one; `fileName` is the name in the
+/// attachment, a text of the peer for a received file. `done` out of `total` bytes of the
+/// blob are stored at the relay or downloaded; `path` is where a received file was saved.
+public struct FileUpdate: Equatable, Sendable {
+    public var contact: Data
+    public var blobID: Data
+    public var messageID: Data
+    public var fileName: String
+    public var state: FileState
+    public var done = 0
+    public var total = 0
+    public var result: String?
+    public var path: URL?
+}
+
 /// What the transport reports, in its order.
 public enum TransportEvent: Sendable, Equatable {
     /// The relay accepted the Login and the steps of section 23.3 went out.
@@ -31,6 +48,10 @@ public enum TransportEvent: Sendable, Equatable {
     case retrying(seconds: Double)
     /// The client does not reconnect; a person takes the next step (section 11.1).
     case stopped(reason: String)
+    /// A file of part 3 changed.
+    case file(FileUpdate)
+    /// A transfer stopped on a local failure; the next login starts it again.
+    case transferFailed(reason: String)
 }
 
 /// The client transport of docs/protocol.md, section 23, over the session layer.
@@ -55,7 +76,8 @@ public actor Transport {
     static let frameTooBig = 1009
     static let errorNames = [
         "ERROR_CODE_UNSPECIFIED", "UNKNOWN_RECIPIENT", "QUEUE_FULL", "STORAGE_FULL",
-        "RATE_LIMITED", "NOT_FOUND", "BAD_BUNDLE", "IDENTITY_KEY_MISMATCH",
+        "RATE_LIMITED", "NOT_FOUND", "BAD_BUNDLE", "IDENTITY_KEY_MISMATCH", "QUOTA_FULL",
+        "BLOB_TOO_LARGE",
     ]
 
     public nonisolated let serverName: String
@@ -76,6 +98,24 @@ public actor Transport {
     private var requests: [Request] = []
     private var backOffs: [Task<Void, Never>] = []
     private var stopping = false
+    /// The folder for received files; every offered file is downloaded into it by itself
+    /// (section 33.3). Nil leaves offered files offered.
+    private let receivedFiles: URL?
+    /// The `blob_max_bytes` of the last LoggedIn: 0 before a login and for a relay without
+    /// the blob frames (section 28.2).
+    public private(set) var blobMaxBytes = 0
+    private var transfers: [TransferKey: (id: Int, task: Task<Void, Never>)] = [:]
+    private var transferCount = 0
+    /// Counts the requests in the order they left.
+    private var sequence = 0
+    /// A DeleteBlob sent on this connection, with the sequence of the last request that left
+    /// before it: an answer to a later request confirms it (section 33.2).
+    private var deletionsSent: [BlobKey: Int] = [:]
+    /// Counts the ends of connections, so that a send that outlived its connection changes
+    /// nothing of the next one.
+    private var generation = 0
+    /// The last frame handed to the socket; the next one leaves after it.
+    private var sendTail: Task<Void, Never>?
 
     /// - Parameters:
     ///   - client: The session layer of the identity; the transport owns it from here on.
@@ -87,6 +127,7 @@ public actor Transport {
         client: sending Client,
         url: String,
         insecure: Bool = false,
+        receivedFiles: URL? = nil,
         dialer: any RelayDialer = URLSessionDialer(),
         jitter: @escaping Jitter = Transport.evenJitter,
         sleep: @escaping Sleep = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
@@ -97,6 +138,7 @@ public actor Transport {
         }
         self.url = parsed
         self.client = client
+        self.receivedFiles = receivedFiles
         self.dialer = dialer
         self.jitter = jitter
         self.sleep = sleep
@@ -305,6 +347,35 @@ public actor Transport {
         return outgoing.messageID
     }
 
+    /// Steps 1 and 2 of section 33.2 once logged in: reads the file once, makes its blob and
+    /// commits the upload; the upload goes on by itself and reports `.file` events, also
+    /// after a reconnect or a restart.
+    ///
+    /// - Throws: a check of section 33.1 (`SessionError.notAContact`,
+    ///   `FileError.filesUnsupported`, `FileError.fileTooLarge`); `InvalidInputError` when
+    ///   the caption is longer than `Envelope.maxCaptionBytes`; an error of the file system
+    ///   when the file cannot be read.
+    /// - Returns: The blob id that the `.file` events of the file name.
+    @discardableResult
+    public func sendFile(_ contact: Data, file: URL, caption: String = "") async throws -> Data {
+        try await waitUntilReady()
+        let size = try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int ?? 0
+        try client.checkFile(contact, size: size, blobMaxBytes: blobMaxBytes)
+        let data = try Data(contentsOf: file, options: .mappedIfSafe)
+        let mediaType = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? ""
+        let upload = try client.startUpload(
+            contact,
+            file: data,
+            blobMaxBytes: blobMaxBytes,
+            fileName: Self.cut(file.lastPathComponent, to: Envelope.maxFileNameBytes),
+            mediaType: mediaType.utf8.count <= Envelope.maxMediaTypeBytes ? mediaType : "",
+            caption: caption
+        )
+        report(upload, .sending)
+        startTransfers()
+        return upload.blobID
+    }
+
     /// L2 of section 20.6 with a fresh bundle; returns the GAP of the session that left.
     public func resetSession(_ contact: Data) async throws -> Int {
         let bundle = try await fetchBundle(contact)
@@ -316,6 +387,7 @@ public actor Transport {
     /// - Throws: `RefusedError` when the relay refused the FetchBundle with a Stop.
     public func fetchBundle(_ contact: Data) async throws -> PrekeyBundle {
         while true {
+            try Task.checkCancellation()
             try await waitUntilReady()
             var frame = Sotto_ClientFrame()
             frame.fetchBundle.identity = contact
@@ -352,9 +424,9 @@ public actor Transport {
         var loggedIn = false
         var stopRun: StopRun?
         do {
-            let oneTimePrekeyCount = try await logIn(socket)
+            let loggedInFrame = try await logIn(socket)
             loggedIn = true
-            try await afterLogin(oneTimePrekeyCount)
+            try await afterLogin(loggedInFrame)
             try await serve(socket)
         } catch let violation as Violation {
             await socket.close(code: violation.code)
@@ -377,8 +449,8 @@ public actor Transport {
         return loggedIn
     }
 
-    /// Hello, Login and LoggedIn of section 8.1; returns the count of the LoggedIn.
-    private func logIn(_ socket: any RelaySocket) async throws -> Int {
+    /// Hello, Login and LoggedIn of section 8.1; returns the LoggedIn.
+    private func logIn(_ socket: any RelaySocket) async throws -> Sotto_LoggedIn {
         let hello: Sotto_Hello
         do {
             guard case .hello(let first) = try await Frames.readServerFrame(receiveBinary(socket)) else {
@@ -399,12 +471,14 @@ public actor Transport {
             throw Violation(code: Self.protocolViolation)
         }
         self.socket = socket
-        return Int(loggedIn.oneTimePrekeyCount)
+        blobMaxBytes = Int(loggedIn.blobMaxBytes)
+        return loggedIn
     }
 
-    /// The three steps of section 23.3.
-    private func afterLogin(_ oneTimePrekeyCount: Int) async throws {
-        if let upload = try client.prepareUpload(oneTimePrekeyCount: oneTimePrekeyCount) {
+    /// The three steps of section 23.3, then the transfers of section 33.4.
+    private func afterLogin(_ loggedIn: Sotto_LoggedIn) async throws {
+        await sendBlobDeletions()
+        if let upload = try client.prepareUpload(oneTimePrekeyCount: Int(loggedIn.oneTimePrekeyCount)) {
             let request = Request(frame: Self.uploadFrame(upload))
             request.upload = upload
             await self.request(request)
@@ -424,6 +498,8 @@ public actor Transport {
         readyWaiters = []
         waiters.forEach { $0.resume() }
         eventSink.yield(.connected)
+        try endTransfersBeyondTheRelay()
+        startTransfers()
     }
 
     private func serve(_ socket: any RelaySocket) async throws {
@@ -432,8 +508,8 @@ public actor Transport {
             case .deliver(let deliver):
                 try await self.deliver(socket, deliver)
             case .stored(let stored):
-                if take(.send, stored.messageID) != nil {
-                    try client.confirmStored(stored.messageID)
+                if take(.send, stored.messageID) != nil, let file = try client.confirmStored(stored.messageID) {
+                    eventSink.yield(.file(Self.update(file, .sent)))
                 }
             case .bundleStored:
                 if let upload = take(.upload, Data())?.upload {
@@ -441,8 +517,15 @@ public actor Transport {
                 }
             case .bundle(let bundle):
                 take(.fetch, bundle.identity)?.settle(.success(Self.bundle(of: bundle)))
+            case .blobStored(let stored):
+                take(.blobWrite, stored.blobID)?.settleBlob(.success(.stored(stored)))
+            case .blobData(let data):
+                // A FetchBlob gets its answer in the order of the frames (section 7.4), so a
+                // BlobData that names another blob answers the oldest one.
+                let request = take(.blobRead, data.blobID + data.uploader) ?? takeOldest(.blobRead)
+                request?.settleBlob(.success(.data(data)))
             case .error(let error):
-                try refused(socket, error)
+                try await refused(socket, error)
             case .hello, .loggedIn:
                 throw Violation(code: Self.protocolViolation)
             }
@@ -462,11 +545,18 @@ public actor Transport {
             try await socket.send(ack.serializedBytes())
         }
         eventSink.yield(.incoming(sender: deliver.sender, received: received))
+        if received.attachment != nil {
+            startTransfers()
+        }
     }
 
-    private func refused(_ socket: any RelaySocket, _ error: Sotto_Error) throws {
-        let kind: Request.Kind = !error.messageID.isEmpty ? .send : !error.identity.isEmpty ? .fetch : .upload
-        let reference = error.messageID.isEmpty ? error.identity : error.messageID
+    private func refused(_ socket: any RelaySocket, _ error: Sotto_Error) async throws {
+        let (kind, reference): (Request.Kind, Data) =
+            if !error.messageID.isEmpty { (.send, error.messageID) }
+            else if !error.blobID.isEmpty && !error.identity.isEmpty { (.blobRead, error.blobID + error.identity) }
+            else if !error.blobID.isEmpty { (.blobWrite, error.blobID) }
+            else if !error.identity.isEmpty { (.fetch, error.identity) }
+            else { (.upload, Data()) }
         guard let request = first(kind, reference) else {
             return
         }
@@ -479,14 +569,21 @@ public actor Transport {
         }
 
         requests.removeAll { $0 === request }
+        answered(request)
         let result = Self.errorName(code)
         if request.fetches {
             request.settle(.failure(RefusedError(result: result)))
+        } else if request.asksBlob {
+            request.settleBlob(.success(.refused(error)))
         } else if request.upload != nil {
             eventSink.yield(.refused(result: result, contact: nil))
         } else {
-            try client.dropRefusedSend(reference, result: result)
+            let file = try client.dropRefusedSend(reference, result: result)
             eventSink.yield(.refused(result: result, contact: request.frame.send.recipient))
+            if let file {
+                eventSink.yield(.file(Self.update(file, .notSent, result: result)))
+                await sendBlobDeletions()
+            }
         }
     }
 
@@ -508,8 +605,13 @@ public actor Transport {
             return
         }
         request.waiting = false
+        request.sequence = nextSequence()
+        let sentOn = generation
         if let data = try? request.frame.serializedBytes() as Data {
-            try? await socket.send(data)
+            await sendInOrder(socket, data)
+        }
+        guard sentOn == generation else {
+            return
         }
         if request.holdsOthers {
             request.holdsOthers = false
@@ -530,11 +632,25 @@ public actor Transport {
             return false
         }
         // Listed before it leaves, so that its answer always finds it.
+        request.sequence = nextSequence()
         requests.append(request)
         if let data = try? request.frame.serializedBytes() as Data {
-            try? await socket.send(data)
+            await sendInOrder(socket, data)
         }
         return true
+    }
+
+    /// Sends after every frame handed over before it, so that frames leave in the order the
+    /// actor sent them: the relay handles them in that order (section 7.4), which the
+    /// confirmation of a DeleteBlob relies on.
+    private func sendInOrder(_ socket: any RelaySocket, _ data: Data) async {
+        let previous = sendTail
+        let sending = Task {
+            await previous?.value
+            try? await socket.send(data)
+        }
+        sendTail = sending
+        await sending.value
     }
 
     private func first(_ kind: Request.Kind, _ key: Data) -> Request? {
@@ -546,8 +662,32 @@ public actor Transport {
         let request = first(kind, key)
         if let request {
             requests.removeAll { $0 === request }
+            answered(request)
         }
         return request
+    }
+
+    private func takeOldest(_ kind: Request.Kind) -> Request? {
+        guard let request = requests.first(where: { $0.kind == kind && !$0.waiting }) else {
+            return nil
+        }
+        requests.removeAll { $0 === request }
+        answered(request)
+        return request
+    }
+
+    private func nextSequence() -> Int {
+        sequence += 1
+        return sequence
+    }
+
+    /// Forgets the DeleteBlob frames that left before the request: the relay handled them,
+    /// as it handles the frames of a connection in order (section 33.2).
+    private func answered(_ request: Request) {
+        for (deletion, sentAfter) in deletionsSent where request.sequence > sentAfter {
+            deletionsSent[deletion] = nil
+            try? client.confirmBlobDeletion(uploader: deletion.uploader, blobID: deletion.blobID)
+        }
     }
 
     private func waitUntilReady() async throws {
@@ -569,6 +709,11 @@ public actor Transport {
     private func endConnection() throws {
         backOffs.forEach { $0.cancel() }
         backOffs = []
+        transfers.values.forEach { $0.task.cancel() }
+        transfers = [:]
+        deletionsSent = [:]
+        generation += 1
+        sendTail = nil
         let open = requests
         requests = []
         socket = nil
@@ -577,13 +722,255 @@ public actor Transport {
         holders = 0
         unblock()
         for request in open {
-            if let upload = request.upload, request.waiting {
-                try client.dropRefusedUpload(upload)
-            }
             if request.fetches {
                 request.settle(.failure(ConnectionLost()))
             }
+            request.settleBlob(.failure(ConnectionLost()))
         }
+        for request in open {
+            if let upload = request.upload, request.waiting {
+                try client.dropRefusedUpload(upload)
+            }
+        }
+    }
+
+    // MARK: Files (part 3)
+
+    /// Sends the saved DeleteBlob frames that this connection has not sent; none to a relay
+    /// without blob frames (section 30.1).
+    private func sendBlobDeletions() async {
+        guard let socket, blobMaxBytes > 0, let deletions = try? client.blobDeletions() else {
+            return
+        }
+        let sentOn = generation
+        for deletion in deletions where sentOn == generation {
+            let key = BlobKey(uploader: deletion.uploader, blobID: deletion.blobID)
+            guard deletionsSent[key] == nil else {
+                continue
+            }
+            deletionsSent[key] = sequence
+            var frame = Sotto_ClientFrame()
+            frame.deleteBlob.blobID = deletion.blobID
+            frame.deleteBlob.uploader = deletion.uploader
+            if let data = try? frame.serializedBytes() as Data {
+                await sendInOrder(socket, data)
+            }
+        }
+    }
+
+    /// The last row of the table of section 33.4, after a LoggedIn.
+    private func endTransfersBeyondTheRelay() throws {
+        for upload in try client.uploads() {
+            let result: FileError? = blobMaxBytes == 0 ? .filesUnsupported : upload.length > blobMaxBytes ? .fileTooLarge : nil
+            if let result {
+                try client.giveUpUpload(upload, result: result.result)
+                report(upload, .notSent, result: result.result)
+            }
+        }
+        if blobMaxBytes == 0, receivedFiles != nil {
+            let result = FileError.filesUnsupported.result
+            for file in try client.downloads() {
+                eventSink.yield(.file(Self.update(file, try client.failDownload(file.position, result: result), result: result)))
+            }
+        }
+    }
+
+    /// Starts a task for every upload and download of the store that has none.
+    private func startTransfers() {
+        guard ready, blobMaxBytes > 0 else {
+            return
+        }
+        for upload in (try? client.uploads()) ?? [] {
+            track(.upload(upload.blobID)) { try await $0.upload(upload) }
+        }
+        guard let folder = receivedFiles else {
+            return
+        }
+        for file in (try? client.downloads()) ?? [] {
+            track(.download(file.position)) { try await $0.download(file, into: folder) }
+        }
+    }
+
+    private func track(_ key: TransferKey, _ body: @escaping @Sendable (isolated Transport) async throws -> Void) {
+        guard transfers[key] == nil else {
+            return
+        }
+        transferCount += 1
+        let id = transferCount
+        let task = Task {
+            do {
+                try await body(self)
+            } catch is ConnectionLost {
+            } catch is CancellationError {
+            } catch {
+                eventSink.yield(.transferFailed(reason: "\(error)"))
+            }
+            if transfers[key]?.id == id {
+                transfers[key] = nil
+            }
+        }
+        transfers[key] = (id, task)
+    }
+
+    /// Steps 3 to 5 of section 33.2. A connection that ends cancels the task, and the next
+    /// login starts it again from the stored length (section 33.4).
+    private func upload(_ upload: UploadRow) async throws {
+        var start = Sotto_ClientFrame()
+        start.startBlob.blobID = upload.blobID
+        start.startBlob.recipient = upload.contact
+        start.startBlob.length = UInt32(upload.length)
+        var reply = try await askBlob(start)
+        var sentAPiece = false
+        while true {
+            switch reply {
+            case .refused(let error):
+                if sentAPiece && error.code == .notFound {
+                    sentAPiece = false
+                    reply = try await askBlob(start)
+                    continue
+                }
+                try await notSent(upload, Self.errorName(error.code.rawValue))
+                return
+            case .stored(let stored):
+                let length = Int(stored.storedLength)
+                guard length <= upload.length else {
+                    try await notSent(upload, CryptoError.badBlob.result)
+                    return
+                }
+                guard try client.hasUpload(upload.blobID) else {
+                    return
+                }
+                report(upload, .sending, done: length)
+                if length == upload.length {
+                    try await sendAttachment(upload)
+                    return
+                }
+                var put = Sotto_ClientFrame()
+                put.putBlob.blobID = upload.blobID
+                put.putBlob.offset = UInt32(length)
+                put.putBlob.data = try client.readUpload(upload.blobID, offset: length, length: Frames.blobChunkBytes)
+                reply = try await askBlob(put)
+                sentAPiece = true
+            case .data:
+                throw Violation(code: Self.protocolViolation)
+            }
+        }
+    }
+
+    /// Step 5 of section 33.2: the message of the file, after START when needed.
+    private func sendAttachment(_ upload: UploadRow) async throws {
+        let outgoing: Outgoing
+        do {
+            var bundle: PrekeyBundle?
+            if try !client.hasSession(upload.contact) {
+                bundle = try await fetchBundle(upload.contact)
+                try Task.checkCancellation()
+            }
+            outgoing = try client.sendAttachment(upload, bundle: bundle)
+        } catch let error as RefusedError {
+            return try await notSent(upload, error.result)
+        } catch let error as CryptoError {
+            return try await notSent(upload, error.result)
+        } catch let error as SessionError {
+            return try await notSent(upload, error.result)
+        }
+        await request(Request(frame: Self.sendFrame(outgoing)))
+    }
+
+    private func notSent(_ upload: UploadRow, _ result: String) async throws {
+        try client.giveUpUpload(upload, result: result)
+        report(upload, .notSent, result: result)
+        await sendBlobDeletions()
+    }
+
+    /// Steps 2 to 6 of section 33.3 from the bytes the store holds.
+    private func download(_ file: FileRow, into folder: URL) async throws {
+        let attachment = file.attachment
+        let length = Blob.blobLength(Int(attachment.size))
+        var held = file.held
+        try client.beginDownload(file.position)
+        while held < length {
+            let asked = min(Frames.blobChunkBytes, length - held)
+            var fetch = Sotto_ClientFrame()
+            fetch.fetchBlob.blobID = attachment.blobID
+            fetch.fetchBlob.uploader = file.contact
+            fetch.fetchBlob.offset = UInt32(held)
+            fetch.fetchBlob.length = UInt32(asked)
+            let reply = try await askBlob(fetch)
+            guard try client.store.file(file.position) != nil else {
+                return
+            }
+            switch reply {
+            case .refused:
+                return try await notReceived(file, FileError.blobGone.result)
+            case .data(let data):
+                let isAnotherRange = data.offset != held || data.blobID != attachment.blobID || data.uploader != file.contact
+                guard !isAnotherRange, data.data.count == asked else {
+                    return try await notReceived(file, CryptoError.badBlob.result)
+                }
+                try client.saveDownloadPiece(file.position, data.data)
+                held += asked
+                eventSink.yield(.file(Self.update(file, .receiving, done: held, total: length)))
+            case .stored:
+                throw Violation(code: Self.protocolViolation)
+            }
+        }
+
+        let path: URL
+        do {
+            path = try client.finishDownload(file.position, folder: folder)
+        } catch CryptoError.badBlob {
+            return try await notReceived(file, CryptoError.badBlob.result)
+        } catch StoreError.system(let failed, let code) {
+            eventSink.yield(.transferFailed(reason: "cannot write \(failed): \(String(cString: strerror(code)))"))
+            return
+        }
+        eventSink.yield(.file(Self.update(file, .received, path: path)))
+        await sendBlobDeletions()
+    }
+
+    private func notReceived(_ file: FileRow, _ result: String) async throws {
+        let state = try client.failDownload(file.position, result: result)
+        eventSink.yield(.file(Self.update(file, state, result: result)))
+        await sendBlobDeletions()
+    }
+
+    /// Sends a blob frame and waits for its answer; an Error with an action Back off is
+    /// handled by the frame being sent again, so only a Stop comes back as `.refused`.
+    ///
+    /// - Throws: `ConnectionLost` when there is no connection or it ended before the answer.
+    private func askBlob(_ frame: Sotto_ClientFrame) async throws -> BlobReply {
+        let request = Request(frame: frame)
+        request.asksBlob = true
+        guard await self.request(request) else {
+            throw ConnectionLost()
+        }
+        let reply = try await withCheckedThrowingContinuation { request.waitBlob($0) }
+        try Task.checkCancellation()
+        return reply
+    }
+
+    private func report(_ upload: UploadRow, _ state: FileState, done: Int = 0, result: String? = nil) {
+        eventSink.yield(.file(FileUpdate(
+            contact: upload.contact, blobID: upload.blobID, messageID: upload.messageID,
+            fileName: upload.attachment.fileName, state: state, done: done, total: upload.length, result: result
+        )))
+    }
+
+    static func update(_ file: FileRow, _ state: FileState, done: Int = 0, total: Int = 0, result: String? = nil, path: URL? = nil) -> FileUpdate {
+        FileUpdate(
+            contact: file.contact, blobID: file.attachment.blobID, messageID: file.messageID,
+            fileName: file.attachment.fileName, state: state, done: done, total: total, result: result, path: path
+        )
+    }
+
+    /// The longest start of `name` that is at most `limit` bytes of UTF-8.
+    static func cut(_ name: String, to limit: Int) -> String {
+        var cut = ""
+        for scalar in name.unicodeScalars where cut.utf8.count + String(scalar).utf8.count <= limit {
+            cut.unicodeScalars.append(scalar)
+        }
+        return cut
     }
 
     private func receiveBinary(_ socket: any RelaySocket) async throws -> Data {
@@ -606,17 +993,21 @@ public actor Transport {
 /// A frame that waits for its answer on the connection that sent it.
 private final class Request {
     enum Kind {
-        case send, fetch, upload
+        case send, fetch, upload, blobWrite, blobRead
     }
 
     let frame: Sotto_ClientFrame
     var upload: PrekeyUpload?
     var fetches = false
+    var asksBlob = false
+    var sequence = 0
     var refusals = 0
     var waiting = false
     var holdsOthers = false
     var outcome: Result<PrekeyBundle, Error>?
     var waiter: CheckedContinuation<PrekeyBundle, Error>?
+    var blobOutcome: Result<BlobReply, Error>?
+    var blobWaiter: CheckedContinuation<BlobReply, Error>?
 
     init(frame: Sotto_ClientFrame) {
         self.frame = frame
@@ -626,6 +1017,8 @@ private final class Request {
         switch frame.frame {
         case .send: .send
         case .fetchBundle: .fetch
+        case .startBlob, .putBlob: .blobWrite
+        case .fetchBlob: .blobRead
         default: .upload
         }
     }
@@ -634,6 +1027,9 @@ private final class Request {
         switch frame.frame {
         case .send(let send): send.messageID
         case .fetchBundle(let fetch): fetch.identity
+        case .startBlob(let start): start.blobID
+        case .putBlob(let put): put.blobID
+        case .fetchBlob(let fetch): fetch.blobID + fetch.uploader
         default: Data()
         }
     }
@@ -647,6 +1043,42 @@ private final class Request {
         waiter?.resume(with: result)
         waiter = nil
     }
+
+    /// Settles the answer of a blob frame once, like `settle`.
+    func settleBlob(_ result: Result<BlobReply, Error>) {
+        guard asksBlob, blobOutcome == nil else {
+            return
+        }
+        blobOutcome = result
+        blobWaiter?.resume(with: result)
+        blobWaiter = nil
+    }
+
+    func waitBlob(_ waiter: CheckedContinuation<BlobReply, Error>) {
+        if let blobOutcome {
+            waiter.resume(with: blobOutcome)
+        } else {
+            blobWaiter = waiter
+        }
+    }
+}
+
+/// The answer to a StartBlob, a PutBlob or a FetchBlob; `.refused` is an Error whose action
+/// is Stop.
+private enum BlobReply {
+    case stored(Sotto_BlobStored)
+    case data(Sotto_BlobData)
+    case refused(Sotto_Error)
+}
+
+private enum TransferKey: Hashable {
+    case upload(Data)
+    case download(Int64)
+}
+
+private struct BlobKey: Hashable {
+    let uploader: Data
+    let blobID: Data
 }
 
 private struct Violation: Error {

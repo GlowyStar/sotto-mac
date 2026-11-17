@@ -5,7 +5,9 @@ import Testing
 /// `sotto-relay` of the Python project next to this repository, run as a subprocess on a
 /// free port with its database in a folder of its own.
 final class RealRelay: @unchecked Sendable {
-    static let python = URL(fileURLWithPath: #filePath)
+    /// The Python project: `SOTTO_PYTHON_PROJECT` when it is set, else `../../python/sotto`.
+    static let python = ProcessInfo.processInfo.environment["SOTTO_PYTHON_PROJECT"].map { URL(fileURLWithPath: $0) }
+        ?? URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent("../../python/sotto").standardizedFileURL
     static let executable = python.appendingPathComponent(".venv/bin/sotto-relay")
@@ -81,7 +83,7 @@ final class RealRelay: @unchecked Sendable {
 @Suite(
     .serialized,
     .timeLimit(.minutes(1)),
-    .enabled(if: RealRelay.isAvailable, "the Python project with its .venv is not at ../../python/sotto")
+    .enabled(if: RealRelay.isAvailable, "the Python project with its .venv is not at ../../python/sotto or SOTTO_PYTHON_PROJECT")
 )
 struct RealRelayTests {
     let folder = Folder()
@@ -135,6 +137,31 @@ struct RealRelayTests {
         #expect(try await nextText(bob.transport) == (key("alice"), marker))
         await bob.stop()
         #expect(try traces() == 0)
+    }
+
+    @Test func fileBetweenTwoSwiftClientsIsReceivedWholeAndItsBlobLeavesTheRelay() async throws {
+        let relay = try await RealRelay()
+        defer { relay.stop() }
+        try befriend(folder, "alice", "bob")
+        let received = folder.url.appendingPathComponent("received")
+        let bob = try await run(folder.open("bob"), URLSessionDialer(), url: relay.url, receivedFiles: received)
+        let alice = try await run(folder.open("alice"), URLSessionDialer(), url: relay.url)
+        try await until { try await isRegistered(bob.transport) }
+
+        let content = Data((0..<300_000).map { UInt8(truncatingIfNeeded: $0 &* 7) })
+        let path = folder.url.appendingPathComponent("photo.jpg")
+        try content.write(to: path)
+        try await alice.transport.sendFile(key("bob"), file: path, caption: "a photo")
+        #expect(try await nextFile(alice.transport) { $0.state == .sent || $0.state == .notSent }.state == .sent)
+        let saved = try await nextFile(bob.transport) { $0.state == .received || $0.state == .notReceived }
+        #expect(try Data(contentsOf: saved.path!) == content)
+        #expect(saved.path?.deletingLastPathComponent().path == received.path)
+        // The DeleteBlob of Bob is handled before the answer to his next request.
+        try await bob.transport.sendText(key("alice"), "thanks")
+        try await until { try await outbox(bob.transport).isEmpty }
+        try await until { try await bob.transport.withClient { try $0.blobDeletions().isEmpty } }
+        await alice.stop()
+        await bob.stop()
     }
 
     @Test func replacedLoginIsClosedWith4001AndStops() async throws {

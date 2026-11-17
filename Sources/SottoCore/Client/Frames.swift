@@ -14,6 +14,9 @@ public enum Frames {
     public static let messageIDLength = 16
     public static let maxFrameBytes = 65536
     public static let maxPayloadBytes = maxFrameBytes - 64
+    public static let blobIDLength = 16
+    /// BLOB_CHUNK_BYTES of section 31.7.
+    public static let blobChunkBytes = maxFrameBytes - 128
 
     /// Returns the frame that a binary message from the relay holds.
     public static func readServerFrame(_ message: Data) throws -> Sotto_ServerFrame.OneOf_Frame {
@@ -46,8 +49,20 @@ public enum Frames {
         case .error(let error):
             try requireLength("message_id", error.messageID, 0, messageIDLength)
             try requireLength("identity", error.identity, 0, Identity.keyLength)
+            try requireLength("blob_id", error.blobID, 0, blobIDLength)
             if !error.messageID.isEmpty && !error.identity.isEmpty {
                 throw FrameError.malformed("the error names a Send and a FetchBundle")
+            }
+            if !error.messageID.isEmpty && !error.blobID.isEmpty {
+                throw FrameError.malformed("the error names a Send and a blob")
+            }
+        case .blobStored(let stored):
+            try requireLength("blob_id", stored.blobID, blobIDLength)
+        case .blobData(let data):
+            try requireLength("blob_id", data.blobID, blobIDLength)
+            try requireLength("uploader", data.uploader, Identity.keyLength)
+            guard data.data.count <= blobChunkBytes else {
+                throw FrameError.malformed("data is \(data.data.count) bytes, above \(blobChunkBytes)")
             }
         case .loggedIn, .bundleStored:
             break

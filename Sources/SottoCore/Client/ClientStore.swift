@@ -82,6 +82,42 @@ public struct PendingText: Equatable, Sendable {
     public var failure: String?
 }
 
+/// The states of a file of section 33.5, as the store keeps them.
+public enum FileState: String, Codable, Sendable {
+    case sending
+    case sent
+    case notSent = "not sent"
+    case offered
+    case receiving
+    case received
+    case notReceived = "could not be received"
+    case notAvailable = "not available"
+}
+
+/// A file being uploaded with the bytes of its blob (section 33.2, step 2); `messageID` is
+/// the id that its message takes.
+public struct UploadRow: Equatable, Sendable {
+    public var blobID: Data
+    public var contact: Data
+    public var messageID: Data
+    public var attachment: Sotto_Attachment
+    public var length: Int
+}
+
+/// An attachment of the message log, sent or received: `held` bytes of its blob are
+/// downloaded, `savedAs` is the path of a received file, `result` why it failed.
+public struct FileRow: Equatable, Sendable {
+    public var position: Int64
+    public var contact: Data
+    public var incoming: Bool
+    public var messageID: Data
+    public var attachment: Sotto_Attachment
+    public var state: FileState
+    public var held: Int
+    public var savedAs: String?
+    public var result: String?
+}
+
 /// The client store of docs/protocol.md, section 22: the one connection to the SQLite file
 /// of one identity. Every write runs inside `transaction`.
 public final class ClientStore {
@@ -266,6 +302,67 @@ public final class ClientStore {
         return refusals
     }
 
+    public func uploads() throws -> [UploadRow] {
+        try query("SELECT blob_id, contact, message_id, attachment, length(blob) FROM uploads ORDER BY position").map {
+            UploadRow(
+                blobID: $0[0].data!,
+                contact: $0[1].data!,
+                messageID: $0[2].data!,
+                attachment: try Sotto_Attachment(serializedBytes: $0[3].data!),
+                length: Int($0[4].integer!)
+            )
+        }
+    }
+
+    /// Bytes of the blob of an upload, read by range without loading the whole blob.
+    public func readUpload(_ blobID: Data, offset: Int, length: Int) throws -> Data {
+        guard let row = try query("SELECT position FROM uploads WHERE blob_id = ?", [.blob(blobID)]).first else {
+            throw InvalidInputError(message: "the store holds no upload of this blob")
+        }
+        return try readBlob("uploads", "blob", row: row[0].integer!, offset: offset, length: length)
+    }
+
+    public func hasUpload(_ blobID: Data) throws -> Bool {
+        try !query("SELECT 1 FROM uploads WHERE blob_id = ?", [.blob(blobID)]).isEmpty
+    }
+
+    /// The files of the logged message at a position: none, or the one it carries.
+    public func files(ofMessageAt position: Int64) throws -> [FileRow] {
+        try query(
+            Schema.readFiles + " WHERE (contact, direction, message_id) IN (SELECT contact, direction, message_id FROM messages WHERE position = ?)",
+            [.integer(position)]
+        ).map(Self.file)
+    }
+
+    public func files() throws -> [FileRow] {
+        try query(Schema.readFiles + " ORDER BY position").map(Self.file)
+    }
+
+    public func file(_ position: Int64) throws -> FileRow? {
+        try query(Schema.readFiles + " WHERE position = ?", [.integer(position)]).first.map(Self.file)
+    }
+
+    /// The file that a message of the client's own carries, if it carries one.
+    public func fileOfMessage(_ messageID: Data) throws -> FileRow? {
+        try query(Schema.readFiles + " WHERE direction = 'out' AND message_id = ?", [.blob(messageID)])
+            .first.map(Self.file)
+    }
+
+    /// The bytes of a download, as many as its blob has room for.
+    public func downloaded(_ position: Int64) throws -> Data {
+        guard let row = try query("SELECT bytes FROM downloads WHERE position = ?", [.integer(position)]).first else {
+            throw InvalidInputError(message: "the store holds no download at this position")
+        }
+        return row[0].data ?? Data()
+    }
+
+    /// The DeleteBlob frames to send, as (uploader, blob id).
+    public func blobDeletions() throws -> [(uploader: Data, blobID: Data)] {
+        try query("SELECT uploader, blob_id FROM blob_deletions ORDER BY uploader, blob_id").map {
+            (uploader: $0[0].data!, blobID: $0[1].data!)
+        }
+    }
+
     // MARK: Writes
 
     public func saveIdentity(_ identity: StoredIdentity) throws {
@@ -347,9 +444,19 @@ public final class ClientStore {
         )
         try change("DELETE FROM messages WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM pending WHERE contact = ?", [.blob(contact)])
+        try change("DELETE FROM downloads WHERE position IN (SELECT position FROM files WHERE contact = ?)", [.blob(contact)])
+        try change("DELETE FROM files WHERE contact = ?", [.blob(contact)])
     }
 
     public func deleteMessage(_ position: Int64) throws {
+        try change(
+            "DELETE FROM downloads WHERE position IN (SELECT f.position FROM files f JOIN messages m USING (contact, direction, message_id) WHERE m.position = ?)",
+            [.integer(position)]
+        )
+        try change(
+            "DELETE FROM files WHERE (contact, direction, message_id) IN (SELECT contact, direction, message_id FROM messages WHERE position = ?)",
+            [.integer(position)]
+        )
         try change(
             "DELETE FROM refusals WHERE message_id IN (SELECT message_id FROM messages WHERE position = ?)",
             [.integer(position)]
@@ -456,7 +563,99 @@ public final class ClientStore {
         )
     }
 
+    public func addUpload(_ upload: UploadRow, blob: Data) throws {
+        try change(
+            "INSERT INTO uploads (blob_id, contact, message_id, attachment, blob) VALUES (?, ?, ?, ?, ?)",
+            [.blob(upload.blobID), .blob(upload.contact), .blob(upload.messageID), .blob(try upload.attachment.serializedBytes()), .blob(blob)]
+        )
+    }
+
+    public func deleteUpload(_ blobID: Data) throws {
+        try change("DELETE FROM uploads WHERE blob_id = ?", [.blob(blobID)])
+    }
+
+    @discardableResult
+    public func addFile(
+        _ contact: Data, incoming: Bool, messageID: Data, attachment: Sotto_Attachment, state: FileState
+    ) throws -> Int64 {
+        try change(
+            "INSERT INTO files (contact, direction, message_id, attachment, state) VALUES (?, ?, ?, ?, ?) RETURNING position",
+            [
+                .blob(contact), .text((incoming ? MessageDirection.incoming : .outgoing).rawValue), .blob(messageID),
+                .blob(try attachment.serializedBytes()), .text(state.rawValue),
+            ]
+        )[0][0].integer!
+    }
+
+    /// Sets the state of a file and drops its downloaded bytes.
+    public func setFileState(_ position: Int64, _ state: FileState, savedAs: String? = nil, result: String? = nil) throws {
+        try change(
+            "UPDATE files SET state = ?, saved_as = ?, result = ?, held = 0 WHERE position = ?",
+            [.text(state.rawValue), savedAs.map(SQLValue.text) ?? .null, result.map(SQLValue.text) ?? .null, .integer(position)]
+        )
+        try change("DELETE FROM downloads WHERE position = ?", [.integer(position)])
+    }
+
+    /// Makes room for the `length` bytes of a download, unless it has its room.
+    public func beginDownload(_ position: Int64, length: Int) throws {
+        try change("UPDATE files SET state = ? WHERE position = ?", [.text(FileState.receiving.rawValue), .integer(position)])
+        try change(
+            "INSERT INTO downloads VALUES (?, zeroblob(?)) ON CONFLICT DO NOTHING", [.integer(position), .integer(Int64(length))]
+        )
+    }
+
+    /// Writes `data` at the held length of a download and counts it as held.
+    public func addDownloadPiece(_ position: Int64, _ data: Data) throws {
+        guard let held = try change("SELECT held FROM files WHERE position = ?", [.integer(position)]).first?[0].integer else {
+            throw InvalidInputError(message: "the store holds no file at this position")
+        }
+        try writeBlob("downloads", "bytes", row: position, offset: Int(held), data)
+        try change("UPDATE files SET held = held + ? WHERE position = ?", [.integer(Int64(data.count)), .integer(position)])
+    }
+
+    public func addBlobDeletion(uploader: Data, blobID: Data) throws {
+        try change("INSERT INTO blob_deletions VALUES (?, ?) ON CONFLICT DO NOTHING", [.blob(uploader), .blob(blobID)])
+    }
+
+    public func deleteBlobDeletion(uploader: Data, blobID: Data) throws {
+        try change("DELETE FROM blob_deletions WHERE uploader = ? AND blob_id = ?", [.blob(uploader), .blob(blobID)])
+    }
+
     // MARK: SQLite
+
+    private func readBlob(_ table: String, _ column: String, row: Int64, offset: Int, length: Int) throws -> Data {
+        var handle: OpaquePointer?
+        defer { sqlite3_blob_close(handle) }
+        var code = sqlite3_blob_open(connection, "main", table, column, row, 0, &handle)
+        guard code == SQLITE_OK else {
+            throw Self.sqliteError(connection, code)
+        }
+        let count = max(0, min(length, Int(sqlite3_blob_bytes(handle)) - offset))
+        var data = Data(count: count)
+        if count > 0 {
+            code = data.withUnsafeMutableBytes { sqlite3_blob_read(handle, $0.baseAddress, Int32(count), Int32(offset)) }
+            guard code == SQLITE_OK else {
+                throw Self.sqliteError(connection, code)
+            }
+        }
+        return data
+    }
+
+    private func writeBlob(_ table: String, _ column: String, row: Int64, offset: Int, _ data: Data) throws {
+        guard isInTransaction else {
+            throw StoreError.writeOutsideTransaction
+        }
+        var handle: OpaquePointer?
+        defer { sqlite3_blob_close(handle) }
+        var code = sqlite3_blob_open(connection, "main", table, column, row, 1, &handle)
+        guard code == SQLITE_OK else {
+            throw Self.sqliteError(connection, code)
+        }
+        code = data.withUnsafeBytes { sqlite3_blob_write(handle, $0.baseAddress, Int32($0.count), Int32(offset)) }
+        guard code == SQLITE_OK else {
+            throw Self.sqliteError(connection, code)
+        }
+    }
 
     var isInTransaction: Bool {
         sqlite3_get_autocommit(connection) == 0
@@ -544,6 +743,20 @@ public final class ClientStore {
             associatedData: row[2].data!,
             state: try JSONDecoder().decode(RatchetState.self, from: Data(row[3].text!.utf8)),
             initialHeader: row[4].data
+        )
+    }
+
+    private static func file(_ row: [SQLValue]) throws -> FileRow {
+        FileRow(
+            position: row[0].integer!,
+            contact: row[1].data!,
+            incoming: row[2].text! == MessageDirection.incoming.rawValue,
+            messageID: row[3].data!,
+            attachment: try Sotto_Attachment(serializedBytes: row[4].data ?? Data()),
+            state: FileState(rawValue: row[5].text!) ?? .notAvailable,
+            held: Int(row[6].integer!),
+            savedAs: row[7].text,
+            result: row[8].text
         )
     }
 
@@ -704,7 +917,47 @@ private enum Schema {
             result TEXT NOT NULL
         ) STRICT, WITHOUT ROWID
         """,
+        // Part 3 (section 33.7). `message_id` of an upload is the id its message takes.
+        """
+        CREATE TABLE IF NOT EXISTS uploads (
+            position INTEGER PRIMARY KEY,
+            blob_id BLOB NOT NULL UNIQUE,
+            contact BLOB NOT NULL,
+            message_id BLOB NOT NULL,
+            attachment BLOB NOT NULL,
+            blob BLOB NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS files (
+            position INTEGER PRIMARY KEY,
+            contact BLOB NOT NULL,
+            direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+            message_id BLOB NOT NULL,
+            attachment BLOB NOT NULL,
+            state TEXT NOT NULL,
+            held INTEGER NOT NULL DEFAULT 0,
+            saved_as TEXT,
+            result TEXT
+        ) STRICT
+        """,
+        // Apart from `files`, so that counting a piece in `held` does not rewrite the blob.
+        """
+        CREATE TABLE IF NOT EXISTS downloads (
+            position INTEGER PRIMARY KEY,
+            bytes BLOB NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS blob_deletions (
+            uploader BLOB NOT NULL,
+            blob_id BLOB NOT NULL,
+            PRIMARY KEY (uploader, blob_id)
+        ) STRICT, WITHOUT ROWID
+        """,
     ]
+
+    static let readFiles = "SELECT position, contact, direction, message_id, attachment, state, held, saved_as, result FROM files"
 
     static let addSession = """
         INSERT INTO sessions (contact, position, associated_data, state, initial_header)

@@ -19,7 +19,8 @@ struct Cut: Error {}
 
 /// A relay in the test process that keeps the rules a client meets: Hello, Login and
 /// LoggedIn, uploads, fetches with one handout, queues with Stored, Deliver and Ack, one live
-/// connection per identity. Its edits stand where the reference puts its tampering proxy.
+/// connection per identity, and the blob frames of section 31. Its edits stand where the
+/// reference puts its tampering proxy.
 actor ScriptedRelay: RelayDialer {
     typealias ToClient = @Sendable (Link, SocketMessage) throws -> [Outbound]
     typealias ToRelay = @Sendable (Link, SocketMessage) throws -> SocketMessage?
@@ -36,6 +37,27 @@ actor ScriptedRelay: RelayDialer {
     private var online: [Data: Int] = [:]
     private var bundles: [Data: Sotto_UploadBundle] = [:]
     private(set) var queues: [Data: [Sotto_Deliver]] = [:]
+    /// The blobs by uploader and blob id, with the bytes stored so far.
+    private(set) var blobs: [Data: StoredBlob] = [:]
+    private var blobMaxBytes = 1 << 26
+    private var blobQuotaBytes = 1 << 27
+
+    struct StoredBlob {
+        var recipient: Data
+        var length: Int
+        var bytes: Data
+    }
+
+    /// What the next LoggedIn announces and what a StartBlob may take; 0 serves no blobs.
+    func setBlobLimits(maxBytes: Int, quotaBytes: Int = 1 << 27) {
+        blobMaxBytes = maxBytes
+        blobQuotaBytes = quotaBytes
+    }
+
+    /// Drops the bytes of a blob, as expiry does.
+    func expireBlobs() {
+        blobs = [:]
+    }
 
     func edit(toClient: @escaping ToClient) {
         self.toClient = toClient
@@ -141,6 +163,7 @@ actor ScriptedRelay: RelayDialer {
             identities[number] = login.identityKey
             online[login.identityKey] = number
             answer.loggedIn.oneTimePrekeyCount = UInt32(bundles[login.identityKey]?.oneTimePrekeys.count ?? 0)
+            answer.loggedIn.blobMaxBytes = UInt32(blobMaxBytes)
             await push(number, answer)
             for deliver in queues[login.identityKey] ?? [] {
                 await push(number, deliverFrame(deliver))
@@ -198,6 +221,64 @@ actor ScriptedRelay: RelayDialer {
                 queues[identity]?.removeAll { $0.sender == reference.sender && $0.messageID == reference.messageID }
             }
             return
+        case .startBlob(let start):
+            let key = identities[number]! + start.blobID
+            if let held = blobs[key] {
+                answer.blobStored.blobID = start.blobID
+                answer.blobStored.storedLength = UInt32(held.bytes.count)
+                break
+            }
+            answer.error.blobID = start.blobID
+            let uploaded = blobs.filter { $0.key.prefix(32) == identities[number]! }.map(\.value.length).reduce(0, +)
+            if Int(start.length) > blobMaxBytes {
+                answer.error.code = .blobTooLarge
+            } else if bundles[start.recipient] == nil {
+                answer.error.code = .unknownRecipient
+            } else if uploaded + Int(start.length) > blobQuotaBytes {
+                answer.error.code = .quotaFull
+            } else {
+                blobs[key] = StoredBlob(recipient: start.recipient, length: Int(start.length), bytes: Data())
+                answer.blobStored.blobID = start.blobID
+            }
+        case .putBlob(let put):
+            let key = identities[number]! + put.blobID
+            guard var held = blobs[key] else {
+                answer.error.code = .notFound
+                answer.error.blobID = put.blobID
+                break
+            }
+            if Int(put.offset) == held.bytes.count {
+                guard held.bytes.count + put.data.count <= held.length else {
+                    answer.error.code = .blobTooLarge
+                    answer.error.blobID = put.blobID
+                    break
+                }
+                held.bytes += put.data
+                blobs[key] = held
+            }
+            answer.blobStored.blobID = put.blobID
+            answer.blobStored.storedLength = UInt32(held.bytes.count)
+        case .fetchBlob(let fetch):
+            guard let held = blobs[fetch.uploader + fetch.blobID], held.recipient == identities[number],
+                  held.bytes.count == held.length
+            else {
+                answer.error.code = .notFound
+                answer.error.blobID = fetch.blobID
+                answer.error.identity = fetch.uploader
+                break
+            }
+            let from = min(Int(fetch.offset), held.length)
+            answer.blobData.blobID = fetch.blobID
+            answer.blobData.uploader = fetch.uploader
+            answer.blobData.offset = fetch.offset
+            answer.blobData.data = held.bytes.subdata(in: from..<min(from + Int(fetch.length), held.length))
+        case .deleteBlob(let delete):
+            let identity = identities[number]!
+            if let held = blobs[delete.uploader + delete.blobID],
+               delete.uploader == identity || (held.recipient == identity && held.bytes.count == held.length) {
+                blobs[delete.uploader + delete.blobID] = nil
+            }
+            return
         }
         await push(number, answer)
     }
@@ -243,6 +324,10 @@ actor ScriptedRelay: RelayDialer {
         case .fetchBundle: "fetch_bundle"
         case .send: "send"
         case .ack: "ack"
+        case .startBlob: "start_blob"
+        case .putBlob: "put_blob"
+        case .fetchBlob: "fetch_blob"
+        case .deleteBlob: "delete_blob"
         case nil: "none"
         }
     }
@@ -389,9 +474,10 @@ func makeTransport(
     _ client: sending Client,
     _ dialer: any RelayDialer,
     url: String = "ws://127.0.0.1:9/ws",
-    scale: Double = 0.02
+    scale: Double = 0.02,
+    receivedFiles: URL? = nil
 ) throws -> Transport {
-    try Transport(client: client, url: url, dialer: dialer, jitter: { _ in 0 }, sleep: { seconds in
+    try Transport(client: client, url: url, receivedFiles: receivedFiles, dialer: dialer, jitter: { _ in 0 }, sleep: { seconds in
         try await Task.sleep(nanoseconds: UInt64(seconds * scale * 1_000_000_000))
     })
 }
@@ -468,8 +554,14 @@ final class Running: Sendable {
     }
 }
 
-func run(_ client: sending Client, _ dialer: any RelayDialer, url: String = "ws://127.0.0.1:9/ws", scale: Double = 0.02) async throws -> Running {
-    try await Running(makeTransport(client, dialer, url: url, scale: scale)).connected()
+func run(
+    _ client: sending Client,
+    _ dialer: any RelayDialer,
+    url: String = "ws://127.0.0.1:9/ws",
+    scale: Double = 0.02,
+    receivedFiles: URL? = nil
+) async throws -> Running {
+    try await Running(makeTransport(client, dialer, url: url, scale: scale, receivedFiles: receivedFiles)).connected()
 }
 
 func isRegistered(_ transport: Transport) async throws -> Bool {
@@ -502,6 +594,8 @@ func serverKind(_ message: SocketMessage) -> String? {
     case .stored: "stored"
     case .deliver: "deliver"
     case .error: "error"
+    case .blobStored: "blob_stored"
+    case .blobData: "blob_data"
     }
 }
 

@@ -11,7 +11,8 @@ client sends texts while the app runs and while it is closed; the app is started
 receive the rest. Then the app sends with `--send`: once to the running Python client, once
 right after a restart, and once while the Python client is not connected, which prints that
 text when it connects again. The store is read back with `Sotto --dump` and drawn with
-`Sotto --snapshot`. Exits 0 only if every text arrived; stops everything it started.
+`Sotto --snapshot`. Notifications are turned off in the app's own `app.json` before the first
+start, so that a run posts nothing on the screen. Exits 0 only if every text arrived; stops everything it started.
 
 The data lives in a temporary directory that is removed at the end; `--keep DIR` keeps the
 stores, the relay database, the app log and the pictures in DIR instead.
@@ -105,6 +106,9 @@ async def run(run_folder: Path) -> None:
             await command(SOTTO, "--data-dir", python_dir, "add", "app", app_id)
             await command(sotto_mac, "--data-dir", app_dir, "add", "python", python_id)
             print(f"ok   identities made: python {python_id[:8]}..., app {app_id[:8]}...")
+            notes = app_dir / "app.json"
+            notes.write_text(json.dumps({"settings": {"notifications": False}}))
+            notes.chmod(0o600)
 
             apps.append(App(app_dir, url, log))
             await until(
@@ -186,6 +190,10 @@ async def run(run_folder: Path) -> None:
         if code != 0 or missing:
             raise CheckFailed(f"Sotto --snapshot exited {code}, missing {missing}: {errors}")
         print(f"ok   the store is drawn in {pictures}")
+        settings = json.loads((app_dir / "app.json").read_text()).get("settings", {})
+        if settings.get("notifications") is not False:
+            raise CheckFailed(f"the app turned notifications on again: {settings}")
+        print("ok   notifications stayed off for the whole run")
     finally:
         for app in apps:
             app.stop()

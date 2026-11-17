@@ -2,7 +2,7 @@
 
 Every case holds bytes that the Python code built and what the Python code makes of them:
 server frames read by `read_server_frame`, peer messages read by `parse_envelope`, padded
-plaintexts read by `decode_text` and texts padded by `encode_text`. Run it with the
+plaintexts read by `decode_content` and texts padded by `encode_text`. Run it with the
 Python of a sotto checkout, the one whose `.venv` has the package installed:
 
     ../../python/sotto/.venv/bin/python scripts/make-wire-fixtures.py
@@ -15,13 +15,16 @@ from pathlib import Path
 from sotto.client.envelope import (
     MAX_TEXT_BYTES,
     CryptoError,
-    decode_text,
+    decode_content,
     encode_text,
     pad,
     parse_envelope,
 )
 from sotto.client.transport import MalformedFrameError, UnknownVersionError, read_server_frame
 from sotto.proto.sotto_pb2 import (
+    Attachment,
+    BlobData,
+    BlobStored,
     Bundle,
     BundleStored,
     Content,
@@ -109,6 +112,21 @@ def named_server_frames() -> list[tuple[str, bytes]]:
         ("error naming a send and a fetch", ServerFrame(error=Error(code=1, message_id=message_id, identity=sender))),
         ("error with a message id of 5", ServerFrame(error=Error(message_id=bytes(5)))),
         ("error with an identity of 31", ServerFrame(error=Error(identity=bytes(31)))),
+        # Part 3, after the seeds of the random cases.
+        ("logged in with blobs", ServerFrame(logged_in=LoggedIn(one_time_prekey_count=5, blob_max_bytes=104883216))),
+        ("blob stored", ServerFrame(blob_stored=BlobStored(blob_id=bytes(range(16)), stored_length=65408))),
+        ("blob stored with a blob id of 15", ServerFrame(blob_stored=BlobStored(blob_id=bytes(15)))),
+        ("empty blob stored", ServerFrame(blob_stored=BlobStored())),
+        ("blob data", ServerFrame(blob_data=BlobData(blob_id=bytes(16), uploader=sender, offset=7, data=b"abc"))),
+        ("empty blob data", ServerFrame(blob_data=BlobData(blob_id=bytes(16), uploader=sender, offset=9))),
+        ("blob data with the largest data", ServerFrame(blob_data=BlobData(blob_id=bytes(16), uploader=sender, data=bytes(65408)))),
+        ("blob data one byte too long", ServerFrame(blob_data=BlobData(blob_id=bytes(16), uploader=sender, data=bytes(65409)))),
+        ("blob data with an uploader of 31", ServerFrame(blob_data=BlobData(blob_id=bytes(16), uploader=bytes(31)))),
+        ("blob data with a blob id of 17", ServerFrame(blob_data=BlobData(blob_id=bytes(17), uploader=sender))),
+        ("error for a blob write", ServerFrame(error=Error(code=8, blob_id=bytes(16)))),
+        ("error for a blob fetch", ServerFrame(error=Error(code=5, blob_id=bytes(16), identity=sender))),
+        ("error with a blob id of 15", ServerFrame(error=Error(code=9, blob_id=bytes(15)))),
+        ("error naming a send and a blob", ServerFrame(error=Error(code=3, message_id=message_id, blob_id=bytes(16)))),
     ]
     named = [(name, serialized(frame)) for name, frame in frames]
     hello = serialized(frames[0][1])
@@ -236,8 +254,25 @@ def peer_message_case(name: str, payload: bytes) -> dict[str, object]:
     return case
 
 
+# A Content whose attachment has the three keys and the file name ff fe.
+NAME_NOT_UTF8 = b"\x12\x4a\x0a\x10" + bytes(16) + b"\x12\x10" + bytes(16) + b"\x22\x20" + bytes(32) + b"\x32\x02\xff\xfe"
+
+
+def attachment(**changes: object) -> bytes:
+    fields: dict[str, object] = {"blob_id": bytes(16), "key": bytes(16), "size": 5, "digest": bytes(32)}
+    fields.update(changes)
+    return pad(Content(attachment=Attachment(**fields)).SerializeToString())
+
+
 def named_padded() -> list[tuple[str, bytes]]:
     return [
+        ("attachment", attachment(media_type="text/plain", file_name="a.txt", caption="hi", width=1, height=2)),
+        ("attachment of the largest file", attachment(size=104857600)),
+        ("attachment above the largest file", attachment(size=104857601)),
+        ("attachment with a blob id of 15", attachment(blob_id=bytes(15))),
+        ("attachment with a key of 17", attachment(key=bytes(17))),
+        ("attachment without a digest", attachment(digest=b"")),
+        ("attachment whose name is not utf-8", pad(NAME_NOT_UTF8)),
         ("text", encode_text("hello")),
         ("empty text", encode_text("")),
         ("text behind extra zero bytes", encode_text("hi") + bytes(300)),
@@ -266,9 +301,14 @@ def random_padded(rng: random.Random) -> list[tuple[str, bytes]]:
 def padded_case(name: str, padded: bytes) -> dict[str, object]:
     case: dict[str, object] = {"name": name, "hex": padded.hex()}
     try:
-        case["text"] = decode_text(padded)
+        content = decode_content(padded)
     except CryptoError as error:
         case["error"] = error.result
+        return case
+    if isinstance(content, str):
+        case["text"] = content
+    else:
+        case["attachment"] = content.SerializeToString(deterministic=True).hex()
     return case
 
 

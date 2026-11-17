@@ -22,6 +22,21 @@ public enum SessionError: Error, Equatable, Sendable {
     }
 }
 
+/// A named local result of part 3 (section 33.6) that is not BAD_BLOB.
+public enum FileError: Error, Equatable, Sendable {
+    case filesUnsupported
+    case fileTooLarge
+    case blobGone
+
+    public var result: String {
+        switch self {
+        case .filesUnsupported: "FILES_UNSUPPORTED"
+        case .fileTooLarge: "FILE_TOO_LARGE"
+        case .blobGone: "BLOB_GONE"
+        }
+    }
+}
+
 /// The id of the client's own identity is never a contact (section 16.1).
 public struct OwnIdentityError: Error, Equatable, Sendable {
     public init() {}
@@ -40,19 +55,22 @@ public struct Delivered: Equatable, Sendable {
     }
 }
 
-/// What a Deliver gives: a text to show, or the named result of section 24.2. `missing` is
-/// the GAP of section 20.3: the skipped keys that this message removed without use.
+/// What a Deliver gives: a text or an attachment to show, or the named result of section
+/// 24.2. `missing` is the GAP of section 20.3: the skipped keys that this message removed
+/// without use.
 public struct Received: Equatable, Sendable {
     public var ack: Bool
     public var text: String?
     public var result: String?
     public var missing: Int
+    public var attachment: Sotto_Attachment?
 
-    public init(ack: Bool, text: String?, result: String?, missing: Int = 0) {
+    public init(ack: Bool, text: String?, result: String?, missing: Int = 0, attachment: Sotto_Attachment? = nil) {
         self.ack = ack
         self.text = text
         self.result = result
         self.missing = missing
+        self.attachment = attachment
     }
 }
 
@@ -285,6 +303,251 @@ public final class Client {
     }
 
     func send(_ contact: Data, paddedPlaintext: Data, text: String, bundle: PrekeyBundle?, pending: Int64? = nil) throws -> Outgoing {
+        let sealed = try seal(contact, paddedPlaintext, bundle: bundle, messageID: randomBytes(Frames.messageIDLength))
+        try store.transaction {
+            try commit(sealed)
+            try store.logMessage(contact, direction: .outgoing, messageID: sealed.outgoing.messageID, text: text)
+            if let pending {
+                try store.removePending(pending)
+            }
+        }
+        return sealed.outgoing
+    }
+
+    /// The Sends that the relay has not confirmed, to be sent again as they are.
+    public func outbox() throws -> [Outgoing] {
+        try store.outbox().map { Outgoing(messageID: $0.messageID, recipient: $0.recipient, payload: $0.payload) }
+    }
+
+    /// Removes the outbox row of a Send that the relay answered with Stored; a file that the
+    /// message carries counts as sent (section 33.2, step 6) and is returned.
+    @discardableResult
+    public func confirmStored(_ messageID: Data) throws -> FileRow? {
+        try store.transaction {
+            try store.removeFromOutbox(messageID)
+            guard let file = try store.fileOfMessage(messageID) else {
+                return nil
+            }
+            try store.setFileState(file.position, .sent)
+            return file
+        }
+    }
+
+    /// Removes the outbox row of a Send that the relay refused with an action Stop and notes
+    /// the result next to the logged message; a file that the message carries is not sent,
+    /// and the DeleteBlob of its blob is saved (section 33.2). The file is returned.
+    @discardableResult
+    public func dropRefusedSend(_ messageID: Data, result: String) throws -> FileRow? {
+        try store.transaction {
+            try store.removeFromOutbox(messageID)
+            try store.addRefusal(messageID, result: result)
+            guard let file = try store.fileOfMessage(messageID) else {
+                return nil
+            }
+            try store.setFileState(file.position, .notSent, result: result)
+            try store.addBlobDeletion(uploader: identityKey, blobID: file.attachment.blobID)
+            return file
+        }
+    }
+
+    // MARK: Files (part 3)
+
+    /// The checks of section 33.1, in their order.
+    ///
+    /// - Throws: `SessionError.notAContact`, `FileError.filesUnsupported` or
+    ///   `FileError.fileTooLarge`.
+    public func checkFile(_ contact: Data, size: Int, blobMaxBytes: Int) throws {
+        guard try store.isContact(contact) else {
+            throw SessionError.notAContact
+        }
+        guard blobMaxBytes > 0 else {
+            throw FileError.filesUnsupported
+        }
+        guard size <= Blob.maxFileBytes, Blob.blobLength(size) <= blobMaxBytes else {
+            throw FileError.fileTooLarge
+        }
+    }
+
+    /// Steps 1 and 2 of section 33.2: the checks, the blob and the upload, committed with
+    /// the file and the logged message (its text is the caption) that the upload becomes.
+    ///
+    /// - Throws: a check of section 33.1; `InvalidInputError` when a name, media type or
+    ///   caption is beyond its limit of section 32.1.
+    public func startUpload(
+        _ contact: Data,
+        file: Data,
+        blobMaxBytes: Int,
+        fileName: String = "",
+        mediaType: String = "",
+        caption: String = ""
+    ) throws -> UploadRow {
+        try checkFile(contact, size: file.count, blobMaxBytes: blobMaxBytes)
+        let blobID = randomBytes(Frames.blobIDLength)
+        let fileKey = randomBytes(Blob.fileKeyLength)
+        let blob = try Blob.encrypt(file, fileKey: fileKey, nonce: randomBytes(Blob.nonceLength))
+        var attachment = Sotto_Attachment()
+        attachment.blobID = blobID
+        attachment.key = fileKey
+        attachment.size = UInt32(file.count)
+        attachment.digest = Blob.digest(blob)
+        attachment.mediaType = mediaType
+        attachment.fileName = fileName
+        attachment.caption = caption
+        _ = try Envelope.encodeAttachment(attachment)
+
+        let upload = UploadRow(
+            blobID: blobID, contact: contact, messageID: randomBytes(Frames.messageIDLength),
+            attachment: attachment, length: blob.count
+        )
+        try store.transaction {
+            try store.addUpload(upload, blob: blob)
+            try store.addFile(contact, incoming: false, messageID: upload.messageID, attachment: attachment, state: .sending)
+            try store.logMessage(contact, direction: .outgoing, messageID: upload.messageID, text: caption)
+        }
+        return upload
+    }
+
+    public func uploads() throws -> [UploadRow] {
+        try store.uploads()
+    }
+
+    public func hasUpload(_ blobID: Data) throws -> Bool {
+        try store.hasUpload(blobID)
+    }
+
+    /// Deletes a logged message, with its file, inside the caller's transaction: an upload of
+    /// it ends as a cancel of section 33.2 and its blob, like the blob of a received file not
+    /// downloaded yet, is saved for a DeleteBlob.
+    public func deleteMessage(_ position: Int64) throws {
+        try saveBlobDeletions(try store.files(ofMessageAt: position))
+        try store.deleteMessage(position)
+    }
+
+    /// Deletes the logged and the pending messages of a contact, with their files, as
+    /// `deleteMessage` does, inside the caller's transaction.
+    public func deleteMessages(_ contact: Data) throws {
+        try saveBlobDeletions(try store.files().filter { $0.contact == contact })
+        try store.deleteMessages(contact)
+    }
+
+    private func saveBlobDeletions(_ files: [FileRow]) throws {
+        for file in files {
+            let blobID = file.attachment.blobID
+            if !file.incoming, try store.hasUpload(blobID) {
+                try store.deleteUpload(blobID)
+                try store.addBlobDeletion(uploader: identityKey, blobID: blobID)
+            } else if file.incoming, file.state == .offered || file.state == .receiving {
+                try store.addBlobDeletion(uploader: file.contact, blobID: blobID)
+            }
+        }
+    }
+
+    public func readUpload(_ blobID: Data, offset: Int, length: Int) throws -> Data {
+        try store.readUpload(blobID, offset: offset, length: length)
+    }
+
+    /// Step 5 of section 33.2: SEND of the attachment, which deletes the upload.
+    ///
+    /// - Throws: `SessionError.notAContact`; `CryptoError` when START failed.
+    public func sendAttachment(_ upload: UploadRow, bundle: PrekeyBundle? = nil) throws -> Outgoing {
+        guard try store.hasUpload(upload.blobID) else {
+            throw InvalidInputError(message: "the upload was given up")
+        }
+        let sealed = try seal(
+            upload.contact, Envelope.encodeAttachment(upload.attachment), bundle: bundle, messageID: upload.messageID
+        )
+        try store.transaction {
+            try commit(sealed)
+            try store.deleteUpload(upload.blobID)
+        }
+        return sealed.outgoing
+    }
+
+    /// Ends an upload as not sent: deletes it, saves the DeleteBlob of its blob and notes the
+    /// result on its file, which is returned.
+    @discardableResult
+    public func giveUpUpload(_ upload: UploadRow, result: String) throws -> FileRow? {
+        try store.transaction {
+            try store.deleteUpload(upload.blobID)
+            try store.addBlobDeletion(uploader: identityKey, blobID: upload.blobID)
+            guard let file = try store.fileOfMessage(upload.messageID) else {
+                return nil
+            }
+            try store.setFileState(file.position, .notSent, result: result)
+            return file
+        }
+    }
+
+    /// The received files whose blob is not downloaded yet: offered or receiving.
+    public func downloads() throws -> [FileRow] {
+        try store.files().filter { $0.incoming && ($0.state == .offered || $0.state == .receiving) }
+    }
+
+    /// Makes room for the blob of a received file in the store (section 33.3).
+    public func beginDownload(_ position: Int64) throws {
+        let file = try file(position)
+        try store.transaction { try store.beginDownload(position, length: Blob.blobLength(Int(file.attachment.size))) }
+    }
+
+    /// Saves bytes of a blob at its held length together with the new length.
+    public func saveDownloadPiece(_ position: Int64, _ data: Data) throws {
+        try store.transaction { try store.addDownloadPiece(position, data) }
+    }
+
+    /// Step 4 of section 33.3: opens the blob, writes the file into the folder, drops the
+    /// downloaded bytes and saves the DeleteBlob of the blob.
+    ///
+    /// - Throws: `CryptoError.badBlob` when the blob does not open (section 29.7), and
+    ///   nothing is written; `StoreError.system` when the file cannot be written, and the
+    ///   downloaded bytes stay.
+    public func finishDownload(_ position: Int64, folder: URL) throws -> URL {
+        let file = try file(position)
+        let attachment = file.attachment
+        let data = try Blob.open(
+            store.downloaded(position), fileKey: attachment.key, size: Int(attachment.size), digest: attachment.digest
+        )
+        let path = try ReceivedFiles.save(data, named: attachment.fileName, into: folder)
+        try store.transaction {
+            try store.setFileState(position, .received, savedAs: path.path)
+            try store.addBlobDeletion(uploader: file.contact, blobID: attachment.blobID)
+        }
+        return path
+    }
+
+    /// Steps 5 and 6 of section 33.3: drops the downloaded bytes, and a BAD_BLOB also saves
+    /// the DeleteBlob of the blob; returns the state that the file takes.
+    @discardableResult
+    public func failDownload(_ position: Int64, result: String) throws -> FileState {
+        let file = try file(position)
+        let state: FileState = result == FileError.blobGone.result ? .notAvailable : .notReceived
+        try store.transaction {
+            try store.setFileState(position, state, result: result)
+            if result == CryptoError.badBlob.result {
+                try store.addBlobDeletion(uploader: file.contact, blobID: file.attachment.blobID)
+            }
+        }
+        return state
+    }
+
+    /// The DeleteBlob frames still to send.
+    public func blobDeletions() throws -> [(uploader: Data, blobID: Data)] {
+        try store.blobDeletions()
+    }
+
+    /// Forgets a DeleteBlob that the relay handled (section 33.2, last paragraph).
+    public func confirmBlobDeletion(uploader: Data, blobID: Data) throws {
+        try store.transaction { try store.deleteBlobDeletion(uploader: uploader, blobID: blobID) }
+    }
+
+    private func file(_ position: Int64) throws -> FileRow {
+        guard let file = try store.file(position) else {
+            throw InvalidInputError(message: "the store holds no file at position \(position)")
+        }
+        return file
+    }
+
+    /// L1 of section 20.2 up to the commit: START when the contact has no session.
+    private func seal(_ contact: Data, _ paddedPlaintext: Data, bundle: PrekeyBundle?, messageID: Data) throws -> Sealed {
         guard try store.isContact(contact) else {
             throw SessionError.notAContact
         }
@@ -296,7 +559,6 @@ public final class Client {
         }
 
         let session = try store.sessions(contact)[0]
-        let messageID = randomBytes(Frames.messageIDLength)
         let encrypted = try Ratchet.encrypt(
             session.state,
             paddedPlaintext: paddedPlaintext,
@@ -311,35 +573,14 @@ public final class Client {
             envelope.initialHeader = try Sotto_InitialHeader(serializedBytes: initialHeader)
         }
         let outgoing = Outgoing(messageID: messageID, recipient: contact, payload: try envelope.serializedBytes())
-
-        try store.transaction {
-            try store.advanceSession(session.sessionID, state: encrypted.state)
-            try store.addToOutbox(OutboxRow(messageID: messageID, recipient: contact, payload: outgoing.payload))
-            try store.logMessage(contact, direction: .outgoing, messageID: messageID, text: text)
-            if let pending {
-                try store.removePending(pending)
-            }
-        }
-        return outgoing
+        return Sealed(outgoing: outgoing, sessionID: session.sessionID, state: encrypted.state)
     }
 
-    /// The Sends that the relay has not confirmed, to be sent again as they are.
-    public func outbox() throws -> [Outgoing] {
-        try store.outbox().map { Outgoing(messageID: $0.messageID, recipient: $0.recipient, payload: $0.payload) }
-    }
-
-    /// Removes the outbox row of a Send that the relay answered with Stored.
-    public func confirmStored(_ messageID: Data) throws {
-        try store.transaction { try store.removeFromOutbox(messageID) }
-    }
-
-    /// Removes the outbox row of a Send that the relay refused with an action Stop and notes
-    /// the result next to the logged message.
-    public func dropRefusedSend(_ messageID: Data, result: String) throws {
-        try store.transaction {
-            try store.removeFromOutbox(messageID)
-            try store.addRefusal(messageID, result: result)
-        }
+    /// The chain advance and the outbox row of SEND, inside the caller's transaction.
+    private func commit(_ sealed: Sealed) throws {
+        let outgoing = sealed.outgoing
+        try store.advanceSession(sealed.sessionID, state: sealed.state)
+        try store.addToOutbox(OutboxRow(messageID: outgoing.messageID, recipient: outgoing.recipient, payload: outgoing.payload))
     }
 
     /// Runs the row of section 20.2 that a Deliver falls into. Every named result is
@@ -441,7 +682,7 @@ public final class Client {
             signedPrekeyPrivateKey: signedPrekeyPrivateKey
         )
         let decrypted = try decrypt(state, agreement.associatedData, delivered, envelope)
-        let (text, result) = try Self.readContent(decrypted.paddedPlaintext)
+        let content = Self.readContent(decrypted.paddedPlaintext)
 
         let dropped = try store.transaction {
             let sessionID = try store.addSession(
@@ -463,26 +704,37 @@ public final class Client {
             if pin == nil {
                 try store.setPin(delivered.sender, identityDHKey: initialHeader.identityDhKey)
             }
-            try saveReceived(delivered, text)
+            try saveReceived(delivered, content)
             return dropped
         }
-        return Received(ack: true, text: text, result: result, missing: decrypted.purged + dropped)
+        return Received(
+            ack: true, text: content.text, result: content.result, missing: decrypted.purged + dropped,
+            attachment: content.attachment
+        )
     }
 
     /// ACCEPT of section 20.3.
     private func accept(_ delivered: Delivered, _ session: StoredSession, _ decrypted: Decrypted) throws -> Received {
-        let (text, result) = try Self.readContent(decrypted.paddedPlaintext)
+        let content = Self.readContent(decrypted.paddedPlaintext)
         try store.transaction {
             try store.acceptOnSession(session.sessionID, state: decrypted.state)
-            try saveReceived(delivered, text)
+            try saveReceived(delivered, content)
         }
-        return Received(ack: true, text: text, result: result, missing: decrypted.purged)
+        return Received(
+            ack: true, text: content.text, result: content.result, missing: decrypted.purged,
+            attachment: content.attachment
+        )
     }
 
-    private func saveReceived(_ delivered: Delivered, _ text: String?) throws {
+    private func saveReceived(_ delivered: Delivered, _ content: Content) throws {
         try store.addSeenID(sender: delivered.sender, messageID: delivered.messageID, seenAt: now())
-        if let text {
+        if let text = content.text ?? content.attachment?.caption {
             try store.logMessage(delivered.sender, direction: .incoming, messageID: delivered.messageID, text: text)
+        }
+        if let attachment = content.attachment {
+            try store.addFile(
+                delivered.sender, incoming: true, messageID: delivered.messageID, attachment: attachment, state: .offered
+            )
         }
     }
 
@@ -568,12 +820,29 @@ public final class Client {
         }
     }
 
-    /// The text of a message that decrypted, or the result that it has none (section 20.3).
-    private static func readContent(_ paddedPlaintext: Data) throws -> (text: String?, result: String?) {
+    /// The text or the attachment of a message that decrypted, or the result that it has
+    /// neither (section 20.3).
+    private static func readContent(_ paddedPlaintext: Data) -> Content {
         do {
-            return (try Envelope.decodeText(paddedPlaintext), nil)
-        } catch let error as EnvelopeError {
-            return (nil, error.result)
+            switch try Envelope.decodeContent(paddedPlaintext) {
+            case .text(let text): return Content(text: text)
+            case .attachment(let attachment): return Content(attachment: attachment)
+            }
+        } catch {
+            return Content(result: (error as? EnvelopeError)?.result ?? EnvelopeError.badContent.result)
         }
     }
+}
+
+private struct Content {
+    var text: String?
+    var attachment: Sotto_Attachment?
+    var result: String?
+}
+
+/// A message encrypted on the head session of a contact, not yet committed.
+private struct Sealed {
+    let outgoing: Outgoing
+    let sessionID: Int64
+    let state: RatchetState
 }

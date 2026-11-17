@@ -22,11 +22,13 @@ private func outcome(of frame: Sotto_ServerFrame.OneOf_Frame) throws -> (kind: S
     case .stored(let stored): ("stored", try stored.serializedBytes())
     case .deliver(let deliver): ("deliver", try deliver.serializedBytes())
     case .error(let error): ("error", try error.serializedBytes())
+    case .blobStored(let stored): ("blob_stored", try stored.serializedBytes())
+    case .blobData(let data): ("blob_data", try data.serializedBytes())
     }
 }
 
 @Test func serverFramesAreReadAsThePythonClientReadsThem() throws {
-    for fixture in try cases("server_frames", count: 347) {
+    for fixture in try cases("server_frames", count: 361) {
         let name = fixture["name"] as! String
         let message = Data(hex: fixture["hex"] as! String)
         do {
@@ -56,11 +58,15 @@ private func outcome(of frame: Sotto_ServerFrame.OneOf_Frame) throws -> (kind: S
 }
 
 @Test func paddedPlaintextsAreDecodedAsThePythonClientDecodesThem() throws {
-    for fixture in try cases("padded", count: 114) {
+    for fixture in try cases("padded", count: 121) {
         let name = fixture["name"] as! String
         do {
-            let text = try Envelope.decodeText(Data(hex: fixture["hex"] as! String))
-            #expect(fixture["text"] as? String == text, "\(name)")
+            switch try Envelope.decodeContent(Data(hex: fixture["hex"] as! String)) {
+            case .text(let text):
+                #expect(fixture["text"] as? String == text, "\(name)")
+            case .attachment(let attachment):
+                #expect(fixture["attachment"] as? String == (try attachment.serializedBytes() as Data).hex, "\(name)")
+            }
         } catch {
             #expect(fixture["error"] as? String == (error as? EnvelopeError)?.result, "\(name)")
         }

@@ -39,6 +39,8 @@ public nonisolated enum Sotto_ErrorCode: SwiftProtobuf.Enum, Swift.CaseIterable 
   case notFound // = 5
   case badBundle // = 6
   case identityKeyMismatch // = 7
+  case quotaFull // = 8
+  case blobTooLarge // = 9
   case UNRECOGNIZED(Int)
 
   public init() {
@@ -55,6 +57,8 @@ public nonisolated enum Sotto_ErrorCode: SwiftProtobuf.Enum, Swift.CaseIterable 
     case 5: self = .notFound
     case 6: self = .badBundle
     case 7: self = .identityKeyMismatch
+    case 8: self = .quotaFull
+    case 9: self = .blobTooLarge
     default: self = .UNRECOGNIZED(rawValue)
     }
   }
@@ -69,6 +73,8 @@ public nonisolated enum Sotto_ErrorCode: SwiftProtobuf.Enum, Swift.CaseIterable 
     case .notFound: return 5
     case .badBundle: return 6
     case .identityKeyMismatch: return 7
+    case .quotaFull: return 8
+    case .blobTooLarge: return 9
     case .UNRECOGNIZED(let i): return i
     }
   }
@@ -83,6 +89,8 @@ public nonisolated enum Sotto_ErrorCode: SwiftProtobuf.Enum, Swift.CaseIterable 
     .notFound,
     .badBundle,
     .identityKeyMismatch,
+    .quotaFull,
+    .blobTooLarge,
   ]
 
 }
@@ -135,6 +143,38 @@ public nonisolated struct Sotto_ClientFrame: Sendable {
     set {frame = .ack(newValue)}
   }
 
+  public var startBlob: Sotto_StartBlob {
+    get {
+      if case .startBlob(let v)? = frame {return v}
+      return Sotto_StartBlob()
+    }
+    set {frame = .startBlob(newValue)}
+  }
+
+  public var putBlob: Sotto_PutBlob {
+    get {
+      if case .putBlob(let v)? = frame {return v}
+      return Sotto_PutBlob()
+    }
+    set {frame = .putBlob(newValue)}
+  }
+
+  public var fetchBlob: Sotto_FetchBlob {
+    get {
+      if case .fetchBlob(let v)? = frame {return v}
+      return Sotto_FetchBlob()
+    }
+    set {frame = .fetchBlob(newValue)}
+  }
+
+  public var deleteBlob: Sotto_DeleteBlob {
+    get {
+      if case .deleteBlob(let v)? = frame {return v}
+      return Sotto_DeleteBlob()
+    }
+    set {frame = .deleteBlob(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Frame: Equatable, Sendable {
@@ -143,6 +183,10 @@ public nonisolated struct Sotto_ClientFrame: Sendable {
     case fetchBundle(Sotto_FetchBundle)
     case send(Sotto_Send)
     case ack(Sotto_Ack)
+    case startBlob(Sotto_StartBlob)
+    case putBlob(Sotto_PutBlob)
+    case fetchBlob(Sotto_FetchBlob)
+    case deleteBlob(Sotto_DeleteBlob)
 
   }
 
@@ -213,6 +257,22 @@ public nonisolated struct Sotto_ServerFrame: Sendable {
     set {frame = .error(newValue)}
   }
 
+  public var blobStored: Sotto_BlobStored {
+    get {
+      if case .blobStored(let v)? = frame {return v}
+      return Sotto_BlobStored()
+    }
+    set {frame = .blobStored(newValue)}
+  }
+
+  public var blobData: Sotto_BlobData {
+    get {
+      if case .blobData(let v)? = frame {return v}
+      return Sotto_BlobData()
+    }
+    set {frame = .blobData(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Frame: Equatable, Sendable {
@@ -223,6 +283,8 @@ public nonisolated struct Sotto_ServerFrame: Sendable {
     case stored(Sotto_Stored)
     case deliver(Sotto_Deliver)
     case error(Sotto_Error)
+    case blobStored(Sotto_BlobStored)
+    case blobData(Sotto_BlobData)
 
   }
 
@@ -265,6 +327,8 @@ public nonisolated struct Sotto_LoggedIn: Sendable {
   // methods supported on all messages.
 
   public var oneTimePrekeyCount: UInt32 = 0
+
+  public var blobMaxBytes: UInt32 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -470,6 +534,105 @@ public nonisolated struct Sotto_Error: Sendable {
 
   public var identity: Data = Data()
 
+  public var blobID: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// The blob frames of part 3 (section 30).
+public nonisolated struct Sotto_StartBlob: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var blobID: Data = Data()
+
+  public var recipient: Data = Data()
+
+  public var length: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Sotto_PutBlob: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var blobID: Data = Data()
+
+  public var offset: UInt32 = 0
+
+  public var data: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Sotto_BlobStored: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var blobID: Data = Data()
+
+  public var storedLength: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Sotto_FetchBlob: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var blobID: Data = Data()
+
+  public var uploader: Data = Data()
+
+  public var offset: UInt32 = 0
+
+  public var length: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Sotto_BlobData: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var blobID: Data = Data()
+
+  public var uploader: Data = Data()
+
+  public var offset: UInt32 = 0
+
+  public var data: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Sotto_DeleteBlob: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var blobID: Data = Data()
+
+  public var uploader: Data = Data()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -548,12 +711,52 @@ public nonisolated struct Sotto_Content: Sendable {
     set {body = .text(newValue)}
   }
 
+  public var attachment: Sotto_Attachment {
+    get {
+      if case .attachment(let v)? = body {return v}
+      return Sotto_Attachment()
+    }
+    set {body = .attachment(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Body: Equatable, Sendable {
     case text(String)
+    case attachment(Sotto_Attachment)
 
   }
+
+  public init() {}
+}
+
+/// A file that travels as a blob of the relay (section 32).
+public nonisolated struct Sotto_Attachment: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var blobID: Data = Data()
+
+  public var key: Data = Data()
+
+  public var size: UInt32 = 0
+
+  public var digest: Data = Data()
+
+  public var mediaType: String = String()
+
+  public var fileName: String = String()
+
+  public var width: UInt32 = 0
+
+  public var height: UInt32 = 0
+
+  public var thumbnail: Data = Data()
+
+  public var caption: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 }
@@ -563,12 +766,12 @@ public nonisolated struct Sotto_Content: Sendable {
 fileprivate nonisolated let _protobuf_package = "sotto"
 
 nonisolated extension Sotto_ErrorCode: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ERROR_CODE_UNSPECIFIED\0\u{1}UNKNOWN_RECIPIENT\0\u{1}QUEUE_FULL\0\u{1}STORAGE_FULL\0\u{1}RATE_LIMITED\0\u{1}NOT_FOUND\0\u{1}BAD_BUNDLE\0\u{1}IDENTITY_KEY_MISMATCH\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ERROR_CODE_UNSPECIFIED\0\u{1}UNKNOWN_RECIPIENT\0\u{1}QUEUE_FULL\0\u{1}STORAGE_FULL\0\u{1}RATE_LIMITED\0\u{1}NOT_FOUND\0\u{1}BAD_BUNDLE\0\u{1}IDENTITY_KEY_MISMATCH\0\u{1}QUOTA_FULL\0\u{1}BLOB_TOO_LARGE\0")
 }
 
 nonisolated extension Sotto_ClientFrame: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientFrame"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}login\0\u{3}upload_bundle\0\u{3}fetch_bundle\0\u{1}send\0\u{1}ack\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}login\0\u{3}upload_bundle\0\u{3}fetch_bundle\0\u{1}send\0\u{1}ack\0\u{3}start_blob\0\u{3}put_blob\0\u{3}fetch_blob\0\u{3}delete_blob\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -641,6 +844,58 @@ nonisolated extension Sotto_ClientFrame: SwiftProtobuf.Message, SwiftProtobuf._M
           self.frame = .ack(v)
         }
       }()
+      case 6: try {
+        var v: Sotto_StartBlob?
+        var hadOneofValue = false
+        if let current = self.frame {
+          hadOneofValue = true
+          if case .startBlob(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.frame = .startBlob(v)
+        }
+      }()
+      case 7: try {
+        var v: Sotto_PutBlob?
+        var hadOneofValue = false
+        if let current = self.frame {
+          hadOneofValue = true
+          if case .putBlob(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.frame = .putBlob(v)
+        }
+      }()
+      case 8: try {
+        var v: Sotto_FetchBlob?
+        var hadOneofValue = false
+        if let current = self.frame {
+          hadOneofValue = true
+          if case .fetchBlob(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.frame = .fetchBlob(v)
+        }
+      }()
+      case 9: try {
+        var v: Sotto_DeleteBlob?
+        var hadOneofValue = false
+        if let current = self.frame {
+          hadOneofValue = true
+          if case .deleteBlob(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.frame = .deleteBlob(v)
+        }
+      }()
       default: break
       }
     }
@@ -672,6 +927,22 @@ nonisolated extension Sotto_ClientFrame: SwiftProtobuf.Message, SwiftProtobuf._M
       guard case .ack(let v)? = self.frame else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
     }()
+    case .startBlob?: try {
+      guard case .startBlob(let v)? = self.frame else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    }()
+    case .putBlob?: try {
+      guard case .putBlob(let v)? = self.frame else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+    }()
+    case .fetchBlob?: try {
+      guard case .fetchBlob(let v)? = self.frame else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+    }()
+    case .deleteBlob?: try {
+      guard case .deleteBlob(let v)? = self.frame else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -686,7 +957,7 @@ nonisolated extension Sotto_ClientFrame: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Sotto_ServerFrame: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerFrame"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}hello\0\u{3}logged_in\0\u{3}bundle_stored\0\u{1}bundle\0\u{1}stored\0\u{1}deliver\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}hello\0\u{3}logged_in\0\u{3}bundle_stored\0\u{1}bundle\0\u{1}stored\0\u{1}deliver\0\u{1}error\0\u{3}blob_stored\0\u{3}blob_data\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -785,6 +1056,32 @@ nonisolated extension Sotto_ServerFrame: SwiftProtobuf.Message, SwiftProtobuf._M
           self.frame = .error(v)
         }
       }()
+      case 8: try {
+        var v: Sotto_BlobStored?
+        var hadOneofValue = false
+        if let current = self.frame {
+          hadOneofValue = true
+          if case .blobStored(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.frame = .blobStored(v)
+        }
+      }()
+      case 9: try {
+        var v: Sotto_BlobData?
+        var hadOneofValue = false
+        if let current = self.frame {
+          hadOneofValue = true
+          if case .blobData(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.frame = .blobData(v)
+        }
+      }()
       default: break
       }
     }
@@ -823,6 +1120,14 @@ nonisolated extension Sotto_ServerFrame: SwiftProtobuf.Message, SwiftProtobuf._M
     case .error?: try {
       guard case .error(let v)? = self.frame else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+    }()
+    case .blobStored?: try {
+      guard case .blobStored(let v)? = self.frame else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+    }()
+    case .blobData?: try {
+      guard case .blobData(let v)? = self.frame else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
     }()
     case nil: break
     }
@@ -913,7 +1218,7 @@ nonisolated extension Sotto_Login: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 nonisolated extension Sotto_LoggedIn: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LoggedIn"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}one_time_prekey_count\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}one_time_prekey_count\0\u{3}blob_max_bytes\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -922,6 +1227,7 @@ nonisolated extension Sotto_LoggedIn: SwiftProtobuf.Message, SwiftProtobuf._Mess
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularUInt32Field(value: &self.oneTimePrekeyCount) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.blobMaxBytes) }()
       default: break
       }
     }
@@ -931,11 +1237,15 @@ nonisolated extension Sotto_LoggedIn: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if self.oneTimePrekeyCount != 0 {
       try visitor.visitSingularUInt32Field(value: self.oneTimePrekeyCount, fieldNumber: 1)
     }
+    if self.blobMaxBytes != 0 {
+      try visitor.visitSingularUInt32Field(value: self.blobMaxBytes, fieldNumber: 2)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Sotto_LoggedIn, rhs: Sotto_LoggedIn) -> Bool {
     if lhs.oneTimePrekeyCount != rhs.oneTimePrekeyCount {return false}
+    if lhs.blobMaxBytes != rhs.blobMaxBytes {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1356,7 +1666,7 @@ nonisolated extension Sotto_Ack: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 nonisolated extension Sotto_Error: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Error"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}code\0\u{3}message_id\0\u{1}identity\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}code\0\u{3}message_id\0\u{1}identity\0\u{3}blob_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1367,6 +1677,7 @@ nonisolated extension Sotto_Error: SwiftProtobuf.Message, SwiftProtobuf._Message
       case 1: try { try decoder.decodeSingularEnumField(value: &self.code) }()
       case 2: try { try decoder.decodeSingularBytesField(value: &self.messageID) }()
       case 3: try { try decoder.decodeSingularBytesField(value: &self.identity) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.blobID) }()
       default: break
       }
     }
@@ -1382,6 +1693,9 @@ nonisolated extension Sotto_Error: SwiftProtobuf.Message, SwiftProtobuf._Message
     if !self.identity.isEmpty {
       try visitor.visitSingularBytesField(value: self.identity, fieldNumber: 3)
     }
+    if !self.blobID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.blobID, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1389,6 +1703,247 @@ nonisolated extension Sotto_Error: SwiftProtobuf.Message, SwiftProtobuf._Message
     if lhs.code != rhs.code {return false}
     if lhs.messageID != rhs.messageID {return false}
     if lhs.identity != rhs.identity {return false}
+    if lhs.blobID != rhs.blobID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_StartBlob: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".StartBlob"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}blob_id\0\u{1}recipient\0\u{1}length\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.blobID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.recipient) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.length) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.blobID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.blobID, fieldNumber: 1)
+    }
+    if !self.recipient.isEmpty {
+      try visitor.visitSingularBytesField(value: self.recipient, fieldNumber: 2)
+    }
+    if self.length != 0 {
+      try visitor.visitSingularUInt32Field(value: self.length, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_StartBlob, rhs: Sotto_StartBlob) -> Bool {
+    if lhs.blobID != rhs.blobID {return false}
+    if lhs.recipient != rhs.recipient {return false}
+    if lhs.length != rhs.length {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_PutBlob: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PutBlob"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}blob_id\0\u{1}offset\0\u{1}data\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.blobID) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.offset) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.data) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.blobID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.blobID, fieldNumber: 1)
+    }
+    if self.offset != 0 {
+      try visitor.visitSingularUInt32Field(value: self.offset, fieldNumber: 2)
+    }
+    if !self.data.isEmpty {
+      try visitor.visitSingularBytesField(value: self.data, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_PutBlob, rhs: Sotto_PutBlob) -> Bool {
+    if lhs.blobID != rhs.blobID {return false}
+    if lhs.offset != rhs.offset {return false}
+    if lhs.data != rhs.data {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_BlobStored: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".BlobStored"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}blob_id\0\u{3}stored_length\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.blobID) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.storedLength) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.blobID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.blobID, fieldNumber: 1)
+    }
+    if self.storedLength != 0 {
+      try visitor.visitSingularUInt32Field(value: self.storedLength, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_BlobStored, rhs: Sotto_BlobStored) -> Bool {
+    if lhs.blobID != rhs.blobID {return false}
+    if lhs.storedLength != rhs.storedLength {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_FetchBlob: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".FetchBlob"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}blob_id\0\u{1}uploader\0\u{1}offset\0\u{1}length\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.blobID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.uploader) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.offset) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.length) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.blobID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.blobID, fieldNumber: 1)
+    }
+    if !self.uploader.isEmpty {
+      try visitor.visitSingularBytesField(value: self.uploader, fieldNumber: 2)
+    }
+    if self.offset != 0 {
+      try visitor.visitSingularUInt32Field(value: self.offset, fieldNumber: 3)
+    }
+    if self.length != 0 {
+      try visitor.visitSingularUInt32Field(value: self.length, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_FetchBlob, rhs: Sotto_FetchBlob) -> Bool {
+    if lhs.blobID != rhs.blobID {return false}
+    if lhs.uploader != rhs.uploader {return false}
+    if lhs.offset != rhs.offset {return false}
+    if lhs.length != rhs.length {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_BlobData: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".BlobData"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}blob_id\0\u{1}uploader\0\u{1}offset\0\u{1}data\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.blobID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.uploader) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.offset) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.data) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.blobID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.blobID, fieldNumber: 1)
+    }
+    if !self.uploader.isEmpty {
+      try visitor.visitSingularBytesField(value: self.uploader, fieldNumber: 2)
+    }
+    if self.offset != 0 {
+      try visitor.visitSingularUInt32Field(value: self.offset, fieldNumber: 3)
+    }
+    if !self.data.isEmpty {
+      try visitor.visitSingularBytesField(value: self.data, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_BlobData, rhs: Sotto_BlobData) -> Bool {
+    if lhs.blobID != rhs.blobID {return false}
+    if lhs.uploader != rhs.uploader {return false}
+    if lhs.offset != rhs.offset {return false}
+    if lhs.data != rhs.data {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_DeleteBlob: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeleteBlob"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}blob_id\0\u{1}uploader\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.blobID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.uploader) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.blobID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.blobID, fieldNumber: 1)
+    }
+    if !self.uploader.isEmpty {
+      try visitor.visitSingularBytesField(value: self.uploader, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_DeleteBlob, rhs: Sotto_DeleteBlob) -> Bool {
+    if lhs.blobID != rhs.blobID {return false}
+    if lhs.uploader != rhs.uploader {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1499,7 +2054,7 @@ nonisolated extension Sotto_InitialHeader: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Sotto_Content: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Content"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{1}attachment\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1515,6 +2070,19 @@ nonisolated extension Sotto_Content: SwiftProtobuf.Message, SwiftProtobuf._Messa
           self.body = .text(v)
         }
       }()
+      case 2: try {
+        var v: Sotto_Attachment?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .attachment(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .attachment(v)
+        }
+      }()
       default: break
       }
     }
@@ -1525,14 +2093,97 @@ nonisolated extension Sotto_Content: SwiftProtobuf.Message, SwiftProtobuf._Messa
     // allocates stack space for every if/case branch local when no optimizations
     // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
     // https://github.com/apple/swift-protobuf/issues/1182
-    try { if case .text(let v)? = self.body {
+    switch self.body {
+    case .text?: try {
+      guard case .text(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularStringField(value: v, fieldNumber: 1)
-    } }()
+    }()
+    case .attachment?: try {
+      guard case .attachment(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    }()
+    case nil: break
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Sotto_Content, rhs: Sotto_Content) -> Bool {
     if lhs.body != rhs.body {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sotto_Attachment: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Attachment"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}blob_id\0\u{1}key\0\u{1}size\0\u{1}digest\0\u{3}media_type\0\u{3}file_name\0\u{1}width\0\u{1}height\0\u{1}thumbnail\0\u{1}caption\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.blobID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.key) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.size) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.digest) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.mediaType) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.fileName) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.width) }()
+      case 8: try { try decoder.decodeSingularUInt32Field(value: &self.height) }()
+      case 9: try { try decoder.decodeSingularBytesField(value: &self.thumbnail) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.caption) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.blobID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.blobID, fieldNumber: 1)
+    }
+    if !self.key.isEmpty {
+      try visitor.visitSingularBytesField(value: self.key, fieldNumber: 2)
+    }
+    if self.size != 0 {
+      try visitor.visitSingularUInt32Field(value: self.size, fieldNumber: 3)
+    }
+    if !self.digest.isEmpty {
+      try visitor.visitSingularBytesField(value: self.digest, fieldNumber: 4)
+    }
+    if !self.mediaType.isEmpty {
+      try visitor.visitSingularStringField(value: self.mediaType, fieldNumber: 5)
+    }
+    if !self.fileName.isEmpty {
+      try visitor.visitSingularStringField(value: self.fileName, fieldNumber: 6)
+    }
+    if self.width != 0 {
+      try visitor.visitSingularUInt32Field(value: self.width, fieldNumber: 7)
+    }
+    if self.height != 0 {
+      try visitor.visitSingularUInt32Field(value: self.height, fieldNumber: 8)
+    }
+    if !self.thumbnail.isEmpty {
+      try visitor.visitSingularBytesField(value: self.thumbnail, fieldNumber: 9)
+    }
+    if !self.caption.isEmpty {
+      try visitor.visitSingularStringField(value: self.caption, fieldNumber: 10)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Sotto_Attachment, rhs: Sotto_Attachment) -> Bool {
+    if lhs.blobID != rhs.blobID {return false}
+    if lhs.key != rhs.key {return false}
+    if lhs.size != rhs.size {return false}
+    if lhs.digest != rhs.digest {return false}
+    if lhs.mediaType != rhs.mediaType {return false}
+    if lhs.fileName != rhs.fileName {return false}
+    if lhs.width != rhs.width {return false}
+    if lhs.height != rhs.height {return false}
+    if lhs.thumbnail != rhs.thumbnail {return false}
+    if lhs.caption != rhs.caption {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

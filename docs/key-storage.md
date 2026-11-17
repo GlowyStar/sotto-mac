@@ -6,6 +6,14 @@ Keys and messages live in one SQLite file under `~/Library/Application Support/S
 directory mode 0700, file mode 0600, as in the reference client; the keychain is not used
 while the app is signed ad hoc.
 
+## Files
+
+The same SQLite file holds the files of part 3 (section 33.7 of the protocol): an upload
+with the whole encrypted blob until its message is committed, the attachment of each sent
+and received file with its file key, and the bytes of a download so far. A received file
+is written in readable form into the folder the caller names (`received` in the data
+directory of `sotto-mac`), mode 0600 in a folder of mode 0700.
+
 ## What was observed
 
 A small app was signed ad hoc with a designated requirement by identifier

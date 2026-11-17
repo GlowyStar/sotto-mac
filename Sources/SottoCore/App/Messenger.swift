@@ -12,6 +12,25 @@ public struct ChatMessage: Codable, Equatable, Sendable, Identifiable {
     public let waiting: Bool
     /// Why an outgoing message is not sent: the relay refused it, or it could not be made.
     public var failure: String?
+    /// The file of the message; `text` is then its caption.
+    public var file: ChatFile? = nil
+}
+
+/// A file sent or received (section 33.5).
+public struct ChatFile: Codable, Equatable, Sendable {
+    /// The name in the attachment: a text of the peer for a received file.
+    public let name: String
+    public let size: Int
+    public let mediaType: String
+    public let state: FileState
+    /// Bytes of the blob stored at the relay or downloaded, out of `total`, while the file is
+    /// sending or receiving; 0 before the first piece.
+    public let done: Int
+    public let total: Int
+    /// Where a received file was saved.
+    public let savedAs: String?
+    /// Why the file failed: a result of section 33.6 or of a refusal.
+    public let result: String?
 }
 
 public struct Chat: Codable, Equatable, Sendable {
@@ -105,11 +124,16 @@ public actor Messenger {
     private var flusher: Task<Void, Never>?
     private var flushAgain = false
     private var last: MessengerState?
+    private let receivedFiles: URL?
+    /// The progress of each file that is sending or receiving, by message id.
+    private var progress: [Data: Progress] = [:]
 
     /// Opens the store in `directory`, creating it when it is missing; `relay` is used until
-    /// an address is saved with `setRelay`.
-    public init(directory: URL, relay: String) throws {
+    /// an address is saved with `setRelay`. Every received file is downloaded into
+    /// `receivedFiles`; nil leaves received files offered.
+    public init(directory: URL, relay: String, receivedFiles: URL? = nil) throws {
         self.directory = directory
+        self.receivedFiles = receivedFiles
         launchRelay = relay
         let store = try ClientStore(directory: directory)
         userID = try store.identity().map { try Identity.encodeUserID(Identity.deriveIdentityKey(seed: $0.seed)) }
@@ -162,7 +186,7 @@ public actor Messenger {
     public func state() async throws -> MessengerState {
         let rows = try await read()
         var updated = notes
-        let state = try Self.build(rows, notes: &updated, relay: relay, link: link, now: Date())
+        let state = try Self.build(rows, notes: &updated, relay: relay, link: link, now: Date(), progress: progress)
         if updated != notes {
             notes = updated
             try notes.save(directory)
@@ -179,7 +203,7 @@ public actor Messenger {
     public static func peek(directory: URL, relay: String) throws -> MessengerState {
         let store = try ClientStore(directory: directory)
         var notes = Notes.load(directory)
-        return try build(Rows(store: store), notes: &notes, relay: notes.relay ?? relay, link: .idle, now: Date())
+        return try build(Rows(store: store), notes: &notes, relay: notes.relay ?? relay, link: .idle, now: Date(), progress: [:])
     }
 
     // MARK: Actions
@@ -199,6 +223,22 @@ public actor Messenger {
         }
         await publish()
         flush()
+    }
+
+    /// Sends a file once the transport is logged in: its blob is made and kept in the store,
+    /// and the upload goes on by itself, also after a reconnect or a restart. The file shows
+    /// as a message whose text is the caption.
+    ///
+    /// - Throws: `NotConnectedError` without a transport; `FileError` or
+    ///   `SessionError.notAContact` from the checks of section 33.1; an error of the file
+    ///   system when the file cannot be read.
+    public func sendFile(_ file: URL, caption: String = "", to userID: String) async throws {
+        guard let transport else {
+            throw NotConnectedError()
+        }
+        let contact = try Identity.decodeUserID(userID)
+        try await transport.sendFile(contact, file: file, caption: caption)
+        await publish()
     }
 
     public func addContact(name rawName: String, userID rawID: String) async throws {
@@ -251,8 +291,8 @@ public actor Messenger {
         let positions = try await withClient { client in
             try client.store.transaction {
                 let positions = try client.store.messages(contact).map(\.position)
+                try client.deleteMessages(contact)
                 try client.store.removeContact(contact)
-                try client.store.deleteMessages(contact)
                 return positions
             }
         }
@@ -271,7 +311,7 @@ public actor Messenger {
                 if position < 0 {
                     try client.store.removePending(-position)
                 } else {
-                    try client.store.deleteMessage(position)
+                    try client.deleteMessage(position)
                 }
             }
         }
@@ -390,6 +430,8 @@ public actor Messenger {
         case let error as RefusedError: "The relay refused the request (\(error.result))."
         case let error as URLRefusedError: "The relay address is refused: \(error.message)."
         case is NotConnectedError: "There is no connection to a relay."
+        case FileError.filesUnsupported: "The relay does not take files."
+        case FileError.fileTooLarge: "The file is too large."
         case is CancellationError: "The request was cancelled."
         default: "\(error)"
         }
@@ -398,6 +440,11 @@ public actor Messenger {
     /// The failure of a message that the relay refused with `result`.
     static func refusal(_ result: String) -> String {
         "The relay refused it (\(result))."
+    }
+
+    /// The failure of a file that is not sent.
+    static func notSent(_ result: String?) -> String {
+        "The file was not sent (\(result ?? "cancelled"))."
     }
 
     static func explain(_ reason: String) -> String {
@@ -412,7 +459,9 @@ public actor Messenger {
     private func connect() {
         do {
             client = nil
-            let made = try Transport(client: Client(store: ClientStore(directory: directory)), url: relay)
+            let made = try Transport(
+                client: Client(store: ClientStore(directory: directory)), url: relay, receivedFiles: receivedFiles
+            )
             transport = made
             link = .connecting
             runner = Task { [weak self] in
@@ -461,7 +510,15 @@ public actor Messenger {
             if let userID = try? Identity.encodeUserID(sender), notes.arrived(userID) {
                 try? notes.save(directory)
             }
-        case .refused: break
+        case .refused, .transferFailed: break
+        case .file(let update):
+            let moving = update.state == .sending || update.state == .receiving
+            let made = Progress(done: update.done, total: update.total)
+            let before = progress[update.messageID]
+            progress[update.messageID] = moving ? made : nil
+            if moving, let before, before.percent == made.percent {
+                return
+            }
         }
         await publish()
     }
@@ -557,7 +614,7 @@ public actor Messenger {
     }
 
     private static func build(
-        _ rows: Rows, notes: inout Notes, relay: String, link: LinkState, now: Date
+        _ rows: Rows, notes: inout Notes, relay: String, link: LinkState, now: Date, progress: [Data: Progress]
     ) throws -> MessengerState {
         let milliseconds = Self.milliseconds(now)
         let chats = try rows.contacts.map { contact in
@@ -568,13 +625,29 @@ public actor Messenger {
                 let time = notes.times[String(row.position)] ?? milliseconds
                 notes.times[String(row.position)] = time
                 let refused = rows.refusals[row.messageID]
+                let outgoing = row.direction == .outgoing
+                let file = rows.files[FileKey(contact: contact.identityKey, outgoing: outgoing, messageID: row.messageID)]
+                let moved = progress[row.messageID]
                 return ChatMessage(
                     id: row.position,
-                    outgoing: row.direction == .outgoing,
+                    outgoing: outgoing,
                     text: row.text,
                     date: date(time),
-                    waiting: row.direction == .outgoing && refused == nil && rows.waiting.contains(row.messageID),
-                    failure: refused.map(refusal)
+                    waiting: outgoing && refused == nil
+                        && (rows.waiting.contains(row.messageID) || file?.state == .sending),
+                    failure: refused.map(refusal) ?? file.flatMap { $0.state == .notSent ? notSent($0.result) : nil },
+                    file: file.map {
+                        ChatFile(
+                            name: $0.attachment.fileName,
+                            size: Int($0.attachment.size),
+                            mediaType: $0.attachment.mediaType,
+                            state: $0.state,
+                            done: moved?.done ?? $0.held,
+                            total: moved?.total ?? ($0.state == .receiving ? Blob.blobLength(Int($0.attachment.size)) : 0),
+                            savedAs: $0.savedAs,
+                            result: $0.result
+                        )
+                    }
                 )
             }
             let pending = rows.pending[contact.identityKey, default: []].map {
@@ -616,6 +689,21 @@ public actor Messenger {
     }
 }
 
+struct Progress: Equatable, Sendable {
+    var done: Int
+    var total: Int
+
+    var percent: Int {
+        100 * done / max(total, 1)
+    }
+}
+
+struct FileKey: Hashable, Sendable {
+    var contact: Data
+    var outgoing: Bool
+    var messageID: Data
+}
+
 /// One read of the store, made where the session layer lives.
 struct Rows: Sendable {
     var identityKey: Data?
@@ -624,6 +712,7 @@ struct Rows: Sendable {
     var pending: [Data: [PendingText]] = [:]
     var waiting: Set<Data>
     var refusals: [Data: String]
+    var files: [FileKey: FileRow] = [:]
 
     init(store: ClientStore) throws {
         identityKey = try store.identity().map { try Identity.deriveIdentityKey(seed: $0.seed) }
@@ -636,6 +725,9 @@ struct Rows: Sendable {
         }
         waiting = Set(try store.outbox().map(\.messageID))
         refusals = try store.refusals()
+        for file in try store.files() {
+            files[FileKey(contact: file.contact, outgoing: !file.incoming, messageID: file.messageID)] = file
+        }
     }
 }
 

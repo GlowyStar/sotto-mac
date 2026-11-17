@@ -6,13 +6,18 @@ Run with the interpreter of the sotto project's environment, which holds `sotto`
     ../../python/sotto/.venv/bin/python scripts/interop.py [--keep DIR]
 
 Starts the relay on a free port, builds `sotto-mac`, makes one identity with each client and
-drives both `chat` commands through pipes. Exits 0 only if every message arrived as text;
+drives both `chat` commands through pipes. Then files go both ways with `send-file`, also
+two large ones whose transfer is cut in the middle: the upload of `sotto-mac` by a kill of
+its `send-file`, the download of `sotto-mac` by a kill of its `chat`; each ends whole after
+the next start. Exits 0 only if every message arrived as text and every file byte for byte;
 stops everything it started. The data lives in a temporary directory that is removed at the
 end; `--keep DIR` keeps the stores and the relay database in DIR instead.
 """
 
 import argparse
 import asyncio
+import os
+import re
 import socket
 import sqlite3
 import subprocess
@@ -23,6 +28,8 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 PATIENCE_SECONDS = 20
+FILE_PATIENCE_SECONDS = 120
+LARGE_FILE_BYTES = 40 * 1024 * 1024
 REPOSITORY = Path(__file__).resolve().parent.parent
 BIN = Path(sys.executable).parent
 SOTTO = BIN / "sotto"
@@ -63,17 +70,21 @@ class Chat:
         self.label = label
         self.process = process
 
-    async def expect(self, line: str) -> None:
+    async def expect(self, line: str, patience: float = PATIENCE_SECONDS) -> None:
+        await self.expect_match(re.escape(line), patience)
+
+    async def expect_match(self, pattern: str, patience: float = PATIENCE_SECONDS) -> re.Match[str]:
+        """The first line that matches the whole of `pattern`."""
         assert self.process.stdout is not None
         try:
-            async with asyncio.timeout(PATIENCE_SECONDS):
+            async with asyncio.timeout(patience):
                 while (printed := await self.process.stdout.readline()) != b"":
-                    if printed.decode().rstrip("\n") == line:
-                        print(f"ok   {self.label} printed {line!r}")
-                        return
+                    if match := re.fullmatch(pattern, printed.decode().rstrip("\n")):
+                        print(f"ok   {self.label} printed {match.group(0)!r}")
+                        return match
         except TimeoutError:
             pass
-        raise CheckFailed(f"{self.label} did not print {line!r}")
+        raise CheckFailed(f"{self.label} printed no line like {pattern!r}")
 
     async def type(self, line: str) -> None:
         assert self.process.stdin is not None
@@ -208,8 +219,93 @@ async def main() -> int:
                 await swift.expect("python: after both restarts")
                 await swift.type("still here")
                 await python.expect("swift: still here")
-                await swift.quit()
                 await python.quit()
+
+                async def send_file(
+                    label: str, program: Path, directory: Path, name: str, path: Path, *options: str
+                ) -> Chat:
+                    process = await asyncio.create_subprocess_exec(
+                        program, "--data-dir", directory, "send-file", name, path, *options,
+                        "--relay", url,
+                        stdout=asyncio.subprocess.PIPE,
+                    )
+                    sender = Chat(f"{label} send-file", process)
+                    chats.append(sender)
+                    return sender
+
+                async def ends_with(sender: Chat, code: int) -> None:
+                    async with asyncio.timeout(FILE_PATIENCE_SECONDS):
+                        exited = await sender.process.wait()
+                    if exited != code:
+                        raise CheckFailed(f"{sender.label} exited {exited}, not {code}")
+                    print(f"ok   {sender.label} exited {code}")
+
+                def same(sent: Path, saved: str) -> None:
+                    if Path(saved).read_bytes() != sent.read_bytes():
+                        raise CheckFailed(f"{saved} is not the file {sent.name}")
+                    print(f"ok   {saved} holds the {sent.stat().st_size} bytes of {sent.name}")
+
+                files = folder / "files"
+                files.mkdir()
+                from_python = files / "from python.txt"
+                from_python.write_bytes("a file from python, ünïcode\n".encode() * 100)
+                from_swift = files / "from-swift.bin"
+                from_swift.write_bytes(os.urandom(70000))
+
+                sender = await send_file(
+                    "python", SOTTO, python_dir, "swift", from_python, "--caption", "a caption"
+                )
+                await sender.expect(f"sent {from_python.name} to swift")
+                await ends_with(sender, 0)
+                await swift.expect(
+                    f"python: file {from_python.name}, {from_python.stat().st_size} bytes: a caption"
+                )
+                saved = await swift.expect_match(f"python: {re.escape(from_python.name)} saved as (.+)")
+                same(from_python, saved.group(1))
+                if Path(saved.group(1)).parent != swift_dir / "received":
+                    raise CheckFailed(f"sotto-mac saved the file into {Path(saved.group(1)).parent}")
+                await swift.quit()
+
+                python = await open_chat("python", SOTTO, python_dir, "swift", url)
+                sender = await send_file("swift", sotto_mac, swift_dir, "python", from_swift)
+                await sender.expect(f"sent {from_swift.name} to python")
+                await ends_with(sender, 0)
+                saved = await python.expect_match(f"swift: {re.escape(from_swift.name)} saved as (.+)")
+                same(from_swift, saved.group(1))
+
+                large_out = files / "large-out.bin"
+                large_out.write_bytes(os.urandom(LARGE_FILE_BYTES))
+                sender = await send_file("swift", sotto_mac, swift_dir, "python", large_out)
+                await sender.expect_match(f"sending {large_out.name}, python: [1-5]0%", FILE_PATIENCE_SECONDS)
+                sender.kill()
+                await sender.process.wait()
+                print("ok   the upload of sotto-mac was cut by a kill of its send-file")
+                swift = await open_chat("swift", sotto_mac, swift_dir, "python", url)
+                await swift.expect_match(f"sending {large_out.name}, python: [1-9]0%", FILE_PATIENCE_SECONDS)
+                await swift.expect(f"sent {large_out.name} to python", FILE_PATIENCE_SECONDS)
+                saved = await python.expect_match(
+                    f"swift: {re.escape(large_out.name)} saved as (.+)", FILE_PATIENCE_SECONDS
+                )
+                same(large_out, saved.group(1))
+                await python.quit()
+
+                large_in = files / "large-in.bin"
+                large_in.write_bytes(os.urandom(LARGE_FILE_BYTES))
+                sender = await send_file("python", SOTTO, python_dir, "swift", large_in)
+                await sender.expect(f"sent {large_in.name} to swift", FILE_PATIENCE_SECONDS)
+                await ends_with(sender, 0)
+                await swift.expect_match(f"receiving {large_in.name}, python: [1-5]0%", FILE_PATIENCE_SECONDS)
+                swift.kill()
+                await swift.process.wait()
+                if (swift_dir / "received" / large_in.name).exists():
+                    raise CheckFailed("the download ended before the kill could cut it")
+                print("ok   the download of sotto-mac was cut by a kill of its chat")
+                swift = await open_chat("swift", sotto_mac, swift_dir, "python", url)
+                saved = await swift.expect_match(
+                    f"python: {re.escape(large_in.name)} saved as (.+)", FILE_PATIENCE_SECONDS
+                )
+                same(large_in, saved.group(1))
+                await swift.quit()
         except CheckFailed as failure:
             print(f"FAIL {failure}")
             return 1
@@ -217,7 +313,7 @@ async def main() -> int:
             for chat in chats:
                 chat.kill()
                 await chat.process.wait()
-    print("PASS every message arrived as text")
+    print("PASS every message arrived as text and every file byte for byte")
     return 0
 
 

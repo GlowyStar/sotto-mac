@@ -89,7 +89,7 @@ let deadRelay = "ws://127.0.0.1:9/ws"
 @Suite(
     .serialized,
     .timeLimit(.minutes(1)),
-    .enabled(if: RealRelay.isAvailable, "the Python project with its .venv is not at ../../python/sotto")
+    .enabled(if: RealRelay.isAvailable, "the Python project with its .venv is not at ../../python/sotto or SOTTO_PYTHON_PROJECT")
 )
 struct MessengerRelayTests {
     let folder = Folder()
@@ -161,6 +161,45 @@ struct MessengerRelayTests {
         try await until { try await outbox(peer.transport).isEmpty }
         try await Task.sleep(nanoseconds: 500_000_000)
         #expect(try await messenger.state().chats.isEmpty)
+        await messenger.close()
+        await peer.stop()
+    }
+
+    @Test func filesBothWaysShowTheirStateAndWhereTheyWereSaved() async throws {
+        let relay = try await RealRelay()
+        defer { relay.stop() }
+        let received = folder.url.appendingPathComponent("received")
+        let messenger = try Messenger(directory: appDirectory, relay: relay.url, receivedFiles: received)
+        await messenger.start()
+        let appID = try await messenger.createIdentity()
+        let appKey = try Identity.decodeUserID(appID)
+        try folder.open("peer").addContact(appID)
+        let peerID = try folder.userID("peer")
+        try await messenger.addContact(name: "peer", userID: peerID)
+        try await waitFor(messenger) { $0.link == .connected }
+        let peerFiles = folder.url.appendingPathComponent("peer-received")
+        let peer = try await run(folder.open("peer"), URLSessionDialer(), url: relay.url, receivedFiles: peerFiles)
+        try await until { try await isRegistered(peer.transport) }
+
+        let outgoing = folder.url.appendingPathComponent("report.pdf")
+        let content = Data((0..<150_000).map { UInt8(truncatingIfNeeded: $0 &* 13) })
+        try content.write(to: outgoing)
+        try await messenger.sendFile(outgoing, caption: "the report", to: peerID)
+        let saved = try await nextFile(peer.transport) { $0.state == .received }
+        #expect(try Data(contentsOf: saved.path!) == content)
+        try await waitFor(messenger) { $0.chats.first?.messages.last?.file?.state == .sent }
+        let sent = try #require(try await chat(messenger)?.messages.last)
+        #expect(sent.outgoing && !sent.waiting && sent.text == "the report" && sent.failure == nil)
+        #expect(sent.file?.name == "report.pdf" && sent.file?.size == content.count && sent.file?.mediaType == "application/pdf")
+
+        let incoming = folder.url.appendingPathComponent("from peer.txt")
+        try Data("a reply".utf8).write(to: incoming)
+        try await peer.transport.sendFile(appKey, file: incoming)
+        try await waitFor(messenger) { $0.chats.first?.messages.last?.file?.state == .received }
+        let file = try #require(try await chat(messenger)?.messages.last?.file)
+        #expect(file.savedAs == received.appendingPathComponent("from peer.txt").path)
+        #expect(try String(contentsOfFile: file.savedAs!, encoding: .utf8) == "a reply")
+        #expect(try await chat(messenger)?.unread == 1)
         await messenger.close()
         await peer.stop()
     }

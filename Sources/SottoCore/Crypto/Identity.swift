@@ -13,6 +13,7 @@ public enum CryptoError: Error, Equatable, Sendable {
     case tooManySkipped
     case chainExhausted
     case noSendingChain
+    case badBlob
 
     public var result: String {
         switch self {
@@ -26,6 +27,7 @@ public enum CryptoError: Error, Equatable, Sendable {
         case .tooManySkipped: "TOO_MANY_SKIPPED"
         case .chainExhausted: "CHAIN_EXHAUSTED"
         case .noSendingChain: "NO_SENDING_CHAIN"
+        case .badBlob: "BAD_BLOB"
         }
     }
 }

@@ -11,6 +11,11 @@ interoperate with sotto's command-line client byte for byte.
   sotto's own command-line client through a sotto relay (`scripts/interop.py` checks it).
   The app `Sotto` runs on the same core: it chats with sotto's command-line client through
   a relay in both directions (`scripts/app-interop.py` checks it with the built app).
+- Files (part 3 of the protocol) are in the core and the command-line tool: a file of up to
+  100 MiB goes to a contact encrypted with the blob cipher, uploaded and downloaded in
+  pieces that resume after a cut connection or a restart; `scripts/interop.py` sends files
+  both ways with sotto's client, two of them cut in the middle. The app does not show
+  files yet.
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
 
@@ -35,7 +40,12 @@ sotto-mac add bob <user id>         # add a contact under a local name
 sotto-mac contacts
 sotto-mac chat bob --relay ws://127.0.0.1:8765/ws   # /quit or end of input ends
 sotto-mac reset bob                 # start a new session with bob
+sotto-mac send-file bob photo.jpg --caption "hi"   # waits until it is sent or not sent
 ```
+
+Received files are saved into the folder `received` of the data directory, under the name
+the sender gave when it is a plain file name, never over a file that is there; a file whose
+sending stopped goes on at the next `chat` or `send-file`.
 
 A `ws://` URL is dialed only to a loopback host unless `--insecure` is given. Part of the
 tests starts the relay of a sotto checkout at `../../python/sotto` (they are skipped when

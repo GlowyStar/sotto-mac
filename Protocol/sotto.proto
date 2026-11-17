@@ -13,6 +13,10 @@ message ClientFrame {
     FetchBundle fetch_bundle = 3;
     Send send = 4;
     Ack ack = 5;
+    StartBlob start_blob = 6;
+    PutBlob put_blob = 7;
+    FetchBlob fetch_blob = 8;
+    DeleteBlob delete_blob = 9;
   }
 }
 
@@ -26,6 +30,8 @@ message ServerFrame {
     Stored stored = 5;
     Deliver deliver = 6;
     Error error = 7;
+    BlobStored blob_stored = 8;
+    BlobData blob_data = 9;
   }
 }
 
@@ -42,6 +48,7 @@ message Login {
 
 message LoggedIn {
   uint32 one_time_prekey_count = 1;
+  uint32 blob_max_bytes = 2;
 }
 
 message SignedPrekey {
@@ -112,12 +119,52 @@ enum ErrorCode {
   NOT_FOUND = 5;
   BAD_BUNDLE = 6;
   IDENTITY_KEY_MISMATCH = 7;
+  QUOTA_FULL = 8;
+  BLOB_TOO_LARGE = 9;
 }
 
 message Error {
   ErrorCode code = 1;
   bytes message_id = 2;
   bytes identity = 3;
+  bytes blob_id = 4;
+}
+
+// The blob frames of part 3 (section 30).
+message StartBlob {
+  bytes blob_id = 1;
+  bytes recipient = 2;
+  uint32 length = 3;
+}
+
+message PutBlob {
+  bytes blob_id = 1;
+  uint32 offset = 2;
+  bytes data = 3;
+}
+
+message BlobStored {
+  bytes blob_id = 1;
+  uint32 stored_length = 2;
+}
+
+message FetchBlob {
+  bytes blob_id = 1;
+  bytes uploader = 2;
+  uint32 offset = 3;
+  uint32 length = 4;
+}
+
+message BlobData {
+  bytes blob_id = 1;
+  bytes uploader = 2;
+  uint32 offset = 3;
+  bytes data = 4;
+}
+
+message DeleteBlob {
+  bytes blob_id = 1;
+  bytes uploader = 2;
 }
 
 // The payload of a Send and of a Deliver: one PeerMessage.
@@ -140,5 +187,20 @@ message InitialHeader {
 message Content {
   oneof body {
     string text = 1;
+    Attachment attachment = 2;
   }
+}
+
+// A file that travels as a blob of the relay (section 32).
+message Attachment {
+  bytes blob_id = 1;
+  bytes key = 2;
+  uint32 size = 3;
+  bytes digest = 4;
+  string media_type = 5;
+  string file_name = 6;
+  uint32 width = 7;
+  uint32 height = 8;
+  bytes thumbnail = 9;
+  string caption = 10;
 }

@@ -3,15 +3,18 @@ import SottoCore
 
 // The command line of the client: `sotto-mac`, one data directory per identity, the same
 // commands, output lines and exit codes as the `sotto` command of the reference. Peer text
-// reaches the terminal only through `printable`.
+// reaches the terminal only through `printable`. Received files go into the folder
+// `received` of the data directory (section 32.2).
 
 let defaultRelay = "ws://127.0.0.1:8765/ws"
 let defaultDataDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".sotto-mac").path
 let quit = "/quit"
 let quitGraceSeconds = 2.0
 let silentResults: Set<String> = ["DUPLICATE", "NOT_A_CONTACT"]
+let receivedFolder = "received"
+let progressSteps = 10
 let usage = """
-    usage: sotto-mac [-h] [--data-dir DATA_DIR] {init,id,add,contacts,chat,reset} ...
+    usage: sotto-mac [-h] [--data-dir DATA_DIR] {init,id,add,contacts,chat,reset,send-file} ...
     """
 let help = """
     \(usage)
@@ -25,13 +28,16 @@ let help = """
       contacts              list the contacts
       chat NAME             chat with a contact; /quit or end of input ends
       reset NAME            start a new session with a contact
+      send-file NAME PATH   send a file to a contact and wait until it is sent or not sent
 
     options:
       -h, --help            show this help message and exit
       --data-dir DATA_DIR   the directory of the identity (default: \(defaultDataDirectory))
-      --relay URL           of chat and reset: the URL of the relay (default: \(defaultRelay))
-      --insecure            of chat and reset: allow a ws:// URL to a host that is not a
-                            loopback host: no TLS
+      --relay URL           of chat, reset and send-file: the URL of the relay
+                            (default: \(defaultRelay))
+      --insecure            of chat, reset and send-file: allow a ws:// URL to a host that
+                            is not a loopback host: no TLS
+      --caption TEXT        of send-file: a text shown with the file
     """
 
 /// A command cannot run; the text is for the person at the terminal.
@@ -49,6 +55,7 @@ struct Arguments {
     var positionals: [String] = []
     var relay = defaultRelay
     var insecure = false
+    var caption = ""
 }
 
 func say(_ line: String) {
@@ -85,12 +92,12 @@ func parse(_ words: [String]) throws -> Arguments {
     guard let command = rest.popFirst() else {
         throw UsageError(message: "the following arguments are required: command")
     }
-    let positionalCounts = ["init": 0, "id": 0, "add": 2, "contacts": 0, "chat": 1, "reset": 1]
+    let positionalCounts = ["init": 0, "id": 0, "add": 2, "contacts": 0, "chat": 1, "reset": 1, "send-file": 2]
     guard let wanted = positionalCounts[command] else {
         throw UsageError(message: "argument command: invalid choice: '\(command)'")
     }
     arguments.command = command
-    let takesRelay = command == "chat" || command == "reset"
+    let takesRelay = command == "chat" || command == "reset" || command == "send-file"
 
     while let word = rest.popFirst() {
         if word == "-h" || word == "--help" {
@@ -102,6 +109,10 @@ func parse(_ words: [String]) throws -> Arguments {
             arguments.relay = String(word.dropFirst("--relay=".count))
         } else if takesRelay && word == "--insecure" {
             arguments.insecure = true
+        } else if command == "send-file" && word == "--caption" {
+            arguments.caption = try value(word)
+        } else if command == "send-file" && word.hasPrefix("--caption=") {
+            arguments.caption = String(word.dropFirst("--caption=".count))
         } else if word.hasPrefix("-") || arguments.positionals.count == wanted {
             throw UsageError(message: "unrecognized arguments: \(word)")
         } else {
@@ -109,7 +120,7 @@ func parse(_ words: [String]) throws -> Arguments {
         }
     }
     guard arguments.positionals.count == wanted else {
-        throw UsageError(message: "the following arguments are required: \(["add": "name, user_id", "chat": "name", "reset": "name"][command]!)")
+        throw UsageError(message: "the following arguments are required: \(["add": "name, user_id", "chat": "name", "reset": "name", "send-file": "name, path"][command]!)")
     }
     return arguments
 }
@@ -152,7 +163,12 @@ func contactNamed(_ client: Client, _ name: String) throws -> Data {
 
 func makeTransport(_ client: sending Client, _ arguments: Arguments) throws -> Transport {
     do {
-        return try Transport(client: client, url: arguments.relay, insecure: arguments.insecure)
+        return try Transport(
+            client: client,
+            url: arguments.relay,
+            insecure: arguments.insecure,
+            receivedFiles: storeDirectory(arguments).appendingPathComponent(receivedFolder)
+        )
     } catch let error as URLRefusedError {
         throw CommandError(message: "the relay URL is refused: \(error.message)")
     }
@@ -165,7 +181,8 @@ func displayName(_ contact: Data, _ names: [Data: String]) -> String {
     return (try? Identity.encodeUserID(contact)) ?? ""
 }
 
-func printEvent(_ event: TransportEvent, _ names: [Data: String]) {
+/// Prints an event; `progress` keeps the tenth of each transfer last printed.
+func printEvent(_ event: TransportEvent, _ names: [Data: String], _ progress: inout [Data: Int]) {
     switch event {
     case .connected:
         say("connected")
@@ -176,6 +193,9 @@ func printEvent(_ event: TransportEvent, _ names: [Data: String]) {
         }
         if let text = received.text {
             say("\(name): \(printable(text))")
+        } else if let attachment = received.attachment {
+            let caption = attachment.caption.isEmpty ? "" : ": \(printable(attachment.caption))"
+            say("\(name): file \(printable(attachment.fileName)), \(attachment.size) bytes\(caption)")
         } else if let result = received.result, !silentResults.contains(result) {
             say("\(name): a message could not be read (\(result))")
         }
@@ -187,6 +207,29 @@ func printEvent(_ event: TransportEvent, _ names: [Data: String]) {
         say("not connected; next attempt in \(String(format: "%.0f", seconds)) s")
     case .stopped(let reason):
         say("stopped: \(reason)")
+    case .transferFailed(let reason):
+        say("a transfer stopped and goes on after the next login: \(reason)")
+    case .file(let update):
+        printFileUpdate(update, displayName(update.contact, names), &progress)
+    }
+}
+
+func printFileUpdate(_ update: FileUpdate, _ name: String, _ progress: inout [Data: Int]) {
+    let fileName = printable(update.fileName)
+    switch update.state {
+    case .sending, .receiving:
+        let tenth = progressSteps * update.done / max(update.total, 1)
+        if progress[update.blobID] == tenth {
+            return
+        }
+        progress[update.blobID] = tenth
+        say("\(update.state.rawValue) \(fileName), \(name): \(100 * tenth / progressSteps)%")
+    case .received:
+        say("\(name): \(fileName) saved as \(printable(update.path?.path ?? ""))")
+    case .sent:
+        say("sent \(fileName) to \(name)")
+    default:
+        say("\(update.state.rawValue): \(fileName), \(name) (\(update.result ?? ""))")
     }
 }
 
@@ -248,8 +291,9 @@ func finish(_ transport: Transport, _ runner: Task<Void, Error>, _ names: [Data:
     if let printer {
         await printer.value
     } else {
+        var progress: [Data: Int] = [:]
         for await event in transport.events {
-            printEvent(event, names)
+            printEvent(event, names, &progress)
         }
     }
 }
@@ -262,8 +306,9 @@ func chat(_ arguments: Arguments) async throws -> Int32 {
 
     let runner = Task { try await transport.run() }
     let printer = Task {
+        var progress: [Data: Int] = [:]
         for await event in transport.events {
-            printEvent(event, names)
+            printEvent(event, names, &progress)
         }
     }
     let (lines, leaving) = readLines()
@@ -326,6 +371,69 @@ func reset(_ arguments: Arguments) async throws -> Int32 {
     }
 }
 
+/// Sends a file and prints the events until it is sent or not sent. A file whose sending
+/// stops with the command goes on at the next `chat` or `send-file`.
+func sendFile(_ arguments: Arguments) async throws -> Int32 {
+    let client = try openClient(arguments)
+    let contact = try contactNamed(client, arguments.positionals[0])
+    let path = URL(fileURLWithPath: arguments.positionals[1])
+    let names = try names(client)
+    let transport = try makeTransport(client, arguments)
+    let caption = arguments.caption
+
+    let runner = Task { try await transport.run() }
+    let sending = Task { try await transport.sendFile(contact, file: path, caption: caption) }
+    let outcome = await first(
+        { _ = await runner.result; return .stopped },
+        { _ = await sending.result; return .done }
+    )
+    if outcome == .stopped {
+        await finish(transport, runner, names, printer: nil)
+        return 1
+    }
+
+    let blobID: Data
+    do {
+        blobID = try await sending.value
+    } catch {
+        await transport.stop()
+        runner.cancel()
+        _ = await runner.result
+        switch error {
+        case let error as FileError: throw CommandError(message: "not sent: \(error.result)")
+        case let error as SessionError: throw CommandError(message: "not sent: \(error.result)")
+        case is InvalidInputError: throw CommandError(message: "not sent: the caption is too long")
+        default: throw CommandError(message: "cannot read \(arguments.positionals[1]): \(readFailure(error))")
+        }
+    }
+
+    var progress: [Data: Int] = [:]
+    var status: Int32 = 1
+    for await event in transport.events {
+        printEvent(event, names, &progress)
+        if case .transferFailed = event {
+            break
+        }
+        if case .file(let update) = event, update.blobID == blobID, update.state == .sent || update.state == .notSent {
+            status = update.state == .sent ? 0 : 1
+            break
+        }
+    }
+    await transport.stop()
+    runner.cancel()
+    _ = await runner.result
+    return status
+}
+
+/// The text of the system error under an error of reading a file.
+func readFailure(_ error: Error) -> String {
+    let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
+    if let underlying, underlying.domain == NSPOSIXErrorDomain {
+        return String(cString: strerror(Int32(underlying.code)))
+    }
+    return (error as NSError).localizedDescription
+}
+
 func run(_ arguments: Arguments) async throws -> Int32 {
     switch arguments.command {
     case "init":
@@ -361,6 +469,8 @@ func run(_ arguments: Arguments) async throws -> Int32 {
         }
     case "chat":
         return try await chat(arguments)
+    case "send-file":
+        return try await sendFile(arguments)
     default:
         return try await reset(arguments)
     }
