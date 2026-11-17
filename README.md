@@ -119,8 +119,15 @@ with a clock until a connection fetches the contact's keys, also across a restar
 message that the relay refuses ends as not sent, with a red mark and the reason on hover.
 
 Next to the store, `app.json` keeps what the store has no place for: the relay address
-saved in Settings, how far each chat was read, and when each contact and message was
-first seen by the app.
+saved in Settings, how far each chat was read, when each contact and message was
+first seen by the app, and every other setting (theme, text size, chat background, send
+key, clock, the passcode check, auto-lock, notification and download choices). "Reset
+Sotto..." in Settings, Advanced, deletes the store and `app.json` and then the data
+directory only if nothing else is left in it.
+
+A local passcode locks the window at launch, after the auto-lock time, on Cmd+L and on
+sleep. It only hides the window: the store is not encrypted with it, and it cannot be
+recovered.
 
 The end-to-end check of the app (a relay on a free port; the Python client writing to the
 app while it runs and while it is closed; the app sending with `--send` to the running
@@ -142,7 +149,9 @@ Limits as they are:
   identity, the keys and the messages.
 - One device per identity: when the same identity logs in elsewhere, the relay closes the
   older connection and the app says so instead of reconnecting.
-- One-to-one chats, text only. No notifications, no files, no groups.
+- One-to-one chats, text only. No notifications, no files, no groups. The notification,
+  Dock badge, auto-download, download folder and cache settings are saved and shown but
+  take effect only with the cards that bring those features.
 - No security audit.
 
 ## License

@@ -516,6 +516,18 @@ Decisions for the owner:
 - Dropping files on a chat row of another contact (the reference supports it) is not designed.
 - Not built, as in section 9: selection colours and link underline of 5.4 stay an AppKit text view job; the caption of 13.1 and 13.2 needs the same view.
 
+### Added with the settings panel (SOTTO-35, 2026-11-17)
+
+Estimated in the build, worth a look by the owner:
+- The panel top margin shrinks from 40 to 20 below a window height of 600.
+- "Lock when the Mac sleeps" is on by default; a passcode also locks the window at every launch.
+- Until the profile card, the cover of 11.2 has no name line: the avatar shows the initials of "Me", the short id sits next to it, and the QR button opens the My id box of 7.2.
+- The passcode box when a passcode is on: a body line and the buttons "Cancel", "Turn off" (destructive), "Change"; "Change" asks for the current passcode above the two new fields; a wrong current passcode reads "Wrong passcode.".
+- The auto-lock box has one button, "Close"; a radio applies at once. The value on the row is the radio title ("1 hour").
+- The Connection value on the main page also reads "Not connected" (no identity yet) and "Can not connect" (stopped).
+- The storage block shows the real size of the data folder as the total; Photos, Files and Other are 0 until photos and files are kept on the Mac, so "Clear cache" stays disabled.
+- The macOS refusal state of 11.3 (disabled toggle, "Open System Settings") comes with the notifications card.
+
 ## 10. Additions to tokens and existing sections
 
 ### 10.1 New colour tokens

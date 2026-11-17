@@ -16,17 +16,19 @@ struct ComposeBar: View {
     private var canSend: Bool { !text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
+        let size = model.settings.textSize
         HStack(alignment: .bottom, spacing: 0) {
             ZStack(alignment: .topLeading) {
                 if text.wrappedValue.isEmpty {
                     Text("Write a message...")
-                        .font(Fonts.rowText)
+                        .font(Fonts.message(size))
                         .foregroundStyle(focused ? Color.placeholderFgActive : Color.placeholderFg)
-                        .padding(.top, (Metrics.fieldMin - 16) / 2)
+                        .padding(.top, GrowingTextView.inset + 1)
                         .allowsHitTesting(false)
                 }
                 GrowingTextView(
                     text: text, height: $height, focused: $focused, focusTick: model.composeFocusTick,
+                    textSize: size, commandEnterSends: model.settings.sendWithCommandEnter,
                     onSend: { model.send(text.wrappedValue, to: chatID) },
                     onEscape: { model.escape() }
                 )
@@ -60,17 +62,32 @@ struct ComposeBar: View {
     }
 }
 
-/// An `NSTextView` that grows with its text, sends on Enter and breaks the line on Shift+Enter.
+/// An `NSTextView` that grows with its text. It sends on Enter and breaks the line on
+/// Shift+Enter, or sends on Cmd+Enter and breaks the line on Enter (DESIGN.md 11.4).
 struct GrowingTextView: NSViewRepresentable {
+    /// The space above and below the text; one line at size 13 makes the 36 field.
+    static let inset: CGFloat = (Metrics.fieldMin - 18) / 2
+
     @Binding var text: String
     @Binding var height: CGFloat
     @Binding var focused: Bool
     let focusTick: Int
+    var textSize = 13
+    var commandEnterSends = false
     let onSend: () -> Void
     let onEscape: () -> Void
 
     final class Field: NSTextView {
         var focusChanged: ((Bool) -> Void)?
+        var commandReturn: (() -> Void)?
+        var appliedSize = 0
+        override func keyDown(with event: NSEvent) {
+            if [36, 76].contains(event.keyCode), event.modifierFlags.contains(.command) {
+                commandReturn?()
+            } else {
+                super.keyDown(with: event)
+            }
+        }
         override func becomeFirstResponder() -> Bool {
             let result = super.becomeFirstResponder()
             if result { focusChanged?(true) }
@@ -102,7 +119,8 @@ struct GrowingTextView: NSViewRepresentable {
             guard let manager = view.layoutManager, let container = view.textContainer else { return }
             manager.ensureLayout(for: container)
             let used = manager.usedRect(for: container).height + view.textContainerInset.height * 2
-            let next = min(max(used, Metrics.fieldMin), Metrics.fieldMax)
+            let minimum = CGFloat(parent.textSize + 5) + GrowingTextView.inset * 2
+            let next = min(max(used, minimum), Metrics.fieldMax)
             if abs(next - parent.height) > 0.5 {
                 DispatchQueue.main.async { self.parent.height = next }
             }
@@ -111,7 +129,7 @@ struct GrowingTextView: NSViewRepresentable {
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
             switch selector {
             case #selector(NSResponder.insertNewline(_:)):
-                if NSEvent.modifierFlags.contains(.shift) {
+                if parent.commandEnterSends || NSEvent.modifierFlags.contains(.shift) {
                     textView.insertNewlineIgnoringFieldEditor(nil)
                 } else {
                     parent.onSend()
@@ -139,21 +157,17 @@ struct GrowingTextView: NSViewRepresentable {
         field.drawsBackground = false
         field.isRichText = false
         field.allowsUndo = true
-        field.font = Fonts.compose
         field.textColor = NSColor(Color.windowFg)
         field.insertionPointColor = NSColor(Color.accent)
-        field.textContainerInset = NSSize(width: 0, height: (Metrics.fieldMin - 18) / 2)
+        field.textContainerInset = NSSize(width: 0, height: Self.inset)
         field.textContainer?.lineFragmentPadding = 0
         field.isVerticallyResizable = true
         field.isHorizontallyResizable = false
         field.autoresizingMask = [.width]
         field.textContainer?.widthTracksTextView = true
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.minimumLineHeight = 18
-        paragraph.maximumLineHeight = 18
-        field.defaultParagraphStyle = paragraph
-        field.typingAttributes = [.font: Fonts.compose, .paragraphStyle: paragraph, .foregroundColor: NSColor(Color.windowFg)]
+        field.commandReturn = { [weak coordinator = context.coordinator] in coordinator?.parent.onSend() }
         field.string = text
+        applySize(field)
         field.focusChanged = { [weak coordinator = context.coordinator] value in
             DispatchQueue.main.async { coordinator?.parent.focused = value }
         }
@@ -163,7 +177,11 @@ struct GrowingTextView: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
-        guard let field = scroll.documentView as? NSTextView else { return }
+        guard let field = scroll.documentView as? Field else { return }
+        if field.appliedSize != textSize {
+            applySize(field)
+            context.coordinator.measure(field)
+        }
         if field.string != text {
             field.string = text
             context.coordinator.measure(field)
@@ -172,5 +190,21 @@ struct GrowingTextView: NSViewRepresentable {
             context.coordinator.lastTick = focusTick
             DispatchQueue.main.async { field.window?.makeFirstResponder(field) }
         }
+    }
+
+    /// The font and the line of `textSize` (line height size + 5), also for the text already typed.
+    private func applySize(_ field: Field) {
+        field.appliedSize = textSize
+        let font = Fonts.compose(textSize)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.minimumLineHeight = CGFloat(textSize + 5)
+        paragraph.maximumLineHeight = CGFloat(textSize + 5)
+        field.font = font
+        field.defaultParagraphStyle = paragraph
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font, .paragraphStyle: paragraph, .foregroundColor: NSColor(Color.windowFg),
+        ]
+        field.typingAttributes = attributes
+        field.textStorage?.setAttributes(attributes, range: NSRange(location: 0, length: field.textStorage?.length ?? 0))
     }
 }

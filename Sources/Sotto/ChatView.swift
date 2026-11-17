@@ -309,6 +309,7 @@ struct MessageRow: View {
     let bottom: Bool
     let maxWidth: CGFloat
     let delete: () -> Void
+    @Environment(\.settings) private var settings
 
     var body: some View {
         let out = message.outgoing
@@ -329,12 +330,12 @@ struct MessageRow: View {
             senderTop: top ? Metrics.radiusLarge : Metrics.radiusSmall,
             senderBottom: bottom ? 0 : Metrics.radiusSmall,
             tail: bottom, mirrored: out)
-        let time = Formats.clock(message.date)
+        let time = Formats.clock(message.date, h24: settings.clock24 ?? Formats.localeUses24Hours)
         // A transparent copy of the time keeps room for it on the last line.
         let reserve = Text(" \u{2007}" + time + (out ? "\u{2007}\u{2007}\u{2007}" : "")).foregroundColor(.clear)
         return (Text(Self.attributed(message.text, out: out)) + reserve)
-            .font(Fonts.message)
-            .lineSpacing(Fonts.messageLineSpacing)
+            .font(Fonts.message(settings.textSize))
+            .lineSpacing(Fonts.messageLineSpacing(settings.textSize))
             .foregroundStyle(out ? Color.msgOutFg : Color.msgInFg)
             .tint(out ? Color.msgOutLinkFg : Color.msgInLinkFg)
             .textSelection(.enabled)
@@ -344,7 +345,7 @@ struct MessageRow: View {
             .overlay(alignment: .bottomTrailing) {
                 HStack(spacing: 3) {
                     Text(time)
-                        .font(Fonts.time)
+                        .font(Fonts.message(settings.textSize))
                         .foregroundStyle(out ? Color.msgOutDateFg : Color.msgInDateFg)
                     if out {
                         StatusMark(state: message.state, waitingColor: .msgSendingIconFg, storedColor: .msgStoredIconFg)

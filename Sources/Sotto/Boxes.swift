@@ -40,6 +40,7 @@ struct BoxField: View {
     var error: String?
     var monospaced = false
     var focusOnAppear = false
+    var secure = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -47,7 +48,13 @@ struct BoxField: View {
             if !label.isEmpty {
                 Text(label).font(Fonts.label).foregroundStyle(Color.windowSubFg)
             }
-            TextField("", text: $text, prompt: Text(placeholder).foregroundStyle(Color.placeholderFg))
+            Group {
+                if secure {
+                    SecureField("", text: $text, prompt: Text(placeholder).foregroundStyle(Color.placeholderFg))
+                } else {
+                    TextField("", text: $text, prompt: Text(placeholder).foregroundStyle(Color.placeholderFg))
+                }
+            }
                 .textFieldStyle(.plain)
                 .font(monospaced ? Fonts.idField : Fonts.boxBody)
                 .foregroundStyle(Color.windowFg)
@@ -120,6 +127,7 @@ struct AddContactBox: View {
 
 struct MyIDBox: View {
     let model: AppModel
+    var close: (() -> Void)?
 
     var body: some View {
         ModalBox(title: "My id", wide: true) {
@@ -130,7 +138,7 @@ struct MyIDBox: View {
             }
             .frame(maxWidth: .infinity)
         } buttons: {
-            BoxButton(title: "Close") { model.modal = nil }.keyboardShortcut(.defaultAction)
+            BoxButton(title: "Close") { if let close { close() } else { model.modal = nil } }.keyboardShortcut(.defaultAction)
         }
     }
 }
@@ -154,80 +162,6 @@ struct CopyIDButton: View {
         .buttonStyle(.plain)
         .onHover { hover = $0 }
         .animation(Motion.hover, value: hover)
-    }
-}
-
-struct SettingsBox: View {
-    @Bindable var model: AppModel
-    @State private var relay: String
-    @State private var relayError: String?
-
-    init(model: AppModel) {
-        self.model = model
-        _relay = State(initialValue: model.relayAddress)
-    }
-
-    var body: some View {
-        ModalBox(title: "Settings", wide: true) {
-            VStack(alignment: .leading, spacing: 0) {
-                section("Relay")
-                BoxField(label: "", placeholder: "wss://relay.example", text: $relay, error: relayError)
-                Text(model.connection.label)
-                    .font(Fonts.label)
-                    .foregroundStyle(model.connection == .connected ? Color.windowSubFg : Color.accentText)
-                    .padding(.top, 6)
-                separator
-                section("Theme")
-                ForEach(ThemeChoice.allCases) { choice in
-                    HoverRow(height: 40, action: { model.theme = choice }) {
-                        HStack(spacing: 12) {
-                            RadioCircle(selected: model.theme == choice)
-                            Text(choice.title).font(Fonts.boxBody).foregroundStyle(Color.windowFg)
-                        }
-                    }
-                    .accessibilityAddTraits(model.theme == choice ? .isSelected : [])
-                }
-                separator
-                section("Identity")
-                HoverRow(height: 40, action: { model.modal = .myID }) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "person.text.rectangle").font(.system(size: 16)).foregroundStyle(Color.menuIconFg)
-                        Text("My id").font(Fonts.boxBody).foregroundStyle(Color.windowFg)
-                    }
-                }
-            }
-        } buttons: {
-            BoxButton(title: "Cancel") { model.modal = nil }
-            BoxButton(title: "Save", enabled: relay != model.relayAddress) {
-                relayError = model.setRelay(relay)
-                if relayError == nil { model.modal = nil }
-            }
-            .keyboardShortcut(.defaultAction)
-        }
-    }
-
-    private func section(_ title: String) -> some View {
-        Text(title).font(Fonts.sectionLabel).foregroundStyle(Color.accentText).padding(.bottom, 4)
-    }
-
-    private var separator: some View {
-        Rectangle().fill(Color.divider).frame(height: 1).padding(.vertical, 12)
-    }
-}
-
-struct RadioCircle: View {
-    let selected: Bool
-
-    var body: some View {
-        ZStack {
-            if selected {
-                Circle().fill(Color.accent)
-                Circle().fill(.white).frame(width: 8, height: 8)
-            } else {
-                Circle().strokeBorder(Color.windowSubFg, lineWidth: 2)
-            }
-        }
-        .frame(width: 18, height: 18)
     }
 }
 

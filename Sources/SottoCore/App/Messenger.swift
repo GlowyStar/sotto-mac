@@ -72,8 +72,8 @@ public struct NotConnectedError: Error, Equatable, Sendable {}
 /// identity. Every change is published on `changes` as a whole new state.
 ///
 /// What the store does not hold is kept in `app.json` next to it: the relay address once it
-/// is set here, the last read position of each chat, and when each contact and message was
-/// first seen.
+/// is set here, the last read position of each chat, when each contact and message was
+/// first seen, and the settings of the app.
 public actor Messenger {
     public static let notesFile = "app.json"
     static let pollSeconds = 0.5
@@ -81,6 +81,8 @@ public actor Messenger {
     public nonisolated let changes: AsyncStream<MessengerState>
     /// Whether the store held an identity when it was opened.
     public nonisolated let hadIdentity: Bool
+    /// The settings in `app.json` when the store was opened; nil when none were saved yet.
+    public nonisolated let launchSettings: AppSettings?
     private let sink: AsyncStream<MessengerState>.Continuation
     private let directory: URL
     private let launchRelay: String
@@ -108,6 +110,7 @@ public actor Messenger {
         store.close()
         hadIdentity = userID != nil
         notes = Notes.load(directory)
+        launchSettings = notes.settings
         (changes, sink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
 
@@ -275,6 +278,26 @@ public actor Messenger {
         notes.relay = address
         try notes.save(directory)
         await reconnect()
+    }
+
+    public func saveSettings(_ settings: AppSettings) throws {
+        notes.settings = settings
+        try notes.save(directory)
+    }
+
+    /// Deletes the files of a store in `directory` (the database, its journal and
+    /// `app.json`), then the folder itself when nothing else is left in it. Call it only
+    /// after `close`.
+    public static func erase(directory: URL) throws {
+        let manager = FileManager.default
+        let names = [ClientStore.fileName, ClientStore.fileName + "-journal", notesFile]
+        for name in names {
+            let url = directory.appendingPathComponent(name)
+            if manager.fileExists(atPath: url.path) { try manager.removeItem(at: url) }
+        }
+        if (try? manager.contentsOfDirectory(atPath: directory.path))?.isEmpty == true {
+            try manager.removeItem(at: directory)
+        }
     }
 
     /// A new transport to the same relay, after the old one stopped.
@@ -574,6 +597,7 @@ struct Notes: Codable, Equatable {
     var read: [String: Int64] = [:]
     var added: [String: Int64] = [:]
     var times: [String: Int64] = [:]
+    var settings: AppSettings?
 
     static func load(_ directory: URL) -> Notes {
         let url = directory.appendingPathComponent(Messenger.notesFile)

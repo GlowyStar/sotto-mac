@@ -1,4 +1,5 @@
 import AppKit
+import SottoCore
 import SwiftUI
 
 // Every colour, size and font of the interface lives here (DESIGN.md sections 2 to 5): a change
@@ -86,6 +87,67 @@ extension Color {
     // Reduced transparency: the toast with full alpha; the dim behind a box stays a dim.
     static let toastBgOpaque = token("2c3033", "000000")
     static let avatarFg = token("ffffff", "ffffff")
+
+    // DESIGN.md 10.1
+    static let checkboxFg = token("b3b3b3", "4f6276")
+    static let sliderBgInactive = token("e1eaef", "364554")
+    static let sliderBgActive = token("40a7e3", "4a81bc")
+    static let settingsIconFg = token("ffffff", "ffffff")
+    static let settingsIconBg1 = token("f06964", "f06964")
+    static let settingsIconBg2 = token("6dc534", "6dc534")
+    static let settingsIconBg3 = token("ed9f20", "ed9f20")
+    static let settingsIconBg4 = token("56b3f5", "56b3f5")
+    static let settingsIconBg5 = token("7595ff", "7595ff")
+    static let settingsIconBg6 = token("b580e2", "b580e2")
+    static let settingsIconBg8 = token("f2925b", "f2925b")
+    /// The dim over the page below a pushed settings page (DESIGN.md 11.1).
+    static let slideFadeOutBg = token("0000003c", "0000003c")
+}
+
+/// The chat background presets of DESIGN.md 11.4; `serviceBg` follows the preset.
+extension AppSettings.Background {
+    var title: String { self == .standard ? "Default" : rawValue.capitalized }
+
+    /// Light top, light bottom, dark top, dark bottom.
+    private var hex: (String, String, String, String) {
+        switch self {
+        case .standard: ("dfe7d6", "cfdcc3", "0e1621", "0e1621")
+        case .mist: ("e3ebf3", "d3dfec", "0f1923", "0b131c")
+        case .sand: ("efe6d5", "e2d5bc", "1a1712", "14110d")
+        case .rose: ("f1dfe3", "e6cbd2", "1f1519", "170f12")
+        case .slate: ("dfe2e6", "cdd2d9", "151a20", "0f1318")
+        case .plain: ("f4f4f4", "f4f4f4", "0e1621", "0e1621")
+        }
+    }
+
+    var top: Color { self == .standard ? .chatBgTop : .token(hex.0, hex.2) }
+    var bottom: Color { self == .standard ? .chatBgBottom : .token(hex.1, hex.3) }
+
+    /// The bottom colour at 0.45 of its brightness and half alpha.
+    var service: Color {
+        guard self != .standard else { return .serviceBg }
+        let (light, dark) = (hex.1, hex.3)
+        return Color(
+            nsColor: NSColor(name: nil) { appearance in
+                let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                let base = NSColor(hex: isDark ? dark : light).usingColorSpace(.sRGB) ?? .gray
+                return NSColor(
+                    hue: base.hueComponent, saturation: base.saturationComponent,
+                    brightness: base.brightnessComponent * 0.45, alpha: 0.5)
+            })
+    }
+}
+
+private struct SettingsKey: EnvironmentKey {
+    static let defaultValue = AppSettings()
+}
+
+extension EnvironmentValues {
+    /// The settings of the app, set once at the root of the window.
+    var settings: AppSettings {
+        get { self[SettingsKey.self] }
+        set { self[SettingsKey.self] = newValue }
+    }
 }
 
 extension NSColor {
@@ -218,6 +280,21 @@ enum Metrics {
     static let panelWidth: CGFloat = 320
     static let panelRow: CGFloat = 44
     static let bigAvatar: CGFloat = 80
+
+    // Settings panel (DESIGN.md 11)
+    static let settingsMaxWidth: CGFloat = 392
+    static let settingsMinWidth: CGFloat = 324
+    static let settingsSide: CGFloat = 48
+    static let settingsFullBelow: CGFloat = 420
+    static let settingsTop: CGFloat = 40
+    static let settingsTopShort: CGFloat = 20
+    static let settingsBar: CGFloat = 56
+    static let settingsRow: CGFloat = 38
+    static let settingsTextLeft: CGFloat = 22
+    static let settingsIconTextLeft: CGFloat = 60
+    static let settingsTile: CGFloat = 24
+    static let settingsGroupGap: CGFloat = 16
+    static let pageShift: CGFloat = 100
 }
 
 /// Fonts by role (DESIGN.md 4). `lineSpacing` turns the system line box into the spec's.
@@ -227,11 +304,17 @@ enum Fonts {
     static let badge = Font.system(size: 12, weight: .bold)
     static let headerTitle = Font.system(size: 14, weight: .semibold)
     static let headerSubtitle = Font.system(size: 13)
-    static let message = Font.system(size: 13)
-    static let messageLineSpacing: CGFloat = 2.5
-    static let time = Font.system(size: 13)
+    /// Message text and time at the size of the chat settings; the line is size + 5.
+    static func message(_ size: Int) -> Font { .system(size: CGFloat(size)) }
+    static func messageLineSpacing(_ size: Int) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: CGFloat(size))
+        return max(0, CGFloat(size) + 5 - (font.ascender - font.descender + font.leading))
+    }
     static let service = Font.system(size: 13, weight: .semibold)
-    static var compose: NSFont { .systemFont(ofSize: 13) }
+    static func compose(_ size: Int) -> NSFont { .systemFont(ofSize: CGFloat(size)) }
+    static let settingsRow = Font.system(size: 14)
+    static let settingsSection = Font.system(size: 14, weight: .semibold)
+    static let hint = Font.system(size: 13)
     static let boxTitle = Font.system(size: 16, weight: .semibold)
     static let boxBody = Font.system(size: 14)
     static let button = Font.system(size: 14, weight: .semibold)
@@ -261,6 +344,10 @@ enum Motion {
     static let newMessage = Animation.smooth(duration: 0.2)
     static let floatingDate = Animation.easeOut(duration: 0.2)
     static let reduced = Animation.easeInOut(duration: 0.15)
+    // DESIGN.md 18
+    static let page = Animation.timingCurve(0, 0.55, 0.45, 1, duration: 0.24)
+    static let toggle = Animation.easeOut(duration: 0.12)
+    static let slider = Animation.smooth(duration: 0.15)
 
     static func pick(_ animation: Animation, reduce: Bool) -> Animation { reduce ? reduced : animation }
 }

@@ -20,7 +20,12 @@ struct SottoApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .appSettings) {
-                Button("Settings...") { model.modal = .settings }.keyboardShortcut(",")
+                Button("Settings...") { model.openSettings() }.keyboardShortcut(",")
+            }
+            CommandGroup(after: .appSettings) {
+                Button("Lock Sotto") { model.lock() }
+                    .keyboardShortcut("l")
+                    .disabled(model.settings.passcode == nil)
             }
             CommandGroup(replacing: .newItem) {
                 Button("Add Contact...") { model.modal = .addContact }.keyboardShortcut("n")
@@ -49,7 +54,10 @@ struct SottoApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        MainActor.assumeIsolated { AppModel.shared.applyTheme() }
+        MainActor.assumeIsolated {
+            AppModel.shared.applyTheme()
+            AppModel.shared.watchActivity()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

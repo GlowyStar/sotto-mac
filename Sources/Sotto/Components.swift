@@ -30,13 +30,14 @@ struct Avatar: View {
 /// A rounded pill of service text over the chat background.
 struct ServicePill: View {
     let text: String
+    @Environment(\.settings) private var settings
 
     var body: some View {
         Text(text)
             .font(Fonts.service)
             .foregroundStyle(Color.serviceFg)
             .padding(Metrics.servicePad)
-            .background(Capsule().fill(Color.serviceBg))
+            .background(Capsule().fill(settings.background.service))
     }
 }
 
@@ -237,10 +238,21 @@ struct WindowDragArea: NSViewRepresentable {
 
 @MainActor
 enum Formats {
-    private static let time: DateFormatter = {
+    private static let time24: DateFormatter = {
         let formatter = DateFormatter()
         formatter.setLocalizedDateFormatFromTemplate("Hm")
         return formatter
+    }()
+    private static let time12: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("hm")
+        return formatter
+    }()
+
+    /// Whether the locale writes times on a 24-hour clock.
+    static let localeUses24Hours: Bool = {
+        let format = DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: .current) ?? "H"
+        return format.contains("H") || format.contains("k")
     }()
     private static let weekday: DateFormatter = {
         let formatter = DateFormatter()
@@ -263,12 +275,12 @@ enum Formats {
         return formatter
     }()
 
-    static func clock(_ date: Date) -> String { time.string(from: date) }
+    static func clock(_ date: Date, h24: Bool) -> String { (h24 ? time24 : time12).string(from: date) }
 
     /// The time of a list row: today the clock, within the week the weekday, older the date.
-    static func row(_ date: Date) -> String {
+    static func row(_ date: Date, h24: Bool) -> String {
         let calendar = Calendar.current
-        if calendar.isDateInToday(date) { return time.string(from: date) }
+        if calendar.isDateInToday(date) { return clock(date, h24: h24) }
         if let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: calendar.startOfDay(for: Date())).day,
             days < 7
         {

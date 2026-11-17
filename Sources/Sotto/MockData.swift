@@ -34,6 +34,7 @@ enum MockData {
     }
 
     static func fill(_ model: AppModel) {
+        model.storageBytes = 3_211_264
         var contacts: [Contact] = []
         var messages: [String: [Message]] = [:]
 

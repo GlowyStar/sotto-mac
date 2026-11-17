@@ -13,7 +13,9 @@ struct RootView: View {
         VStack(spacing: 0) {
             TitleStrip()
             GeometryReader { geometry in
-                if model.welcome != nil {
+                if model.locked {
+                    LockScreen(model: model)
+                } else if model.welcome != nil {
                     WelcomeScreen(model: model)
                 } else {
                     columns(width: geometry.size.width)
@@ -22,8 +24,9 @@ struct RootView: View {
         }
         .frame(minWidth: Metrics.windowMin.width, minHeight: Metrics.windowMin.height)
         .background(Color.windowBg)
-        .overlay { modalLayer }
-        .overlay(alignment: .bottom) { toastLayer }
+        .overlay { if !model.locked { modalLayer } }
+        .overlay(alignment: .bottom) { if !model.locked { toastLayer } }
+        .environment(\.settings, model.settings)
         .background {
             // Escape anywhere: closes a box, clears the search, leaves the chat.
             Button("") { model.escape() }
@@ -32,6 +35,7 @@ struct RootView: View {
                 .accessibilityHidden(true)
         }
         .animation(Motion.pick(Motion.box, reduce: reduceMotion), value: model.modal)
+        .animation(Motion.pick(Motion.box, reduce: reduceMotion), value: model.settingsDialog)
         .animation(Motion.pick(Motion.toastIn, reduce: reduceMotion), value: model.toast)
         .ignoresSafeArea()
     }
@@ -56,7 +60,8 @@ struct RootView: View {
 
     private func chatArea(width: CGFloat, singleColumn: Bool) -> some View {
         ZStack {
-            LinearGradient(colors: [.chatBgTop, .chatBgBottom], startPoint: .top, endPoint: .bottom)
+            LinearGradient(
+                colors: [model.settings.background.top, model.settings.background.bottom], startPoint: .top, endPoint: .bottom)
             if let contact = model.openChat {
                 ChatScreen(model: model, contact: contact, singleColumn: singleColumn, width: width)
             } else {
@@ -70,15 +75,46 @@ struct RootView: View {
     @ViewBuilder
     private var modalLayer: some View {
         if let modal = model.modal {
-            ZStack {
-                Color.layerBg
-                    .ignoresSafeArea()
-                    .onTapGesture { model.modal = nil }
-                    .accessibilityHidden(true)
-                box(for: modal)
+            GeometryReader { geometry in
+                ZStack {
+                    Color.layerBg
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            // The settings panel closes on the dim only from its root page.
+                            if modal != .settings || model.settingsPage == nil { model.modal = nil }
+                        }
+                        .accessibilityHidden(true)
+                    Group {
+                        if modal == .settings {
+                            SettingsPanel(model: model, window: geometry.size)
+                        } else {
+                            box(for: modal)
+                        }
+                    }
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.95)))
+                    if modal == .settings, let dialog = model.settingsDialog {
+                        Color.layerBg
+                            .ignoresSafeArea()
+                            .onTapGesture { model.settingsDialog = nil }
+                            .accessibilityHidden(true)
+                            .transition(.opacity)
+                        settingsBox(for: dialog)
+                            .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.95)))
+                    }
+                }
+                .frame(width: geometry.size.width, height: geometry.size.height)
             }
             .transition(.opacity)
+        }
+    }
+
+    @ViewBuilder
+    private func settingsBox(for dialog: SettingsDialog) -> some View {
+        switch dialog {
+        case .myID: MyIDBox(model: model) { model.settingsDialog = nil }
+        case .passcode: PasscodeBox(model: model)
+        case .autoLock: AutoLockBox(model: model)
+        case .reset: ResetBox(model: model)
         }
     }
 
@@ -90,7 +126,7 @@ struct RootView: View {
         case .myID:
             MyIDBox(model: model)
         case .settings:
-            SettingsBox(model: model)
+            EmptyView()
         case .contactInfo(let id):
             if let contact = model.contact(id) { ContactPanel(model: model, contact: contact, asBox: true) }
         case .rename(let id):

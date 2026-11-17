@@ -88,7 +88,7 @@ struct ListTopBar: View {
                     Label("My id", systemImage: "person.text.rectangle")
                 }
                 Button {
-                    model.modal = .settings
+                    model.openSettings()
                 } label: {
                     Label("Settings", systemImage: "gearshape")
                 }
@@ -207,7 +207,7 @@ struct ChatRow: View {
                                 )
                                 .frame(width: Metrics.rowMarkBox, height: Metrics.rowMarkBox)
                             }
-                            Text(Formats.row(last.date))
+                            Text(Formats.row(last.date, h24: model.clock24))
                                 .font(Fonts.rowText)
                                 .foregroundStyle(active ? Color.rowFgActive : Color.rowDateFg)
                                 .fixedSize()

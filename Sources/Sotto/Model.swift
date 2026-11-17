@@ -63,9 +63,7 @@ enum ConnectionState: Hashable {
     }
 }
 
-enum ThemeChoice: String, CaseIterable, Identifiable {
-    case system, light, dark
-    var id: String { rawValue }
+extension AppSettings.Theme {
     var title: String { rawValue.capitalized }
     var appearance: NSAppearance? {
         switch self {
@@ -74,6 +72,19 @@ enum ThemeChoice: String, CaseIterable, Identifiable {
         case .dark: NSAppearance(named: .darkAqua)
         }
     }
+}
+
+/// The pages under the root page of the settings panel (DESIGN.md 11).
+enum SettingsPage: Hashable, CaseIterable {
+    case notifications, chats, data, privacy, connection, advanced
+}
+
+/// The boxes drawn over the settings panel.
+enum SettingsDialog: Hashable {
+    case myID
+    case passcode
+    case autoLock
+    case reset
 }
 
 enum Modal: Hashable {
@@ -143,7 +154,7 @@ struct Launch {
 final class AppModel {
     static let shared = AppModel.launched()
 
-    let messenger: Messenger?
+    private(set) var messenger: Messenger?
     var myID: String
     /// Set while the first-launch screen is shown.
     var welcome: Welcome?
@@ -161,12 +172,26 @@ final class AppModel {
     var searchSelection = 0
     var connection: ConnectionState = .connected
     var relayAddress: String
-    var theme: ThemeChoice {
+    var settings: AppSettings {
         didSet {
-            UserDefaults.standard.set(theme.rawValue, forKey: "theme")
-            applyTheme()
+            guard settings != oldValue else { return }
+            if settings.theme != oldValue.theme { applyTheme() }
+            let saved = settings
+            run { try await $0.saveSettings(saved) }
         }
     }
+    /// The open page of the settings panel; nil is the root page.
+    var settingsPage: SettingsPage?
+    var settingsDialog: SettingsDialog?
+    /// The relay address typed on the connection page and not saved yet.
+    var relayDraft: String?
+    /// Set while the lock screen covers the window (DESIGN.md 11.6).
+    var locked = false
+    /// The data folder; nil for the mock data.
+    private(set) var dataDirectory: URL?
+    /// The size of the data folder, read when the storage page opens.
+    var storageBytes: Int64?
+    @ObservationIgnored var lastActivity = Date()
     /// Bumped to ask the compose field for focus.
     var composeFocusTick = 0
     /// Bumped to ask the search field for focus.
@@ -179,18 +204,33 @@ final class AppModel {
         messenger = nil
         myID = MockData.id(for: "me")
         relayAddress = "wss://relay.sotto.example"
-        theme = ThemeChoice(rawValue: UserDefaults.standard.string(forKey: "theme") ?? "") ?? .system
+        settings = AppSettings()
         if mock { MockData.fill(self) }
     }
 
-    init(messenger: Messenger) {
-        self.messenger = messenger
+    init(messenger: Messenger, directory: URL) {
         myID = ""
         relayAddress = ""
         connection = .idle
-        welcome = messenger.hadIdentity ? nil : .start
-        theme = ThemeChoice(rawValue: UserDefaults.standard.string(forKey: "theme") ?? "") ?? .system
+        dataDirectory = directory
+        settings = messenger.launchSettings ?? Self.legacySettings()
+        locked = settings.passcode != nil
         scriptedSends = Launch.current.sends
+        attach(messenger)
+    }
+
+    /// Before the settings moved to `app.json` the theme was kept in the user defaults.
+    private static func legacySettings() -> AppSettings {
+        var settings = AppSettings()
+        if let theme = UserDefaults.standard.string(forKey: "theme").flatMap(AppSettings.Theme.init(rawValue:)) {
+            settings.theme = theme
+        }
+        return settings
+    }
+
+    private func attach(_ messenger: Messenger) {
+        self.messenger = messenger
+        welcome = messenger.hadIdentity ? nil : .start
         Task { [weak self] in
             for await state in messenger.changes { self?.apply(state) }
         }
@@ -205,7 +245,7 @@ final class AppModel {
             return model
         }
         do {
-            return AppModel(messenger: try Messenger(directory: launch.directory, relay: launch.relay))
+            return AppModel(messenger: try Messenger(directory: launch.directory, relay: launch.relay), directory: launch.directory)
         } catch {
             let model = AppModel(mock: false)
             model.myID = ""
@@ -280,7 +320,122 @@ final class AppModel {
     // MARK: Actions
 
     func applyTheme() {
-        NSApp?.appearance = theme.appearance
+        NSApp?.appearance = settings.theme.appearance
+    }
+
+    // MARK: Settings
+
+    func openSettings() {
+        guard modal != .settings else { return }
+        settingsPage = nil
+        settingsDialog = nil
+        relayDraft = nil
+        modal = .settings
+    }
+
+    var waitingCount: Int {
+        messages.values.reduce(0) { $0 + $1.filter { $0.state == .waiting }.count }
+    }
+
+    var clock24: Bool { settings.clock24 ?? Formats.localeUses24Hours }
+
+    func measureStorage() {
+        guard let directory = dataDirectory else { return }
+        Task.detached {
+            var total: Int64 = 0
+            let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .isRegularFileKey]
+            let files = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: keys)
+            while let url = files?.nextObject() as? URL {
+                let values = try? url.resourceValues(forKeys: Set(keys))
+                if values?.isRegularFile == true { total += Int64(values?.totalFileAllocatedSize ?? 0) }
+            }
+            await MainActor.run { [weak self] in self?.storageBytes = total }
+        }
+    }
+
+    func chooseDownloadFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        if let folder = settings.downloadFolder { panel.directoryURL = URL(fileURLWithPath: folder) }
+        if panel.runModal() == .OK, let url = panel.url { settings.downloadFolder = url.path }
+    }
+
+    var downloadFolder: URL {
+        settings.downloadFolder.map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+    }
+
+    /// Engages the lock screen when a passcode is set.
+    func lock() {
+        guard settings.passcode != nil, welcome == nil else { return }
+        locked = true
+    }
+
+    func unlock(_ text: String) -> Bool {
+        guard settings.passcode?.matches(text) ?? true else { return false }
+        locked = false
+        lastActivity = Date()
+        return true
+    }
+
+    /// Watches input, idle time and sleep for the auto-lock.
+    func watchActivity() {
+        NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel, .mouseMoved]) {
+            [weak self] event in
+            self?.lastActivity = Date()
+            return event
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                if self?.settings.lockOnSleep == true { self?.lock() }
+            }
+        }
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard let self else { return }
+                let idle = Date().timeIntervalSince(self.lastActivity)
+                if !self.locked, idle >= Double(self.settings.autoLockMinutes * 60) { self.lock() }
+            }
+        }
+    }
+
+    /// Deletes the identity, the contacts and the messages of this Mac and shows the first
+    /// launch; the mock data is only cleared.
+    func resetEverything() {
+        let messenger = messenger
+        self.messenger = nil
+        settingsDialog = nil
+        settingsPage = nil
+        modal = nil
+        closeChat()
+        panelOpen = false
+        contacts = []
+        messages = [:]
+        drafts = [:]
+        myID = ""
+        settings = AppSettings()
+        locked = false
+        guard let messenger, let directory = dataDirectory else {
+            welcome = .start
+            return
+        }
+        welcome = .start
+        Task { [weak self] in
+            await messenger.close()
+            do {
+                try Messenger.erase(directory: directory)
+                self?.attach(try Messenger(directory: directory, relay: Launch.current.relay))
+            } catch {
+                self?.connection = .stopped("The store cannot be opened: \(error).")
+                self?.showToast(Messenger.describe(error))
+            }
+        }
     }
 
     func openChat(_ id: String) {
@@ -474,7 +629,12 @@ final class AppModel {
 
     /// Escape, wherever the focus is (DESIGN.md 6).
     func escape() {
-        if modal != nil {
+        if locked { return }
+        if settingsDialog != nil {
+            settingsDialog = nil
+        } else if modal == .settings, settingsPage != nil {
+            settingsPage = nil
+        } else if modal != nil {
             modal = nil
         } else if searchFocused {
             if search.isEmpty { searchFocused = false } else { search = "" }

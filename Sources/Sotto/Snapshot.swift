@@ -42,9 +42,67 @@ enum Snapshot {
             openRich(model)
             model.modal = .contactInfo(model.openChatID ?? "")
         },
-        Shot(name: "settings") { $0.modal = .settings },
-        Shot(name: "settings-dark", dark: true) { $0.modal = .settings },
+        Shot(name: "settings") { $0.openSettings() },
+        Shot(name: "settings-dark", dark: true) { $0.openSettings() },
+        Shot(name: "settings-narrow", size: CGSize(width: 380, height: 600)) { $0.openSettings() },
+        Shot(name: "settings-notifications") { page($0, .notifications) },
+        Shot(name: "settings-notifications-off", dark: true) { model in
+            model.settings.notificationSender = false
+            model.settings.notificationPreview = false
+            page(model, .notifications)
+        },
+        Shot(name: "settings-chats", size: CGSize(width: 900, height: 1180)) { page($0, .chats) },
+        Shot(name: "settings-chats-dark", size: CGSize(width: 900, height: 1180), dark: true) { model in
+            model.settings.textSize = 17
+            model.settings.background = .mist
+            model.settings.sendWithCommandEnter = true
+            model.settings.clock24 = false
+            page(model, .chats)
+        },
+        Shot(name: "settings-data", size: CGSize(width: 900, height: 900)) { page($0, .data) },
+        Shot(name: "settings-privacy") { page($0, .privacy) },
+        Shot(name: "settings-privacy-on") { model in
+            model.settings.passcode = Passcode("1234")
+            page(model, .privacy)
+        },
+        Shot(name: "settings-connection") { model in
+            model.connection = .connecting
+            page(model, .connection)
+        },
+        Shot(name: "settings-advanced", dark: true) { page($0, .advanced) },
+        Shot(name: "settings-passcode") { model in
+            page(model, .privacy)
+            model.settingsDialog = .passcode
+        },
+        Shot(name: "settings-autolock", dark: true) { model in
+            model.settings.passcode = Passcode("1234")
+            page(model, .privacy)
+            model.settingsDialog = .autoLock
+        },
+        Shot(name: "settings-reset") { model in
+            page(model, .advanced)
+            model.settingsDialog = .reset
+        },
+        Shot(name: "lock-screen") { model in
+            model.settings.passcode = Passcode("1234")
+            model.lock()
+        },
+        Shot(name: "main-custom") { model in
+            model.settings.textSize = 16
+            model.settings.background = .sand
+            model.settings.clock24 = false
+            openRich(model)
+        },
+        Shot(name: "main-custom-dark", dark: true) { model in
+            model.settings.background = .rose
+            openRich(model)
+        },
     ]
+
+    private static func page(_ model: AppModel, _ page: SettingsPage) {
+        model.openSettings()
+        model.settingsPage = page
+    }
 
     /// The pictures of a real store: the list, and the chat of the latest activity opened.
     private static let realShots: [Shot] = [
