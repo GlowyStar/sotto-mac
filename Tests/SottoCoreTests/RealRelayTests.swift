@@ -44,10 +44,18 @@ final class RealRelay: @unchecked Sendable {
         }
     }
 
-    /// Ends the process with SIGTERM, waits for it and removes its folder.
+    /// Ends the process with SIGTERM, waits up to ten seconds for it, then kills it, and
+    /// removes its folder. It polls `isRunning`: `waitUntilExit` sleeps in the run loop of the
+    /// calling thread, and after an `await` that is not the thread `Process` wakes on exit.
     func stop() {
         process.terminate()
-        process.waitUntilExit()
+        let deadline = Date().addingTimeInterval(10)
+        while process.isRunning, Date() < deadline {
+            usleep(20_000)
+        }
+        if process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+        }
         try? FileManager.default.removeItem(at: folder)
     }
 
