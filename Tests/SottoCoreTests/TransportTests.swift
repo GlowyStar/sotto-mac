@@ -200,6 +200,11 @@ struct TransportTests {
         #expect(try await nextText(bobLink.transport) == (alice, "first"))
         try await bobLink.transport.sendText(alice, "reply")
         #expect(try await nextText(aliceLink.transport) == (bob, "reply"))
+        // The delivery receipt of Alice for "reply" (section 39.5) reaches Bob before the
+        // tampering starts, so that the tampered Deliver is the one of "tampered".
+        _ = try await nextEvent(bobLink.transport) {
+            if case .incoming(_, let received) = $0 { !received.marked.isEmpty } else { false }
+        }
         let sessions = try await (sessionCount(aliceLink.transport, bob), sessionCount(bobLink.transport, alice))
 
         tamperingOn.set()
