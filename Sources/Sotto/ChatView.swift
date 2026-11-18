@@ -505,13 +505,9 @@ struct MessageRow: View {
     private var textWithTime: some View {
         let out = message.outgoing
         // A transparent copy of the time keeps room for it on the last line.
-        let reserve = Text(TimeMark.reserve(message, time: time)).foregroundColor(.clear)
-        return (Text(Self.attributed(message.text, out: out)) + reserve)
-            .font(Fonts.message(settings.textSize))
-            .lineSpacing(Fonts.messageLineSpacing(settings.textSize))
-            .foregroundStyle(out ? Color.msgOutFg : Color.msgInFg)
-            .tint(out ? Color.msgOutLinkFg : Color.msgInLinkFg)
-            .textSelection(.enabled)
+        let content = BubbleText.Content(
+            text: message.text, out: out, reserve: TimeMark.reserve(message, time: time), size: settings.textSize)
+        return BubbleText(content: content)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, Metrics.bubblePadH)
             .padding(.vertical, Metrics.bubblePadV)
@@ -565,15 +561,20 @@ struct MessageRow: View {
         }
     }
 
+    /// The links detected in a text.
+    static func links(in text: String) -> [(NSRange, URL)] {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+            return []
+        }
+        return detector.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length))
+            .compactMap { match in match.url.map { (match.range, $0) } }
+    }
+
     /// The text with its links detected and coloured.
     static func attributed(_ text: String, out: Bool) -> AttributedString {
         var result = AttributedString(text)
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
-            return result
-        }
-        let nsText = text as NSString
-        for match in detector.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
-            guard let url = match.url, let range = Range(match.range, in: result) else { continue }
+        for (nsRange, url) in links(in: text) {
+            guard let range = Range(nsRange, in: result) else { continue }
             result[range].link = url
             result[range].foregroundColor = out ? Color.msgOutLinkFg : Color.msgInLinkFg
         }

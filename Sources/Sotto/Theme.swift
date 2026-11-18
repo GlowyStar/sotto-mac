@@ -48,6 +48,8 @@ extension Color {
     static let msgOutDateFg = token("6db566", "7da8d3")
     static let msgInLinkFg = token("168acd", "70baf5")
     static let msgOutLinkFg = token("168acd", "83caff")
+    static let msgInSelectBg = token("c2dcf2", "2e70a5")
+    static let msgOutSelectBg = token("b7dbdb", "2e70a5")
     static let msgInShadow = token("748ea229", "748ea200")
     static let msgOutShadow = token("3ac3461d", "00000000")
     static let msgStoredIconFg = token("57b84c", "6bbfff")

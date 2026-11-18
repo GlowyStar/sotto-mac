@@ -319,7 +319,26 @@ enum Snapshot {
             nora(model)
             model.startEdit("nora-8", in: model.openChatID ?? "")
         },
+        // SOTTO-25: a selection in an incoming and an outgoing bubble, a link under the pointer.
+        Shot(name: "text-selection") { select($0) },
+        Shot(name: "text-selection-dark", dark: true) { select($0) },
+        Shot(name: "text-link-hover", size: CGSize(width: 900, height: 760)) { hoverLink($0) },
+        Shot(name: "text-link-hover-dark", size: CGSize(width: 900, height: 760), dark: true) { hoverLink($0) },
     ]
+
+    private static func select(_ model: AppModel) {
+        openRich(model)
+        BubbleTextView.staged = [
+            "Only I might be a few minutes late, the train is slow today 🚆": (NSRange(location: 5, length: 28), false),
+            "Прочитал. В целом хорошо, но третий раздел я бы сократил вдвое: там повторяется то, что уже сказано во введении, и теряется главная мысль про ключи на устройстве.":
+                (NSRange(location: 18, length: 70), false),
+        ]
+    }
+
+    private static func hoverLink(_ model: AppModel) {
+        openRich(model)
+        BubbleTextView.staged = ["https://example.com/drafts/sotto-notes": (NSRange(location: 0, length: 0), true)]
+    }
 
     private static func nora(_ model: AppModel) { open(model, "Nora Weiss") }
 
@@ -408,6 +427,7 @@ enum Snapshot {
     }
 
     private static func render(_ shot: Shot, model: AppModel, to url: URL) -> Bool {
+        BubbleTextView.staged = [:]
         shot.setUp(model)
         let view = NSHostingView(rootView: RootView(model: model))
         view.appearance = NSAppearance(named: shot.dark ? .darkAqua : .aqua)

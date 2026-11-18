@@ -241,7 +241,7 @@ Tail: only on the last bubble of a group, at the bottom corner on the sender's s
 
 Time and text flow: if the last text line plus the time (and mark) fits in the maximum width, the time sits on that line; otherwise the bubble grows by one line and the time sits alone at the trailing bottom. Implement with a transparent spacer of the time's width appended to the text.
 
-Text is selectable (`.textSelection(.enabled)`); links are detected, coloured `msgInLinkFg` / `msgOutLinkFg` and underlined on hover; selection uses `msgInSelectBg` / `msgOutSelectBg`. Hover shows nothing; a right click opens the context menu (5.9).
+Text is selectable, drawn by a non-editable AppKit text view with the same font, line spacing and width rules; links are detected, coloured `msgInLinkFg` / `msgOutLinkFg`, underlined while the pointer is over them with the pointing hand cursor, and opened in the default browser on click; selection uses `msgInSelectBg` / `msgOutSelectBg` with the text colour kept, in an active and an inactive window alike, never covers the reserved time line, and is cleared when another view takes the focus; Cmd+C copies it as plain text. Hover outside a link shows nothing; a right click opens the context menu (5.9).
 
 Photo and file bubbles are specified in 13.1 and 13.2; a bubble with only a photo has no content padding.
 
@@ -501,7 +501,7 @@ Estimated, worth a look by the owner:
 Decisions for the owner:
 - The send button hides when the field is empty (the reference shows a microphone there; Sotto has no voice).
 - Row reorder is animated here, instant in the reference.
-- Not built yet: the selection colours and the link underline on hover of 5.4. SwiftUI `Text` has no hook for either; both need the bubble text drawn by an AppKit text view, with the context menu of 5.9 kept.
+- Built (SOTTO-25, 2026-11-18): the selection colours and the link underline on hover of 5.4, with the bubble text drawn by an AppKit text view and the context menu of 5.9 kept.
 - Context menus: system `.contextMenu` first, the custom look later.
 
 ### Added with sections 10 to 18 (2026-11-17)
@@ -528,7 +528,7 @@ Decisions for the owner:
 - Files sent as pictures: this spec sends a picture as a photo unless "Send as file" is checked; the reference's 72 square preview variant is not used.
 - Notifications: "Hide contents while locked" in Privacy is this spec's reading of "previews hidden in notifications"; the Notifications page already has the general preview toggle.
 - Dropping files on a chat row of another contact (the reference supports it) is not designed.
-- Not built, as in section 9: selection colours and link underline of 5.4 stay an AppKit text view job; the caption of 13.1 and 13.2 needs the same view.
+- Built (SOTTO-25, 2026-11-18): the caption of 13.1 and 13.2 uses the text view of 5.4, with its selection colours and link underline.
 
 ### Added with the settings panel (SOTTO-35, 2026-11-17)
 
