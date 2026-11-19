@@ -60,22 +60,26 @@ final class Relay {
     var prekeys: [Data: PrekeyUpload] = [:]
     var queues: [Data: [Delivered]] = [:]
 
-    func publish(_ client: Client, oneTimeCount: Int = 1) throws {
-        prekeys[client.identityKey] = try client.makePrekeys(oneTimeCount: oneTimeCount)
+    func publish(_ client: Client, oneTimeCount: Int = 1, pqOneTimeCount: Int = 0) throws {
+        prekeys[client.identityKey] = try client.makePrekeys(oneTimeCount: oneTimeCount, pqOneTimeCount: pqOneTimeCount)
     }
 
-    /// Hands out the bundle with the first one-time prekey, which leaves the relay.
+    /// Hands out the bundle with the first one-time prekey and the first one-time
+    /// post-quantum prekey, which leave the relay, else the last-resort one.
     func fetch(_ identity: Data) -> PrekeyBundle {
         var upload = prekeys[identity]!
         let oneTimePrekey = upload.oneTimePrekeys.first
+        let pqOneTimePrekey = upload.pqOneTimePrekeys.first
         upload.oneTimePrekeys = Array(upload.oneTimePrekeys.dropFirst())
+        upload.pqOneTimePrekeys = Array(upload.pqOneTimePrekeys.dropFirst())
         prekeys[identity] = upload
         return PrekeyBundle(
             identity: identity,
             identityDHKey: upload.identityDHKey,
             identityDHSignature: upload.identityDHSignature,
             signedPrekey: upload.signedPrekey,
-            oneTimePrekey: oneTimePrekey
+            oneTimePrekey: oneTimePrekey,
+            pqPrekey: pqOneTimePrekey ?? upload.pqPrekey
         )
     }
 
@@ -186,6 +190,7 @@ func initialHeader(of delivered: Delivered) throws -> Sotto_InitialHeader? {
 func keys(_ upload: PrekeyUpload) -> [Data] {
     [upload.identityDHKey, upload.signedPrekey.key, withUnsafeBytes(of: upload.signedPrekey.id) { Data($0) }]
         + upload.oneTimePrekeys.flatMap { [$0.key, withUnsafeBytes(of: $0.id) { Data($0) }] }
+        + ([upload.pqPrekey].compactMap { $0 } + upload.pqOneTimePrekeys).flatMap { [$0.key, withUnsafeBytes(of: $0.id) { Data($0) }] }
 }
 
 func verifySignatures(_ upload: PrekeyUpload, of client: Client) throws {
@@ -199,6 +204,14 @@ func verifySignatures(_ upload: PrekeyUpload, of client: Client) throws {
         signedPrekey: upload.signedPrekey.key,
         signature: upload.signedPrekey.signature
     )
+    for pqPrekey in [upload.pqPrekey].compactMap({ $0 }) + upload.pqOneTimePrekeys {
+        try Identity.verifyPQPrekey(identityKey: client.identityKey, pqPrekey: pqPrekey.key, signature: pqPrekey.signature)
+    }
+}
+
+func heldPQOneTimePrekeyIDs(_ client: Client) throws -> [Int64] {
+    try client.store.query("SELECT prekey_id FROM pq_prekeys WHERE signed_prekey_id IS NULL ORDER BY prekey_id")
+        .map { $0[0].integer! }
 }
 
 func oneTimePrekeyIDs(_ upload: PrekeyUpload?) -> [UInt32] {

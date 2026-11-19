@@ -7,6 +7,7 @@ random 256-bit key; that key is kept on disk only wrapped to a Secure Enclave ke
 Mac, whose use needs the user's presence (Touch ID or the Mac password). Nothing about the
 store is in the keychain. The directory keeps mode 0700 and the files 0600.
 
+Since SOTTO-45 it holds the private keys of PQXDH too (below, "Post-quantum prekeys").
 Since SOTTO-43 the store also holds what the app kept beside it: its notes (drafts, read
 positions, pins, settings), pasted pictures and received files. What still leaves it, and
 why, is listed in "What is written outside the store".
@@ -26,6 +27,33 @@ two-level namespace of macOS, so a system `libsqlite3` that a system framework l
 the same process never serves the store; `Sotto --store-info` prints the version, the
 provider and the file of the library that serves it, and `scripts/app-interop.py` checks
 that this file is the framework inside `Sotto.app`.
+
+## Post-quantum prekeys
+
+Since SOTTO-45 new sessions are agreed by PQXDH (part 6 of the protocol), and the store
+holds two tables more, which a store of an earlier version gains when it opens; no table
+or column of before changes, so an existing encrypted store opens as it is.
+
+| Table | What it holds |
+| --- | --- |
+| `pq_prekeys` | one row per post-quantum prekey whose private key the client holds: its id, the 64-byte seed d \|\| z of ML-KEM-768 (FIPS 203, ML-KEM.KeyGen_internal), from which CryptoKit derives the private and the public key, and the id of its signed prekey for the last-resort key, none for a one-time key. The public keys and their signatures are made again from the seed for each upload and are not stored |
+| `pq_prekey_ids` | the counter of their ids, one row |
+
+- The seed is the private key, as the reference keeps it; nothing else of an ML-KEM key is
+  written, and it lives only in these encrypted pages, like the X25519 private keys of the
+  signed and the one-time prekeys beside it.
+- The last-resort key is made in the transaction of its signed prekey and deleted with it
+  at the end of the grace period. A one-time key is deleted in the transaction that
+  accepts the session it started, with the bounds of the protocol: at most 400 held, the
+  lowest ids deleted first, and those of a refused upload deleted at once.
+- The shared secret of an encapsulation, the ciphertext and the input of the key
+  derivation are never stored: the initiator keeps the ciphertext only inside the initial
+  header of its session until the first reply, as the protocol says. A session's version
+  is the first byte of its session associated data; X3DH sessions of before keep version
+  1.
+- `secure_delete` is on, so a deleted seed is overwritten in its page. What CryptoKit
+  copies while it derives a key or decapsulates is out of this code's reach, as for the
+  other keys.
 
 ## Unlock and lock
 

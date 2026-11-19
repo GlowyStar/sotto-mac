@@ -6,11 +6,11 @@ cd "$(dirname "$0")/.."
 
 src="${1:-../../python/sotto}"
 commit="$(git -C "$src" rev-parse HEAD)"
-files=(sotto.proto vectors/identity.json vectors/x3dh.json vectors/ratchet.json vectors/blob.json vectors/profile.json vectors/content.json)
+files=(sotto.proto vectors/identity.json vectors/x3dh.json vectors/ratchet.json vectors/blob.json vectors/profile.json vectors/content.json vectors/pqxdh.json vectors/safety-number.json)
 
 mkdir -p Protocol/vectors
 git -C "$src" show "$commit:proto/sotto.proto" > Protocol/sotto.proto
-for name in identity x3dh ratchet blob profile content; do
+for name in identity x3dh ratchet blob profile content pqxdh safety-number; do
     git -C "$src" show "$commit:vectors/$name.json" > "Protocol/vectors/$name.json"
 done
 

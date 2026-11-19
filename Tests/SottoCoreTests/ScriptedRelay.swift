@@ -163,6 +163,7 @@ actor ScriptedRelay: RelayDialer {
             identities[number] = login.identityKey
             online[login.identityKey] = number
             answer.loggedIn.oneTimePrekeyCount = UInt32(bundles[login.identityKey]?.oneTimePrekeys.count ?? 0)
+            answer.loggedIn.pqOneTimePrekeyCount = UInt32(bundles[login.identityKey]?.pqOneTimePrekeys.count ?? 0)
             answer.loggedIn.blobMaxBytes = UInt32(blobMaxBytes)
             await push(number, answer)
             for deliver in queues[login.identityKey] ?? [] {
@@ -173,6 +174,10 @@ actor ScriptedRelay: RelayDialer {
             let identity = identities[number]!
             var held = upload
             held.oneTimePrekeys = (bundles[identity]?.oneTimePrekeys ?? []) + upload.oneTimePrekeys
+            held.pqOneTimePrekeys = (bundles[identity]?.pqOneTimePrekeys ?? []) + upload.pqOneTimePrekeys
+            if !upload.hasPqPrekey, let kept = bundles[identity], kept.hasPqPrekey {
+                held.pqPrekey = kept.pqPrekey
+            }
             bundles[identity] = held
             answer.bundleStored = Sotto_BundleStored()
         case .fetchBundle(let fetch):
@@ -187,8 +192,13 @@ actor ScriptedRelay: RelayDialer {
             answer.bundle.signedPrekey = held.signedPrekey
             if !held.oneTimePrekeys.isEmpty {
                 answer.bundle.oneTimePrekey = held.oneTimePrekeys.removeFirst()
-                bundles[fetch.identity] = held
             }
+            if !held.pqOneTimePrekeys.isEmpty {
+                answer.bundle.pqPrekey = held.pqOneTimePrekeys.removeFirst()
+            } else if held.hasPqPrekey {
+                answer.bundle.pqPrekey = held.pqPrekey
+            }
+            bundles[fetch.identity] = held
         case .send(let send):
             if !refusals.isEmpty {
                 answer.error.code = Sotto_ErrorCode(rawValue: refusals.removeFirst())!

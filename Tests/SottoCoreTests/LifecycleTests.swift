@@ -16,7 +16,7 @@ func initialMessageUnderAReplacedSignedPrekeyDecryptsOnlyInTheGracePeriod(index:
         let oldPrivateKey = try #require(try bob.store.signedPrekey(1, replacedAfter: 0))
 
         clients.clock.advance(Client.signedPrekeyRotationSeconds)
-        let upload = try #require(try bob.prepareUpload(oneTimePrekeyCount: 0))
+        let upload = try #require(try bob.prepareUpload(oneTimePrekeyCount: 0, pqOneTimePrekeyCount: Client.pqOneTimePrekeyCap))
         #expect(upload.signedPrekey.id == 2)
         clients.clock.advance(secondsAfterTheReplacement)
         if deleted {
@@ -56,7 +56,7 @@ func initialMessageUnderAReplacedSignedPrekeyDecryptsOnlyInTheGracePeriod(index:
         #expect(try bob.receive(initial).result == "REPLAYED_INITIAL")
         #expect(try rows(bob.store) == storeBefore)
 
-        _ = try bob.prepareUpload(oneTimePrekeyCount: 0)
+        _ = try bob.prepareUpload(oneTimePrekeyCount: 0, pqOneTimePrekeyCount: Client.pqOneTimePrekeyCap)
         clients.clock.advance(Client.signedPrekeyGraceSeconds)
         try bob.deleteExpiredPrekeys()
         #expect(try bob.store.query("SELECT count(*) FROM records") == [[.integer(Int64(ClientStore.maxSessions))]])
@@ -84,21 +84,21 @@ func initialMessageUnderAReplacedSignedPrekeyDecryptsOnlyInTheGracePeriod(index:
 @Test func rotationFollowsTheAgeOfTheNewestSignedPrekey() throws {
     try withClients { clients, _ in
         let carol = try clients.open("carol")
-        let first = try #require(try carol.prepareUpload(oneTimePrekeyCount: 0))
+        let first = try #require(try carol.prepareUpload(oneTimePrekeyCount: 0, pqOneTimePrekeyCount: Client.pqOneTimePrekeyCap))
         #expect(first.signedPrekey.id == 1)
         #expect(first.oneTimePrekeys.count == Client.oneTimePrekeyCap)
 
-        let again = try #require(try carol.prepareUpload(oneTimePrekeyCount: Client.oneTimePrekeyCap))
+        let again = try #require(try carol.prepareUpload(oneTimePrekeyCount: Client.oneTimePrekeyCap, pqOneTimePrekeyCount: Client.pqOneTimePrekeyCap))
         var firstWithoutOneTimePrekeys = first
         firstWithoutOneTimePrekeys.oneTimePrekeys = []
         #expect(keys(again) == keys(firstWithoutOneTimePrekeys))
         try verifySignatures(again, of: carol)
         try carol.confirmUpload(first)
         clients.clock.advance(Client.signedPrekeyRotationSeconds - 1)
-        #expect(try carol.prepareUpload(oneTimePrekeyCount: Client.oneTimePrekeyCap) == nil)
+        #expect(try carol.prepareUpload(oneTimePrekeyCount: Client.oneTimePrekeyCap, pqOneTimePrekeyCount: Client.pqOneTimePrekeyCap) == nil)
 
         clients.clock.advance(1)
-        let rotated = try #require(try carol.prepareUpload(oneTimePrekeyCount: Client.oneTimePrekeyCap))
+        let rotated = try #require(try carol.prepareUpload(oneTimePrekeyCount: Client.oneTimePrekeyCap, pqOneTimePrekeyCount: Client.pqOneTimePrekeyCap))
         #expect(rotated.signedPrekey.id == 2)
         #expect(rotated.oneTimePrekeys.isEmpty)
         #expect(rotated.identityDHKey == first.identityDHKey)
@@ -110,7 +110,7 @@ func initialMessageUnderAReplacedSignedPrekeyDecryptsOnlyInTheGracePeriod(index:
 func refillTopsUpToTheCapBelowTheThreshold(count: Int, made: Int) throws {
     try withClients { clients, _ in
         let carol = try clients.open("carol")
-        #expect(oneTimePrekeyIDs(try carol.prepareUpload(oneTimePrekeyCount: count)).count == made)
+        #expect(oneTimePrekeyIDs(try carol.prepareUpload(oneTimePrekeyCount: count, pqOneTimePrekeyCount: Client.pqOneTimePrekeyCap)).count == made)
     }
 }
 
@@ -119,7 +119,7 @@ func refillTopsUpToTheCapBelowTheThreshold(count: Int, made: Int) throws {
         let bundle = relay.fetch(bob.identityKey)
         #expect(bundle.oneTimePrekey?.id == 1)
 
-        let uploads = try (0..<10).map { _ in try bob.prepareUpload(oneTimePrekeyCount: 0) }
+        let uploads = try (0..<10).map { _ in try bob.prepareUpload(oneTimePrekeyCount: 0, pqOneTimePrekeyCount: Client.pqOneTimePrekeyCap) }
 
         #expect(oneTimePrekeyIDs(uploads.last!) == Array(902...1001))
         #expect(try heldOneTimePrekeyIDs(bob) == Array(2...1001))
@@ -132,8 +132,8 @@ func refillTopsUpToTheCapBelowTheThreshold(count: Int, made: Int) throws {
 @Test func unansweredUploadKeepsItsKeysAndARefusedOneDeletesThem() throws {
     try withClients { clients, _ in
         let carol = try clients.open("carol")
-        let unanswered = oneTimePrekeyIDs(try carol.prepareUpload(oneTimePrekeyCount: 0))
-        let refusedUpload = try #require(try carol.prepareUpload(oneTimePrekeyCount: 0))
+        let unanswered = oneTimePrekeyIDs(try carol.prepareUpload(oneTimePrekeyCount: 0, pqOneTimePrekeyCount: Client.pqOneTimePrekeyCap))
+        let refusedUpload = try #require(try carol.prepareUpload(oneTimePrekeyCount: 0, pqOneTimePrekeyCount: Client.pqOneTimePrekeyCap))
         #expect(Set(unanswered).isDisjoint(with: oneTimePrekeyIDs(refusedUpload)))
 
         try carol.dropRefusedUpload(refusedUpload)
@@ -146,9 +146,9 @@ func refillTopsUpToTheCapBelowTheThreshold(count: Int, made: Int) throws {
 @Test func prekeyIDsAreNeverReusedAndStopAtTheLastID() throws {
     try withClients { clients, _ in
         let carol = try clients.open("carol")
-        let first = try carol.makePrekeys(oneTimeCount: 2)
+        let first = try carol.makePrekeys(oneTimeCount: 2, pqOneTimeCount: 0)
         try carol.dropRefusedUpload(first)
-        let second = try carol.makePrekeys(oneTimeCount: 1)
+        let second = try carol.makePrekeys(oneTimeCount: 1, pqOneTimeCount: 0)
         #expect(second.signedPrekey.id == 2)
         #expect(oneTimePrekeyIDs(second) == [3])
 
@@ -159,8 +159,8 @@ func refillTopsUpToTheCapBelowTheThreshold(count: Int, made: Int) throws {
                 [.integer(last - 1), .integer(last - 1)]
             )
         }
-        let atTheLast = try carol.makePrekeys(oneTimeCount: 2)
-        let afterTheLast = try carol.makePrekeys(oneTimeCount: 1)
+        let atTheLast = try carol.makePrekeys(oneTimeCount: 2, pqOneTimeCount: 0)
+        let afterTheLast = try carol.makePrekeys(oneTimeCount: 1, pqOneTimeCount: 0)
 
         #expect(atTheLast.signedPrekey.id == ClientStore.lastPrekeyID)
         #expect(oneTimePrekeyIDs(atTheLast) == [ClientStore.lastPrekeyID])

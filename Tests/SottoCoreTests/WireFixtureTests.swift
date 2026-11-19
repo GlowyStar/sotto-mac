@@ -28,7 +28,7 @@ private func outcome(of frame: Sotto_ServerFrame.OneOf_Frame) throws -> (kind: S
 }
 
 @Test func serverFramesAreReadAsThePythonClientReadsThem() throws {
-    for fixture in try cases("server_frames", count: 361) {
+    for fixture in try cases("server_frames", count: 369) {
         let name = fixture["name"] as! String
         let message = Data(hex: fixture["hex"] as! String)
         do {
@@ -45,7 +45,7 @@ private func outcome(of frame: Sotto_ServerFrame.OneOf_Frame) throws -> (kind: S
 }
 
 @Test func peerMessagesAreParsedAsThePythonClientParsesThem() throws {
-    for fixture in try cases("peer_messages", count: 322) {
+    for fixture in try cases("peer_messages", count: 328) {
         let name = fixture["name"] as! String
         let payload = Data(hex: fixture["hex"] as! String)
         do {

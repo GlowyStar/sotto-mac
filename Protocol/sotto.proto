@@ -49,6 +49,7 @@ message Login {
 message LoggedIn {
   uint32 one_time_prekey_count = 1;
   uint32 blob_max_bytes = 2;
+  uint32 pq_one_time_prekey_count = 3;
 }
 
 message SignedPrekey {
@@ -67,10 +68,13 @@ message UploadBundle {
   bytes identity_dh_signature = 2;
   SignedPrekey signed_prekey = 3;
   repeated OneTimePrekey one_time_prekeys = 4;
+  SignedPrekey pq_prekey = 5;
+  repeated SignedPrekey pq_one_time_prekeys = 6;
 }
 
 message BundleStored {
   uint32 one_time_prekey_count = 1;
+  uint32 pq_one_time_prekey_count = 2;
 }
 
 message FetchBundle {
@@ -83,6 +87,7 @@ message Bundle {
   bytes identity_dh_signature = 3;
   SignedPrekey signed_prekey = 4;
   OneTimePrekey one_time_prekey = 5;
+  SignedPrekey pq_prekey = 6;
 }
 
 message Send {
@@ -181,6 +186,8 @@ message InitialHeader {
   bytes ephemeral_key = 3;
   uint32 signed_prekey_id = 4;
   optional uint32 one_time_prekey_id = 5;
+  bytes kem_ciphertext = 6;
+  uint32 pq_prekey_id = 7;
 }
 
 // The plaintext of a message before padding.

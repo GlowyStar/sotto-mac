@@ -11,6 +11,16 @@ interoperate with sotto's command-line client byte for byte.
   sotto's own command-line client through a sotto relay (`scripts/interop.py` checks it).
   The app `Sotto` runs on the same core: it chats with sotto's command-line client through
   a relay in both directions (`scripts/app-interop.py` checks it with the built app).
+- New sessions are agreed by PQXDH (part 6 of the protocol): X25519 with ML-KEM-768 of
+  CryptoKit, end-to-end version 2. The core replays every vector of sotto's
+  `vectors/pqxdh.json`; ML-KEM encapsulation is randomized and CryptoKit takes no fixed
+  randomness, so the vectors of the initiator are replayed with the recorded ciphertext and
+  secret, and the own encapsulation is checked by a round trip. Sessions made by X3DH
+  before keep working with version 1; no new one is made either way: a bundle without a
+  post-quantum prekey ends in `PQ_PREKEY_MISSING`, a new session of version 1 in
+  `X3DH_REFUSED`. Both interop scripts make a PQXDH session in each direction. The ratchet
+  is the classical Double Ratchet, so the post-quantum part protects the key agreement only,
+  and the Ed25519 signatures over the prekeys are classical too.
 - Files (part 3 of the protocol) are in the core and the command-line tool: a file of up to
   100 MiB goes to a contact encrypted with the blob cipher, uploaded and downloaded in
   pieces that resume after a cut connection or a restart; `scripts/interop.py` sends files
@@ -38,7 +48,7 @@ interoperate with sotto's command-line client byte for byte.
 
 ## Build, test, run
 
-Needs macOS 14 or later on a Mac with a Secure Enclave (Apple silicon or a T2 chip) and
+Needs macOS 26 or later (ML-KEM-768 of CryptoKit) on a Mac with a Secure Enclave (Apple silicon or a T2 chip) and
 Swift 6 (Command Line Tools are enough, Xcode is not needed). SwiftPM fetches
 SQLCipher 4.20.0, Zetetic's official Swift package, a binary framework that
 `scripts/build-app.sh` copies into the app.
@@ -261,6 +271,9 @@ Limits as they are:
 
 - A plain `ws://` address is dialed only to a loopback host; a relay on another machine
   belongs behind TLS and is dialed as `wss://`.
+- The private keys of the post-quantum prekeys, the 64-byte ML-KEM seeds, live in the
+  encrypted store with the other private keys (`docs/key-storage.md`); the last-resort one
+  goes with its signed prekey, a one-time one when the session it started is accepted.
 - What leaves the store is readable: a copy made with "Save as..." or "Save received
   files automatically", a file opened in another app while the store is open, what
   "Copy" puts on the pasteboard, and, with the name or the preview turned on, what macOS

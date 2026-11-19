@@ -1,6 +1,6 @@
 # Sotto for macOS: interface design spec
 
-Build target: SwiftUI, macOS 14+. This file is the single source for the interface. Every number is in points (pt, 1pt = 1px of the reference at 100% scale). A value marked `(estimate)` was not found in the reference and is the best value available; everything else comes from the reference style files named in section 9.
+Build target: SwiftUI, macOS 26+. This file is the single source for the interface. Every number is in points (pt, 1pt = 1px of the reference at 100% scale). A value marked `(estimate)` was not found in the reference and is the best value available; everything else comes from the reference style files named in section 9.
 
 ## 1. Reference and limits
 

@@ -276,15 +276,17 @@ public actor Transport {
         var frame = Sotto_UploadBundle()
         frame.identityDhKey = upload.identityDHKey
         frame.identityDhSignature = upload.identityDHSignature
-        frame.signedPrekey.id = upload.signedPrekey.id
-        frame.signedPrekey.key = upload.signedPrekey.key
-        frame.signedPrekey.signature = upload.signedPrekey.signature
+        frame.signedPrekey = signedPrekeyFrame(upload.signedPrekey)
         frame.oneTimePrekeys = upload.oneTimePrekeys.map { prekey in
             var oneTimePrekey = Sotto_OneTimePrekey()
             oneTimePrekey.id = prekey.id
             oneTimePrekey.key = prekey.key
             return oneTimePrekey
         }
+        if let pqPrekey = upload.pqPrekey {
+            frame.pqPrekey = signedPrekeyFrame(pqPrekey)
+        }
+        frame.pqOneTimePrekeys = upload.pqOneTimePrekeys.map(signedPrekeyFrame)
         var envelope = Sotto_ClientFrame()
         envelope.uploadBundle = frame
         return envelope
@@ -295,15 +297,24 @@ public actor Transport {
             identity: frame.identity,
             identityDHKey: frame.identityDhKey,
             identityDHSignature: frame.identityDhSignature,
-            signedPrekey: SignedPrekey(
-                id: frame.signedPrekey.id,
-                key: frame.signedPrekey.key,
-                signature: frame.signedPrekey.signature
-            ),
+            signedPrekey: signedPrekey(frame.signedPrekey),
             oneTimePrekey: frame.hasOneTimePrekey
                 ? OneTimePrekey(id: frame.oneTimePrekey.id, key: frame.oneTimePrekey.key)
-                : nil
+                : nil,
+            pqPrekey: frame.hasPqPrekey ? signedPrekey(frame.pqPrekey) : nil
         )
+    }
+
+    private static func signedPrekey(_ frame: Sotto_SignedPrekey) -> SignedPrekey {
+        SignedPrekey(id: frame.id, key: frame.key, signature: frame.signature)
+    }
+
+    private static func signedPrekeyFrame(_ prekey: SignedPrekey) -> Sotto_SignedPrekey {
+        var frame = Sotto_SignedPrekey()
+        frame.id = prekey.id
+        frame.key = prekey.key
+        frame.signature = prekey.signature
+        return frame
     }
 
     static func sendFrame(_ outgoing: Outgoing) -> Sotto_ClientFrame {
@@ -703,7 +714,10 @@ public actor Transport {
     /// The three steps of section 23.3, then the transfers of section 33.4.
     private func afterLogin(_ loggedIn: Sotto_LoggedIn) async throws {
         await sendBlobDeletions()
-        if let upload = try client.prepareUpload(oneTimePrekeyCount: Int(loggedIn.oneTimePrekeyCount)) {
+        if let upload = try client.prepareUpload(
+            oneTimePrekeyCount: Int(loggedIn.oneTimePrekeyCount),
+            pqOneTimePrekeyCount: Int(loggedIn.pqOneTimePrekeyCount)
+        ) {
             let request = Request(frame: Self.uploadFrame(upload))
             request.upload = upload
             await self.request(request)

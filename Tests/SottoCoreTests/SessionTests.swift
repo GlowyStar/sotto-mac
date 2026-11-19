@@ -255,7 +255,7 @@ func initialHeaderThatFailsStep1Or2ChangesNothing(change: String, result: String
     }
 }
 
-@Test(arguments: [UInt32(0), 2])
+@Test(arguments: [UInt32(0), 3])
 func otherVersionIsAckedAndChangesNothing(version: UInt32) throws {
     try withPair { _, relay, alice, bob in
         let delivered = try editEnvelope(send(relay, alice, bob, "hello")) { $0.version = version }
@@ -331,7 +331,7 @@ func crashBetweenDecryptionAndCommitChangesNothingAndTheMessageDecryptsAgain(mes
 
         #expect(text.utf8.count == Envelope.maxTextBytes)
         #expect(envelope.hasInitialHeader)
-        #expect(envelope.ciphertext.count == 65052)
+        #expect(envelope.ciphertext.count == 64028)
         #expect(delivered.payload.count <= longestPayload)
         #expect(try bob.receive(delivered).text == text)
     }

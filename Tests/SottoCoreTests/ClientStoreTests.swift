@@ -120,9 +120,9 @@ private func state(skipped: Int = 0) -> RatchetState {
 
         #expect(tables.map { $0[0].text! } == [
             "app_notes", "blob_deletions", "contacts", "downloads", "files", "identity", "kept_files", "message_states",
-            "messages", "one_time_prekeys", "outbox", "own_profile", "pending", "pending_replies", "profile_sends",
-            "profiles", "records", "refusals", "row_numbers", "seen_ids", "sessions", "settings", "signed_prekeys",
-            "timers", "uploads",
+            "messages", "one_time_prekeys", "outbox", "own_profile", "pending", "pending_replies", "pq_prekey_ids",
+            "pq_prekeys", "profile_sends", "profiles", "records", "refusals", "row_numbers", "seen_ids", "sessions",
+            "settings", "signed_prekeys", "timers", "uploads",
         ])
     }
 }
@@ -159,7 +159,7 @@ private func state(skipped: Int = 0) -> RatchetState {
         #expect(session.state == state(skipped: 2))
         #expect(session.initialHeader == Data())
         #expect(session.associatedData == Data(count: 177))
-        #expect(try reopened.newestSignedPrekey() == StoredSignedPrekey(prekeyID: 1, privateKey: Data(repeating: 6, count: 32), madeAt: 100, confirmed: false))
+        #expect(try reopened.newestSignedPrekey() == StoredSignedPrekey(prekeyID: 1, privateKey: Data(repeating: 6, count: 32), madeAt: 100, confirmed: false, pqPrekey: nil))
         #expect(try reopened.oneTimePrekey(1) == Data(repeating: 5, count: 32))
         #expect(try reopened.oneTimePrekeyIDsLeft() == Int64(UInt32.max) - 1)
         #expect(try reopened.isSeen(sender: alice, messageID: Data(count: 16)))

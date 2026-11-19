@@ -27,7 +27,7 @@ private func content(text: String) throws -> Data {
 
 @Test func constantsAreThoseOfSection24() {
     #expect(Envelope.paddingBlock == 256)
-    #expect(Envelope.maxTextBytes == 65019)
+    #expect(Envelope.maxTextBytes == 63995)
 }
 
 @Test(arguments: [(0, 256), (1, 256), (255, 256), (256, 512)])
@@ -70,11 +70,11 @@ func plaintextWithoutPaddingIsBadPadding(padded: Data) {
     }
 }
 
-@Test func largestTextFills254BlocksAndOneByteMoreIsRefused() throws {
+@Test func largestTextFills250BlocksAndOneByteMoreIsRefused() throws {
     let largest = String(repeating: "x", count: Envelope.maxTextBytes)
 
-    #expect(try content(text: largest).count == 65023)
-    #expect(try Envelope.encodeText(largest).count == 254 * Envelope.paddingBlock)
+    #expect(try content(text: largest).count == 63999)
+    #expect(try Envelope.encodeText(largest).count == 250 * Envelope.paddingBlock)
     #expect(try Envelope.encodeText("").count == Envelope.paddingBlock)
     #expect(throws: EnvelopeError.textTooLong) { try Envelope.encodeText(largest + "x") }
     #expect(throws: EnvelopeError.textTooLong) {
@@ -96,7 +96,7 @@ func plaintextWithoutPaddingIsBadPadding(padded: Data) {
     }
 }
 
-@Test(arguments: [0, 2, 3, 255, 65536, UInt32.max])
+@Test(arguments: [0, 3, 255, 65536, UInt32.max])
 func otherVersionIsReadBeforeAnyOtherRule(version: UInt32) throws {
     let payload = try envelope {
         $0.version = version

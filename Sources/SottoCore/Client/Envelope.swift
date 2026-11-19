@@ -32,10 +32,11 @@ public enum EnvelopeError: Error, Equatable, Sendable {
 
 /// The peer envelope and the plaintext of docs/protocol.md, sections 19, 32, 35 and 38.
 public enum Envelope {
-    public static let version: UInt32 = 1
+    public static let x3dhVersion: UInt32 = 1
+    public static let pqxdhVersion: UInt32 = 2
     public static let paddingBlock = 256
-    public static let maxTextBytes = 65019
-    public static let maxContentBytes = 65023
+    public static let maxTextBytes = 63995
+    public static let maxContentBytes = 63999
     public static let paddingMark: UInt8 = 0x80
     public static let sealingOverhead = Ratchet.messageNonceLength + Ratchet.tagLength
     public static let maxMediaTypeBytes = 127
@@ -363,7 +364,7 @@ public enum Envelope {
             throw EnvelopeError.badEnvelope
         }
 
-        guard envelope.version == version else {
+        guard envelope.version == x3dhVersion || envelope.version == pqxdhVersion else {
             throw EnvelopeError.unsupportedVersion
         }
 
@@ -381,6 +382,9 @@ public enum Envelope {
                   initialHeader.identityDhSignature.count == Identity.signatureLength,
                   initialHeader.ephemeralKey.count == Identity.keyLength
             else {
+                throw EnvelopeError.badEnvelope
+            }
+            if envelope.version == pqxdhVersion && initialHeader.kemCiphertext.count != PQXDH.kemCiphertextLength {
                 throw EnvelopeError.badEnvelope
             }
         }

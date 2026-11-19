@@ -228,7 +228,8 @@ struct Launch {
     /// `--reply NAME TEXT`, `--edit NAME TEXT`, `--delete NAME` and `--timer NAME SECONDS`:
     /// once the app is connected, a reply to the newest message of the contact, an edit of the
     /// newest own message that can be edited, a delete for both of the newest own message and
-    /// a timer of the chat, each through the action of the screen.
+    /// a timer of the chat, each through the action of the screen. `--reset NAME`: a new
+    /// session with the contact, through the action of its menu.
     var changes: [ScriptedChange] = []
 
     static let current = Launch(CommandLine.arguments)
@@ -247,6 +248,7 @@ struct Launch {
         for (index, argument) in arguments.enumerated() where index + 1 < arguments.count {
             if argument == "--read" { readChats.append(arguments[index + 1]) }
             if argument == "--delete" { changes.append(.delete(arguments[index + 1])) }
+            if argument == "--reset" { changes.append(.reset(arguments[index + 1])) }
         }
         func value(after flag: String) -> String? {
             guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
@@ -268,16 +270,17 @@ struct Launch {
     }
 }
 
-/// An action of part 5 that a launch flag asks for, by the local name of the chat.
+/// An action of part 5, or a reset, that a launch flag asks for, by the local name of the chat.
 enum ScriptedChange {
     case reply(String, String)
     case edit(String, String)
     case delete(String)
     case timer(String, Int)
+    case reset(String)
 
     var chatName: String {
         switch self {
-        case .reply(let name, _), .edit(let name, _), .delete(let name), .timer(let name, _): name
+        case .reply(let name, _), .edit(let name, _), .delete(let name), .timer(let name, _), .reset(let name): name
         }
     }
 }

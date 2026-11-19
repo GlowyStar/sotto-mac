@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Sotto",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("26.0")],
     products: [
         .executable(name: "Sotto", targets: ["Sotto"]),
         .executable(name: "sotto-mac", targets: ["SottoCLI"]),

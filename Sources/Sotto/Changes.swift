@@ -214,6 +214,8 @@ extension AppModel {
             deleteForBoth(target.id, in: chat)
         case .timer(_, let seconds):
             setTimer(seconds, in: chat)
+        case .reset:
+            resetSession(chat)
         }
     }
 }

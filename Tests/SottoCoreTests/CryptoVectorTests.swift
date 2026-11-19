@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SottoCore
 import Testing
@@ -14,6 +15,14 @@ private func bundle(of vector: Vector) -> PrekeyBundle {
     if vector.inputs["one_time_prekey_id"] != nil {
         oneTimePrekey = OneTimePrekey(id: vector.prekeyID("one_time_prekey_id"), key: vector.hex("one_time_prekey_key"))
     }
+    var pqPrekey: SignedPrekey?
+    if vector.inputs["pq_prekey_id"] != nil && vector.inputs["pq_prekey_key"] != nil {
+        pqPrekey = SignedPrekey(
+            id: vector.prekeyID("pq_prekey_id"),
+            key: vector.hex("pq_prekey_key"),
+            signature: vector.hex("pq_prekey_signature")
+        )
+    }
     return PrekeyBundle(
         identity: vector.hex("identity"),
         identityDHKey: vector.hex("identity_dh_key"),
@@ -23,7 +32,8 @@ private func bundle(of vector: Vector) -> PrekeyBundle {
             key: vector.hex("signed_prekey_key"),
             signature: vector.hex("signed_prekey_signature")
         ),
-        oneTimePrekey: oneTimePrekey
+        oneTimePrekey: oneTimePrekey,
+        pqPrekey: pqPrekey
     )
 }
 
@@ -139,7 +149,7 @@ private func replayX3DH(_ vector: Vector) throws -> [String: String] {
 
 /// DH1 to DH4 by the `dh` of the core, in the order of sections 16.6 and 16.8.
 private func dhOutputs(of vector: Vector) throws -> [Data] {
-    let pairs = vector.operation == "x3dh-initiate"
+    let pairs = vector.operation.hasSuffix("-initiate")
         ? [
             ("identity_dh_private_key", "signed_prekey_key"),
             ("ephemeral_private_key", "identity_dh_key"),
@@ -360,4 +370,222 @@ private func expectIntermediatesOfDecryption(
         replayed += 1
     }
     #expect(replayed == 49)
+}
+
+// MARK: pqxdh.json
+
+/// The decapsulation of CryptoKit: the bytes of the shared secret (section 41.3).
+private func decapsulate(seed: Data, _ ciphertext: Data) throws -> Data {
+    try MLKEM768.PrivateKey(seedRepresentation: seed, publicKey: nil).decapsulate(ciphertext).withUnsafeBytes { Data($0) }
+}
+
+/// The values of an `initial_header` object of a vector as text, its ids as decimals.
+private func headerStrings(_ header: Any?) -> [String: String]? {
+    (header as? [String: Any])?.mapValues { ($0 as? String) ?? "\($0)" }
+}
+
+/// SK and the session associated data of the outputs of a key agreement.
+private func agreementStrings(_ outputs: [String: Any]?) -> [String: String]? {
+    strings(outputs?.filter { $0.key != "initial_header" })
+}
+
+/// The operation of a vector through the core. CryptoKit takes no encapsulation
+/// randomness, so the initiator encapsulates to the recorded result (section 43.2), and a
+/// negative vector has none to reach.
+private func replayPQXDH(_ vector: Vector) throws -> [String: String] {
+    switch vector.operation {
+    case "mlkem768-public-key":
+        let seed = vector.hex("seed")
+        #expect(try MLKEM768.PrivateKey(seedRepresentation: seed, publicKey: nil).seedRepresentation == seed, "\(vector.name)")
+        return ["public_key": try PQXDH.kemPublicKey(seed: seed).hex]
+    case "pqxdh-initiate":
+        let bundle = bundle(of: vector)
+        let recorded = vector.optionalHex("kem_ciphertext").map {
+            Encapsulation(ciphertext: $0, sharedSecret: vector.hex("kem_shared_secret"))
+        }
+        let agreement = try PQXDH.initiate(
+            bundle: bundle,
+            identityKey: vector.hex("identity_key"),
+            identityDHPrivateKey: vector.hex("identity_dh_private_key"),
+            ephemeralPrivateKey: vector.hex("ephemeral_private_key"),
+            contactIdentityKey: Identity.decodeUserID(vector.text("contact_id")),
+            pinnedIdentityDHKey: nil
+        ) { publicKey in
+            #expect(publicKey.rawRepresentation == bundle.pqPrekey?.key, "\(vector.name)")
+            guard let recorded else {
+                Issue.record("\(vector.name) reached the encapsulation")
+                throw CryptoError.decryptFailed
+            }
+            return recorded
+        }
+        var header = [
+            "identity_dh_key": try Identity.deriveX25519PublicKey(vector.hex("identity_dh_private_key")).hex,
+            "ephemeral_key": try Identity.deriveX25519PublicKey(vector.hex("ephemeral_private_key")).hex,
+            "signed_prekey_id": "\(bundle.signedPrekey.id)",
+            "pq_prekey_id": "\(agreement.pqPrekeyID)",
+            "kem_ciphertext": agreement.kemCiphertext.hex,
+        ]
+        header["one_time_prekey_id"] = bundle.oneTimePrekey.map { "\($0.id)" }
+        #expect(header == headerStrings(vector.outputs?["initial_header"]), "\(vector.name)")
+        return ["sk": agreement.sharedSecret.hex, "session_associated_data": agreement.associatedData.hex]
+    case "pqxdh-respond":
+        let agreement = try PQXDH.respond(
+            identityKey: vector.hex("identity_key"),
+            identityDHPrivateKey: vector.hex("identity_dh_private_key"),
+            signedPrekeyPrivateKey: vector.hex("signed_prekey_private_key"),
+            oneTimePrekeyPrivateKey: vector.optionalHex("one_time_prekey_private_key"),
+            pqPrekeySeed: vector.hex("pq_prekey_seed"),
+            senderIdentityKey: vector.hex("sender"),
+            senderIdentityDHKey: vector.hex("identity_dh_key"),
+            senderIdentityDHSignature: vector.hex("identity_dh_signature"),
+            ephemeralKey: vector.hex("ephemeral_key"),
+            kemCiphertext: vector.hex("kem_ciphertext"),
+            pinnedIdentityDHKey: nil
+        )
+        return ["sk": agreement.sharedSecret.hex, "session_associated_data": agreement.associatedData.hex]
+    default:
+        Issue.record("\(vector.name): no operation \(vector.operation)")
+        return [:]
+    }
+}
+
+/// The signed strings, DH1 to DH4, SS and the input of the key derivation; SS of a
+/// responder by the decapsulation of CryptoKit, that of an initiator as recorded, which the
+/// test of the pairs decapsulates.
+private func intermediatesOfPQXDH(_ vector: Vector) throws -> [String: String] {
+    if vector.operation == "mlkem768-public-key" {
+        return [:]
+    }
+    var computed: [String: String]
+    if vector.operation == "pqxdh-initiate" {
+        let identity = vector.hex("identity")
+        computed = [
+            "identity_dh_string": try Identity.identityDHString(identityKey: identity, identityDHKey: vector.hex("identity_dh_key")).hex,
+            "signed_prekey_string": try Identity.signedPrekeyString(identityKey: identity, signedPrekey: vector.hex("signed_prekey_key")).hex,
+        ]
+        if let pqPrekey = vector.optionalHex("pq_prekey_key") {
+            computed["pq_prekey_string"] = try Identity.pqPrekeyString(identityKey: identity, pqPrekey: pqPrekey).hex
+        }
+    } else {
+        computed = [
+            "identity_dh_string": try Identity.identityDHString(identityKey: vector.hex("sender"), identityDHKey: vector.hex("identity_dh_key")).hex
+        ]
+    }
+    guard vector.outputs != nil else {
+        return computed
+    }
+    let outputs = try dhOutputs(of: vector)
+    for (index, output) in outputs.enumerated() {
+        computed["dh\(index + 1)"] = output.hex
+    }
+    let sharedSecret = vector.operation == "pqxdh-respond"
+        ? try decapsulate(seed: vector.hex("pq_prekey_seed"), vector.hex("kem_ciphertext"))
+        : vector.hex("kem_shared_secret")
+    computed["kem_shared_secret"] = sharedSecret.hex
+    computed["input_key_material"] = (outputs.reduce(keyMaterialPrefix, +) + sharedSecret).hex
+    return computed
+}
+
+@Test func pqxdhVectorsReplayByteForByte() throws {
+    let vectors = try loadVectors("pqxdh")
+    #expect(vectors.count == 14)
+    #expect(vectors.first?.operation == "mlkem768-public-key")
+
+    var replayed = 0
+    for vector in vectors {
+        do {
+            let outputs = try replayPQXDH(vector)
+            #expect(vector.error == nil, "\(vector.name) did not fail")
+            #expect(outputs == agreementStrings(vector.outputs), "\(vector.name)")
+        } catch let error as CryptoError {
+            #expect(error.result == vector.error, "\(vector.name)")
+        }
+        #expect(try intermediatesOfPQXDH(vector) == strings(vector.intermediates), "\(vector.name)")
+        replayed += 1
+    }
+    #expect(replayed == 14)
+}
+
+/// The recorded encapsulation of each initiator decapsulates, with the seed of the responder
+/// of the same name, to its recorded SS, and both sides derive one SK under one session
+/// associated data (section 43.2).
+@Test(arguments: ["with-one-time-prekeys", "with-the-last-resort-pq-prekey"])
+func pqxdhVectorsOfOneNameAreTheTwoSidesOfOneKeyAgreement(name: String) throws {
+    let vectors = try loadVectors("pqxdh")
+    let initiated = try #require(vectors.first { $0.name == "pqxdh-initiate-\(name)" })
+    let responded = try #require(vectors.first { $0.name == "pqxdh-respond-\(name)" })
+    let seed = responded.hex("pq_prekey_seed")
+
+    #expect(try PQXDH.kemPublicKey(seed: seed) == initiated.hex("pq_prekey_key"))
+    #expect(try decapsulate(seed: seed, initiated.hex("kem_ciphertext")) == initiated.hex("kem_shared_secret"))
+    #expect(responded.hex("kem_ciphertext") == initiated.hex("kem_ciphertext"))
+    #expect(strings(responded.outputs) == agreementStrings(initiated.outputs))
+}
+
+@Test(arguments: ["replaced-kem-ciphertext", "wrong-pq-prekey"])
+func anotherCiphertextOrKeyGivesAnotherSecretUnderTheSameData(name: String) throws {
+    let vectors = try loadVectors("pqxdh")
+    let honest = try #require(vectors.first { $0.name == "pqxdh-respond-with-one-time-prekeys" }?.outputs)
+    let changed = try #require(vectors.first { $0.name == "pqxdh-respond-\(name)" }?.outputs)
+
+    #expect(changed["sk"] as? String != honest["sk"] as? String)
+    #expect(changed["session_associated_data"] as? String == honest["session_associated_data"] as? String)
+}
+
+/// Check 7 rests on where CryptoKit runs the modulus check of FIPS 203, section 7.2: it
+/// loads a key whose last coefficient is 4095, above q, and refuses it when it encapsulates.
+@Test func cryptoKitRefusesACoefficientAboveQWhenItEncapsulates() throws {
+    let valid = try PQXDH.kemPublicKey(seed: Data(repeating: 0x17, count: PQXDH.kemSeedLength))
+    var tooLarge = valid
+    // The 12 bits of the last coefficient are the high half of byte 1150 and byte 1151;
+    // the 32 bytes of rho follow unchanged.
+    tooLarge[1150] |= 0xF0
+    tooLarge[1151] = 0xFF
+
+    _ = try MLKEM768.PublicKey(rawRepresentation: valid).encapsulate()
+    let loaded = try MLKEM768.PublicKey(rawRepresentation: tooLarge)
+    #expect(throws: (any Error).self) { try loaded.encapsulate() }
+}
+
+/// No vector can check a randomized encapsulation: the own one goes through the own
+/// decapsulation, alone and inside a key agreement of both sides (section 43.2).
+@Test func ownEncapsulationRoundTripsThroughTheOwnDecapsulation() throws {
+    let vectors = try loadVectors("pqxdh")
+    let initiated = try #require(vectors.first { $0.name == "pqxdh-initiate-with-one-time-prekeys" })
+    let responded = try #require(vectors.first { $0.name == "pqxdh-respond-with-one-time-prekeys" })
+    let seed = responded.hex("pq_prekey_seed")
+    let publicKey = try MLKEM768.PublicKey(rawRepresentation: PQXDH.kemPublicKey(seed: seed))
+
+    let first = try PQXDH.encapsulateRandomly(publicKey)
+    let second = try PQXDH.encapsulateRandomly(publicKey)
+    #expect(first.ciphertext.count == PQXDH.kemCiphertextLength)
+    #expect(first.sharedSecret.count == 32)
+    #expect(try decapsulate(seed: seed, first.ciphertext) == first.sharedSecret)
+    #expect(first.ciphertext != second.ciphertext && first.sharedSecret != second.sharedSecret)
+
+    let started = try PQXDH.initiate(
+        bundle: bundle(of: initiated),
+        identityKey: initiated.hex("identity_key"),
+        identityDHPrivateKey: initiated.hex("identity_dh_private_key"),
+        ephemeralPrivateKey: initiated.hex("ephemeral_private_key"),
+        contactIdentityKey: Identity.decodeUserID(initiated.text("contact_id")),
+        pinnedIdentityDHKey: nil
+    )
+    let accepted = try PQXDH.respond(
+        identityKey: responded.hex("identity_key"),
+        identityDHPrivateKey: responded.hex("identity_dh_private_key"),
+        signedPrekeyPrivateKey: responded.hex("signed_prekey_private_key"),
+        oneTimePrekeyPrivateKey: responded.optionalHex("one_time_prekey_private_key"),
+        pqPrekeySeed: seed,
+        senderIdentityKey: responded.hex("sender"),
+        senderIdentityDHKey: responded.hex("identity_dh_key"),
+        senderIdentityDHSignature: responded.hex("identity_dh_signature"),
+        ephemeralKey: responded.hex("ephemeral_key"),
+        kemCiphertext: started.kemCiphertext,
+        pinnedIdentityDHKey: nil
+    )
+    #expect(started.kemCiphertext != initiated.hex("kem_ciphertext"))
+    #expect(accepted.sharedSecret == started.sharedSecret)
+    #expect(accepted.associatedData == started.associatedData)
+    #expect(started.sharedSecret.hex != agreementStrings(initiated.outputs)?["sk"])
 }

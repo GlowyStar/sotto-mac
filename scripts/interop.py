@@ -6,7 +6,10 @@ Run with the interpreter of the sotto project's environment, which holds `sotto`
     ../../python/sotto/.venv/bin/python scripts/interop.py [--keep DIR]
 
 Starts the relay on a free port, builds `sotto-mac`, makes one identity with each client and
-drives both `chat` commands through pipes. Then part 5 goes both ways: a reply with its
+drives both `chat` commands through pipes. Python starts the first session and `sotto-mac
+reset` a second one, so each side makes a session by PQXDH once as initiator and once as
+responder; every session of both stores is of end-to-end version 2, and the relay holds the
+post-quantum prekeys that `sotto-mac` uploaded. Then part 5 goes both ways: a reply with its
 quote, the delivered and read marks, an edit, a delete for both and a message with a short
 timer that disappears at both sides and from both stores. Then files go both ways with
 `send-file`, also two large ones whose transfer is cut in the middle: the upload of
@@ -177,6 +180,20 @@ def stored_texts(store: Path) -> list[str]:
     return [str(row[0]) for row in read_only(store, "SELECT text FROM messages")]
 
 
+def session_versions(store: Path) -> list[int]:
+    """The end-to-end version of each session, oldest first: the first byte of its session
+    associated data (section 41.10 of the protocol)."""
+    rows = read_only(store, "SELECT associated_data FROM sessions ORDER BY session_id")
+    return [bytes(row[0])[0] for row in rows]  # type: ignore[arg-type]
+
+
+def expect_versions(label: str, store: Path, versions: list[int]) -> None:
+    found = session_versions(store)
+    if found != versions:
+        raise CheckFailed(f"the sessions of {label} have the versions {found}, not {versions}")
+    print(f"ok   the sessions of {label} have the versions {found}")
+
+
 async def part_five(swift: Chat, python: Chat, swift_dir: Path, python_dir: Path, sotto_mac: Path) -> None:
     """A reply, the marks, an edit, a delete for both and a short timer, each way."""
     await python.type("wave two from python")
@@ -297,6 +314,16 @@ async def main() -> int:
                 await swift.expect_message("python", "hello from python")
                 await swift.type("hello from swift")
                 await python.expect_message("swift", "hello from swift")
+                expect_versions("swift, the responder", swift_dir / "store.db", [2])
+                expect_versions("python, the initiator", python_dir / "store.db", [2])
+                of_swift = f"WHERE identity_key = x'{swift_id}'"
+                last_resort = read_only(
+                    folder / "relay.db", f"SELECT length(public_key), length(signature) FROM pq_prekeys {of_swift}"
+                )
+                one_time = read_only(folder / "relay.db", f"SELECT count(*) FROM pq_one_time_prekeys {of_swift}")
+                if last_resort != [(1184, 64)] or one_time != [(39,)]:
+                    raise CheckFailed(f"the relay holds the pq prekeys {last_resort} and {one_time} of sotto-mac")
+                print("ok   the relay holds the last-resort pq prekey of sotto-mac and 39 of its 40 one-time ones")
 
                 await swift.quit()
                 await python.type("while swift was away")
@@ -305,6 +332,12 @@ async def main() -> int:
                 await swift.expect_message("python", "while swift was away")
 
                 await python.quit()
+                await swift.quit()
+                reset = await command(sotto_mac, "--data-dir", swift_dir, "reset", "python", "--relay", url)
+                if reset.splitlines()[-1:] != ["a new session with python starts with the next message"]:
+                    raise CheckFailed(f"sotto-mac reset printed {reset!r}")
+                print("ok   sotto-mac started a session of its own with python")
+                swift = await open_chat("swift", sotto_mac, swift_dir, "python", url)
                 await swift.type("while python was away")
                 await asyncio.sleep(1)
                 python = await open_chat("python", SOTTO, python_dir, "swift", url)
@@ -314,6 +347,10 @@ async def main() -> int:
                 await swift.expect_message("python", "after both restarts")
                 await swift.type("still here")
                 await python.expect_message("swift", "still here")
+                expect_versions("swift, responder then initiator", swift_dir / "store.db", [2, 2])
+                expect_versions("python, initiator then responder", python_dir / "store.db", [2, 2])
+                if read_only(swift_dir / "store.db", "SELECT 1 FROM sessions WHERE initial_header IS NOT NULL"):
+                    raise CheckFailed("the session that sotto-mac started still holds its initial header")
                 await part_five(swift, python, swift_dir, python_dir, sotto_mac)
                 await python.quit()
 

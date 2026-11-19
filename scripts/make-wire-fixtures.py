@@ -69,6 +69,8 @@ def good_bundle(**changes: object) -> Bundle:
             bundle.signed_prekey.signature = value
         elif name == "one_time_prekey_key":
             bundle.one_time_prekey.key = value
+        elif name == "pq_prekey":
+            bundle.pq_prekey.CopyFrom(value)
         else:
             setattr(bundle, name, value)
     return bundle
@@ -127,6 +129,15 @@ def named_server_frames() -> list[tuple[str, bytes]]:
         ("error for a blob fetch", ServerFrame(error=Error(code=5, blob_id=bytes(16), identity=sender))),
         ("error with a blob id of 15", ServerFrame(error=Error(code=9, blob_id=bytes(15)))),
         ("error naming a send and a blob", ServerFrame(error=Error(code=3, message_id=message_id, blob_id=bytes(16)))),
+        # Part 6, after the seeds of the random cases.
+        ("logged in with pq one-time prekeys", ServerFrame(logged_in=LoggedIn(one_time_prekey_count=5, pq_one_time_prekey_count=40))),
+        ("bundle stored with pq one-time prekeys", ServerFrame(bundle_stored=BundleStored(one_time_prekey_count=3, pq_one_time_prekey_count=7))),
+        ("bundle with a pq prekey", ServerFrame(bundle=good_bundle(pq_prekey=SignedPrekey(id=9, key=bytes(1184), signature=bytes(64))))),
+        ("bundle with a pq prekey without a one-time prekey", ServerFrame(bundle=good_bundle(no_one_time_prekey=1, pq_prekey=SignedPrekey(key=bytes(1184), signature=bytes(64))))),
+        ("bundle with a pq prekey of 1183", ServerFrame(bundle=good_bundle(pq_prekey=SignedPrekey(id=9, key=bytes(1183), signature=bytes(64))))),
+        ("bundle with a pq prekey of 1185", ServerFrame(bundle=good_bundle(pq_prekey=SignedPrekey(id=9, key=bytes(1185), signature=bytes(64))))),
+        ("bundle with a pq prekey signature of 63", ServerFrame(bundle=good_bundle(pq_prekey=SignedPrekey(id=9, key=bytes(1184), signature=bytes(63))))),
+        ("bundle with an empty pq prekey", ServerFrame(bundle=good_bundle(pq_prekey=SignedPrekey()))),
     ]
     named = [(name, serialized(frame)) for name, frame in frames]
     hello = serialized(frames[0][1])
@@ -202,6 +213,16 @@ def named_peer_messages() -> list[tuple[str, bytes]]:
         signed_prekey_id=2**32 - 1,
         one_time_prekey_id=0,
     )
+
+    def with_ciphertext(length: int) -> InitialHeader:
+        header = InitialHeader()
+        header.CopyFrom(good_initial)
+        header.kem_ciphertext = bytes(length)
+        header.pq_prekey_id = 3
+        return header
+
+    pq_initial = with_ciphertext(1088)
+    pq_initial.one_time_prekey_id = 2**32 - 1
     return [
         ("envelope", envelope()),
         ("envelope of two blocks", envelope(ciphertext=bytes(28 + 512))),
@@ -225,6 +246,13 @@ def named_peer_messages() -> list[tuple[str, bytes]]:
         ("signature of 63", envelope(initial_header=InitialHeader(identity_dh_key=bytes(32), identity_dh_signature=bytes(63)))),
         ("empty ephemeral key", envelope(initial_header=InitialHeader(identity_dh_key=bytes(32), identity_dh_signature=bytes(64)))),
         ("empty initial header", envelope(initial_header=InitialHeader())),
+        # Part 6, after the seeds of the random cases.
+        ("version 2 with an initial header", envelope(version=2, initial_header=pq_initial)),
+        ("version 2 with a kem ciphertext of 1087", envelope(version=2, initial_header=with_ciphertext(1087))),
+        ("version 2 with a kem ciphertext of 1089", envelope(version=2, initial_header=with_ciphertext(1089))),
+        ("version 2 without a kem ciphertext", envelope(version=2, initial_header=good_initial)),
+        ("version 1 with a kem ciphertext of 5", envelope(initial_header=with_ciphertext(5))),
+        ("version 1 with the fields of version 2", envelope(initial_header=pq_initial)),
     ]
 
 

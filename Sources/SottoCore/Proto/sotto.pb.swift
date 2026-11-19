@@ -330,6 +330,8 @@ public nonisolated struct Sotto_LoggedIn: Sendable {
 
   public var blobMaxBytes: UInt32 = 0
 
+  public var pqOneTimePrekeyCount: UInt32 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -385,11 +387,23 @@ public nonisolated struct Sotto_UploadBundle: Sendable {
 
   public var oneTimePrekeys: [Sotto_OneTimePrekey] = []
 
+  public var pqPrekey: Sotto_SignedPrekey {
+    get {_pqPrekey ?? Sotto_SignedPrekey()}
+    set {_pqPrekey = newValue}
+  }
+  /// Returns true if `pqPrekey` has been explicitly set.
+  public var hasPqPrekey: Bool {self._pqPrekey != nil}
+  /// Clears the value of `pqPrekey`. Subsequent reads from it will return its default value.
+  public mutating func clearPqPrekey() {self._pqPrekey = nil}
+
+  public var pqOneTimePrekeys: [Sotto_SignedPrekey] = []
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _signedPrekey: Sotto_SignedPrekey? = nil
+  fileprivate var _pqPrekey: Sotto_SignedPrekey? = nil
 }
 
 public nonisolated struct Sotto_BundleStored: Sendable {
@@ -398,6 +412,8 @@ public nonisolated struct Sotto_BundleStored: Sendable {
   // methods supported on all messages.
 
   public var oneTimePrekeyCount: UInt32 = 0
+
+  public var pqOneTimePrekeyCount: UInt32 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -445,12 +461,22 @@ public nonisolated struct Sotto_Bundle: Sendable {
   /// Clears the value of `oneTimePrekey`. Subsequent reads from it will return its default value.
   public mutating func clearOneTimePrekey() {self._oneTimePrekey = nil}
 
+  public var pqPrekey: Sotto_SignedPrekey {
+    get {_pqPrekey ?? Sotto_SignedPrekey()}
+    set {_pqPrekey = newValue}
+  }
+  /// Returns true if `pqPrekey` has been explicitly set.
+  public var hasPqPrekey: Bool {self._pqPrekey != nil}
+  /// Clears the value of `pqPrekey`. Subsequent reads from it will return its default value.
+  public mutating func clearPqPrekey() {self._pqPrekey = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _signedPrekey: Sotto_SignedPrekey? = nil
   fileprivate var _oneTimePrekey: Sotto_OneTimePrekey? = nil
+  fileprivate var _pqPrekey: Sotto_SignedPrekey? = nil
 }
 
 public nonisolated struct Sotto_Send: Sendable {
@@ -687,6 +713,10 @@ public nonisolated struct Sotto_InitialHeader: Sendable {
   public var hasOneTimePrekeyID: Bool {self._oneTimePrekeyID != nil}
   /// Clears the value of `oneTimePrekeyID`. Subsequent reads from it will return its default value.
   public mutating func clearOneTimePrekeyID() {self._oneTimePrekeyID = nil}
+
+  public var kemCiphertext: Data = Data()
+
+  public var pqPrekeyID: UInt32 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1373,7 +1403,7 @@ nonisolated extension Sotto_Login: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 nonisolated extension Sotto_LoggedIn: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LoggedIn"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}one_time_prekey_count\0\u{3}blob_max_bytes\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}one_time_prekey_count\0\u{3}blob_max_bytes\0\u{3}pq_one_time_prekey_count\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1383,6 +1413,7 @@ nonisolated extension Sotto_LoggedIn: SwiftProtobuf.Message, SwiftProtobuf._Mess
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularUInt32Field(value: &self.oneTimePrekeyCount) }()
       case 2: try { try decoder.decodeSingularUInt32Field(value: &self.blobMaxBytes) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.pqOneTimePrekeyCount) }()
       default: break
       }
     }
@@ -1395,12 +1426,16 @@ nonisolated extension Sotto_LoggedIn: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if self.blobMaxBytes != 0 {
       try visitor.visitSingularUInt32Field(value: self.blobMaxBytes, fieldNumber: 2)
     }
+    if self.pqOneTimePrekeyCount != 0 {
+      try visitor.visitSingularUInt32Field(value: self.pqOneTimePrekeyCount, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Sotto_LoggedIn, rhs: Sotto_LoggedIn) -> Bool {
     if lhs.oneTimePrekeyCount != rhs.oneTimePrekeyCount {return false}
     if lhs.blobMaxBytes != rhs.blobMaxBytes {return false}
+    if lhs.pqOneTimePrekeyCount != rhs.pqOneTimePrekeyCount {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1483,7 +1518,7 @@ nonisolated extension Sotto_OneTimePrekey: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Sotto_UploadBundle: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UploadBundle"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}identity_dh_key\0\u{3}identity_dh_signature\0\u{3}signed_prekey\0\u{3}one_time_prekeys\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}identity_dh_key\0\u{3}identity_dh_signature\0\u{3}signed_prekey\0\u{3}one_time_prekeys\0\u{3}pq_prekey\0\u{3}pq_one_time_prekeys\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1495,6 +1530,8 @@ nonisolated extension Sotto_UploadBundle: SwiftProtobuf.Message, SwiftProtobuf._
       case 2: try { try decoder.decodeSingularBytesField(value: &self.identityDhSignature) }()
       case 3: try { try decoder.decodeSingularMessageField(value: &self._signedPrekey) }()
       case 4: try { try decoder.decodeRepeatedMessageField(value: &self.oneTimePrekeys) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._pqPrekey) }()
+      case 6: try { try decoder.decodeRepeatedMessageField(value: &self.pqOneTimePrekeys) }()
       default: break
       }
     }
@@ -1517,6 +1554,12 @@ nonisolated extension Sotto_UploadBundle: SwiftProtobuf.Message, SwiftProtobuf._
     if !self.oneTimePrekeys.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.oneTimePrekeys, fieldNumber: 4)
     }
+    try { if let v = self._pqPrekey {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    if !self.pqOneTimePrekeys.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.pqOneTimePrekeys, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1525,6 +1568,8 @@ nonisolated extension Sotto_UploadBundle: SwiftProtobuf.Message, SwiftProtobuf._
     if lhs.identityDhSignature != rhs.identityDhSignature {return false}
     if lhs._signedPrekey != rhs._signedPrekey {return false}
     if lhs.oneTimePrekeys != rhs.oneTimePrekeys {return false}
+    if lhs._pqPrekey != rhs._pqPrekey {return false}
+    if lhs.pqOneTimePrekeys != rhs.pqOneTimePrekeys {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1532,7 +1577,7 @@ nonisolated extension Sotto_UploadBundle: SwiftProtobuf.Message, SwiftProtobuf._
 
 nonisolated extension Sotto_BundleStored: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".BundleStored"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}one_time_prekey_count\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}one_time_prekey_count\0\u{3}pq_one_time_prekey_count\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1541,6 +1586,7 @@ nonisolated extension Sotto_BundleStored: SwiftProtobuf.Message, SwiftProtobuf._
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularUInt32Field(value: &self.oneTimePrekeyCount) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.pqOneTimePrekeyCount) }()
       default: break
       }
     }
@@ -1550,11 +1596,15 @@ nonisolated extension Sotto_BundleStored: SwiftProtobuf.Message, SwiftProtobuf._
     if self.oneTimePrekeyCount != 0 {
       try visitor.visitSingularUInt32Field(value: self.oneTimePrekeyCount, fieldNumber: 1)
     }
+    if self.pqOneTimePrekeyCount != 0 {
+      try visitor.visitSingularUInt32Field(value: self.pqOneTimePrekeyCount, fieldNumber: 2)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Sotto_BundleStored, rhs: Sotto_BundleStored) -> Bool {
     if lhs.oneTimePrekeyCount != rhs.oneTimePrekeyCount {return false}
+    if lhs.pqOneTimePrekeyCount != rhs.pqOneTimePrekeyCount {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1592,7 +1642,7 @@ nonisolated extension Sotto_FetchBundle: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Sotto_Bundle: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Bundle"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{3}identity_dh_key\0\u{3}identity_dh_signature\0\u{3}signed_prekey\0\u{3}one_time_prekey\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{3}identity_dh_key\0\u{3}identity_dh_signature\0\u{3}signed_prekey\0\u{3}one_time_prekey\0\u{3}pq_prekey\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1605,6 +1655,7 @@ nonisolated extension Sotto_Bundle: SwiftProtobuf.Message, SwiftProtobuf._Messag
       case 3: try { try decoder.decodeSingularBytesField(value: &self.identityDhSignature) }()
       case 4: try { try decoder.decodeSingularMessageField(value: &self._signedPrekey) }()
       case 5: try { try decoder.decodeSingularMessageField(value: &self._oneTimePrekey) }()
+      case 6: try { try decoder.decodeSingularMessageField(value: &self._pqPrekey) }()
       default: break
       }
     }
@@ -1630,6 +1681,9 @@ nonisolated extension Sotto_Bundle: SwiftProtobuf.Message, SwiftProtobuf._Messag
     try { if let v = self._oneTimePrekey {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
     } }()
+    try { if let v = self._pqPrekey {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1639,6 +1693,7 @@ nonisolated extension Sotto_Bundle: SwiftProtobuf.Message, SwiftProtobuf._Messag
     if lhs.identityDhSignature != rhs.identityDhSignature {return false}
     if lhs._signedPrekey != rhs._signedPrekey {return false}
     if lhs._oneTimePrekey != rhs._oneTimePrekey {return false}
+    if lhs._pqPrekey != rhs._pqPrekey {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2155,7 +2210,7 @@ nonisolated extension Sotto_PeerMessage: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Sotto_InitialHeader: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".InitialHeader"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}identity_dh_key\0\u{3}identity_dh_signature\0\u{3}ephemeral_key\0\u{3}signed_prekey_id\0\u{3}one_time_prekey_id\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}identity_dh_key\0\u{3}identity_dh_signature\0\u{3}ephemeral_key\0\u{3}signed_prekey_id\0\u{3}one_time_prekey_id\0\u{3}kem_ciphertext\0\u{3}pq_prekey_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2168,6 +2223,8 @@ nonisolated extension Sotto_InitialHeader: SwiftProtobuf.Message, SwiftProtobuf.
       case 3: try { try decoder.decodeSingularBytesField(value: &self.ephemeralKey) }()
       case 4: try { try decoder.decodeSingularUInt32Field(value: &self.signedPrekeyID) }()
       case 5: try { try decoder.decodeSingularUInt32Field(value: &self._oneTimePrekeyID) }()
+      case 6: try { try decoder.decodeSingularBytesField(value: &self.kemCiphertext) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.pqPrekeyID) }()
       default: break
       }
     }
@@ -2193,6 +2250,12 @@ nonisolated extension Sotto_InitialHeader: SwiftProtobuf.Message, SwiftProtobuf.
     try { if let v = self._oneTimePrekeyID {
       try visitor.visitSingularUInt32Field(value: v, fieldNumber: 5)
     } }()
+    if !self.kemCiphertext.isEmpty {
+      try visitor.visitSingularBytesField(value: self.kemCiphertext, fieldNumber: 6)
+    }
+    if self.pqPrekeyID != 0 {
+      try visitor.visitSingularUInt32Field(value: self.pqPrekeyID, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2202,6 +2265,8 @@ nonisolated extension Sotto_InitialHeader: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.ephemeralKey != rhs.ephemeralKey {return false}
     if lhs.signedPrekeyID != rhs.signedPrekeyID {return false}
     if lhs._oneTimePrekeyID != rhs._oneTimePrekeyID {return false}
+    if lhs.kemCiphertext != rhs.kemCiphertext {return false}
+    if lhs.pqPrekeyID != rhs.pqPrekeyID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

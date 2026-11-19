@@ -514,9 +514,9 @@ struct TransportTests {
 
     @Test func expiredSignedPrekeyIsDeletedAtStartBeforeAnyDial() async throws {
         let client = try folder.open("alice")
-        _ = try client.makePrekeys(oneTimeCount: 0)
+        _ = try client.makePrekeys(oneTimeCount: 0, pqOneTimeCount: 0)
         folder.clock.advance(1)
-        _ = try client.makePrekeys(oneTimeCount: 0)
+        _ = try client.makePrekeys(oneTimeCount: 0, pqOneTimeCount: 0)
         folder.clock.advance(Client.signedPrekeyGraceSeconds + 1)
         #expect(try client.store.query("SELECT count(*) FROM signed_prekeys")[0][0].integer == 2)
 

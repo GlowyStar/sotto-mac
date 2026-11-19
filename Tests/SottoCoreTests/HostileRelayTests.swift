@@ -53,12 +53,15 @@ private func keysOfBobUnderCarolsSignature(_ world: World) throws -> (Client, De
     let carolSeed = try seed(world.carol)
     var signedPrekey = bobBundle.signedPrekey
     signedPrekey.signature = try Identity.signSignedPrekey(seed: carolSeed, signedPrekey: signedPrekey.key)
+    var pqPrekey = try #require(bobBundle.pqPrekey)
+    pqPrekey.signature = try Identity.signPQPrekey(seed: carolSeed, pqPrekey: pqPrekey.key)
     let bundle = PrekeyBundle(
         identity: world.carol.identityKey,
         identityDHKey: bobBundle.identityDHKey,
         identityDHSignature: try Identity.signIdentityDHKey(seed: carolSeed, identityDHKey: bobBundle.identityDHKey),
         signedPrekey: signedPrekey,
-        oneTimePrekey: bobBundle.oneTimePrekey
+        oneTimePrekey: bobBundle.oneTimePrekey,
+        pqPrekey: pqPrekey
     )
     let outgoing = try world.alice.sendText(world.carol.identityKey, "for carol", bundle: bundle)
     return (world.bob, Delivered(sender: world.alice.identityKey, messageID: outgoing.messageID, payload: outgoing.payload))
@@ -101,6 +104,11 @@ private let results: KeyValuePairs<String, String> = [
     "stripped one-time prekey id": "DECRYPT_FAILED",
     "replay": "DUPLICATE",
     "replay after its seen id is forgotten": "DECRYPT_FAILED",
+    "changed byte in the kem ciphertext": "DECRYPT_FAILED",
+    "stripped kem ciphertext": "BAD_ENVELOPE",
+    "changed post-quantum prekey id": "UNKNOWN_PQ_PREKEY",
+    "new session made version 1": "X3DH_REFUSED",
+    "later message made version 1": "DECRYPT_FAILED",
 ]
 
 private func hostileCase(_ name: String, _ world: World) throws -> (Client, Delivered) {
@@ -154,6 +162,16 @@ private func hostileCase(_ name: String, _ world: World) throws -> (Client, Deli
         world.clients.clock.advance(Client.seenIDSeconds)
         try world.bob.forgetSeenIDs()
         return (world.bob, world.accepted)
+    case "changed byte in the kem ciphertext":
+        return try flipInitialHeader(world, \.kemCiphertext, 500)
+    case "stripped kem ciphertext":
+        return (world.bob, try editEnvelope(world.initial) { $0.initialHeader.kemCiphertext = Data() })
+    case "changed post-quantum prekey id":
+        return (world.bob, try editEnvelope(world.initial) { $0.initialHeader.pqPrekeyID = 99 })
+    case "new session made version 1":
+        return (world.bob, try editEnvelope(world.initial) { $0.version = 1 })
+    case "later message made version 1":
+        return (world.bob, try editEnvelope(world.later) { $0.version = 1 })
     default:
         Issue.record("no case named \(name)")
         return (world.bob, world.accepted)
@@ -184,6 +202,7 @@ func lyingRelayGivesNoTextAndLeavesTheStoreUnchanged(name: String) throws {
         let received = try world.bob.receive(editEnvelope(onTheSession) {
             $0.initialHeader.signedPrekeyID = 99
             $0.initialHeader.clearOneTimePrekeyID()
+            $0.initialHeader.pqPrekeyID = 99
         })
 
         #expect(received.text == "same session")

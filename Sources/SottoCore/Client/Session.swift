@@ -9,6 +9,8 @@ public enum SessionError: Error, Equatable, Sendable {
     case noSession
     case unknownSignedPrekey
     case unknownOneTimePrekey
+    case unknownPQPrekey
+    case x3dhRefused
 
     public var result: String {
         switch self {
@@ -18,6 +20,8 @@ public enum SessionError: Error, Equatable, Sendable {
         case .noSession: "NO_SESSION"
         case .unknownSignedPrekey: "UNKNOWN_SIGNED_PREKEY"
         case .unknownOneTimePrekey: "UNKNOWN_ONE_TIME_PREKEY"
+        case .unknownPQPrekey: "UNKNOWN_PQ_PREKEY"
+        case .x3dhRefused: "X3DH_REFUSED"
         }
     }
 }
@@ -141,15 +145,18 @@ public struct Outgoing: Equatable, Sendable {
 }
 
 /// The keys of an UploadBundle (section 21.4), saved before they are handed out.
+/// `pqPrekey` is the last-resort post-quantum prekey of the signed prekey (section 42.2).
 public struct PrekeyUpload: Sendable {
     public var identityDHKey: Data
     public var identityDHSignature: Data
     public var signedPrekey: SignedPrekey
     public var oneTimePrekeys: [OneTimePrekey]
+    public var pqPrekey: SignedPrekey?
+    public var pqOneTimePrekeys: [SignedPrekey]
 }
 
-/// The session layer of one identity over its store: sections 16.6 to 16.8, 20, 21 and
-/// 22.2 of docs/protocol.md, no network. `receive` and `sendText` commit what they change
+/// The session layer of one identity over its store: sections 20, 21, 22.2, 41 and 42 of
+/// docs/protocol.md, no network. `receive` and `sendText` commit what they change
 /// before they answer.
 public final class Client {
     public typealias RandomBytes = (Int) -> Data
@@ -161,6 +168,9 @@ public final class Client {
     public static let oneTimePrekeyRefillBelow = 50
     public static let oneTimePrekeyCap = 100
     public static let oneTimePrekeyHeldMax = 1000
+    public static let pqOneTimePrekeyRefillBelow = 20
+    public static let pqOneTimePrekeyCap = 40
+    public static let pqOneTimePrekeyHeldMax = 400
     public static let maxEdits = 10
     public static let editSeconds: Int64 = 86400
 
@@ -218,14 +228,14 @@ public final class Client {
         return login
     }
 
-    /// Makes a new signed prekey and `oneTimeCount` one-time prekeys and saves them.
-    public func makePrekeys(oneTimeCount: Int) throws -> PrekeyUpload {
-        let now = now()
-        let oneTimePrekeys = try store.transaction {
-            _ = try store.addSignedPrekey(randomBytes(Identity.keyLength), madeAt: now)
-            return try addOneTimePrekeys(oneTimeCount)
+    /// Makes a new signed prekey with its last-resort post-quantum prekey, and the one-time
+    /// prekeys of both kinds that the counts ask for, and saves them.
+    public func makePrekeys(oneTimeCount: Int, pqOneTimeCount: Int) throws -> PrekeyUpload {
+        let (oneTimePrekeys, pqOneTimePrekeys) = try store.transaction {
+            try addSignedPrekey()
+            return (try addOneTimePrekeys(oneTimeCount), try addPQOneTimePrekeys(pqOneTimeCount))
         }
-        return try upload(newestSignedPrekey(), oneTimePrekeys)
+        return try upload(newestSignedPrekey(), oneTimePrekeys, pqOneTimePrekeys)
     }
 
     /// Step 1 of section 21.2, after every LoggedIn and at every start before a dial.
@@ -234,31 +244,33 @@ public final class Client {
         try store.transaction { try store.deleteSignedPrekeys(replacedAtOrBefore: replacedAtOrBefore) }
     }
 
-    /// Steps 1 and 2 of section 21.2 and the refill of section 21.3, after a LoggedIn with
-    /// the count it reported. Returns the one UploadBundle of the login, every key of it
-    /// saved first, or nil when the relay confirmed the newest signed prekey and no
-    /// one-time prekey was made.
-    public func prepareUpload(oneTimePrekeyCount: Int) throws -> PrekeyUpload? {
+    /// Steps 1 and 2 of section 21.2 and the refills of sections 21.3 and 42.2, after a
+    /// LoggedIn with the counts it reported. Returns the one UploadBundle of the login, every
+    /// key of it saved first, or nil when the relay confirmed the newest signed prekey and no
+    /// one-time prekey of either kind was made.
+    public func prepareUpload(oneTimePrekeyCount: Int, pqOneTimePrekeyCount: Int) throws -> PrekeyUpload? {
         try deleteExpiredPrekeys()
-        let now = now()
         var refill = 0
         if oneTimePrekeyCount < Self.oneTimePrekeyRefillBelow {
             refill = Self.oneTimePrekeyCap - oneTimePrekeyCount
         }
+        var pqRefill = 0
+        if pqOneTimePrekeyCount < Self.pqOneTimePrekeyRefillBelow {
+            pqRefill = Self.pqOneTimePrekeyCap - pqOneTimePrekeyCount
+        }
 
-        let oneTimePrekeys = try store.transaction {
-            let newest = try store.newestSignedPrekey()
-            if newest == nil || now - newest!.madeAt >= Self.signedPrekeyRotationSeconds {
-                _ = try store.addSignedPrekey(randomBytes(Identity.keyLength), madeAt: now)
+        let (oneTimePrekeys, pqOneTimePrekeys) = try store.transaction {
+            if try isRotationDue() {
+                try addSignedPrekey()
             }
-            return try addOneTimePrekeys(refill)
+            return (try addOneTimePrekeys(refill), try addPQOneTimePrekeys(pqRefill))
         }
 
         let newest = try newestSignedPrekey()
-        if newest.confirmed && oneTimePrekeys.isEmpty {
+        if newest.confirmed && oneTimePrekeys.isEmpty && pqOneTimePrekeys.isEmpty {
             return nil
         }
-        return try upload(newest, oneTimePrekeys)
+        return try upload(newest, oneTimePrekeys, pqOneTimePrekeys)
     }
 
     /// Records the BundleStored of an UploadBundle: the relay holds its signed prekey.
@@ -272,6 +284,9 @@ public final class Client {
         try store.transaction {
             for oneTimePrekey in upload.oneTimePrekeys {
                 try store.deleteOneTimePrekey(oneTimePrekey.id)
+            }
+            for pqOneTimePrekey in upload.pqOneTimePrekeys {
+                try store.deletePQOneTimePrekey(pqOneTimePrekey.id)
             }
         }
     }
@@ -311,9 +326,10 @@ public final class Client {
         try !store.sessions(contact).isEmpty
     }
 
-    /// START of section 20.3: section 16.6 with a bundle fetched for the contact, for L1
+    /// START of section 20.3: section 41.5 with a bundle fetched for the contact, for L1
     /// without a session and for L2, the reset. Returns the GAP: the skipped keys of a
-    /// session that left the list.
+    /// session that left the list. A bundle without a post-quantum prekey starts none
+    /// (`CryptoError.pqPrekeyMissing`, section 41.10).
     @discardableResult
     public func startSession(_ contact: Data, bundle: PrekeyBundle) throws -> Int {
         guard try store.isContact(contact) else {
@@ -321,7 +337,7 @@ public final class Client {
         }
         let pin = try store.pin(contact)
         let ephemeralPrivateKey = randomBytes(Identity.keyLength)
-        let agreement = try X3DH.initiate(
+        let agreement = try PQXDH.initiate(
             bundle: bundle,
             identityKey: identityKey,
             identityDHPrivateKey: identity.identityDHPrivateKey,
@@ -343,6 +359,8 @@ public final class Client {
         if let oneTimePrekey = bundle.oneTimePrekey {
             initialHeader.oneTimePrekeyID = oneTimePrekey.id
         }
+        initialHeader.kemCiphertext = agreement.kemCiphertext
+        initialHeader.pqPrekeyID = agreement.pqPrekeyID
         let serializedHeader: Data = try initialHeader.serializedBytes()
 
         return try store.transaction {
@@ -1090,7 +1108,7 @@ public final class Client {
             nonce: randomBytes(Ratchet.messageNonceLength)
         )
         var envelope = Sotto_PeerMessage()
-        envelope.version = Envelope.version
+        envelope.version = session.version
         envelope.header = encrypted.header
         envelope.ciphertext = encrypted.ciphertext
         if let initialHeader = session.initialHeader {
@@ -1141,9 +1159,17 @@ public final class Client {
     private func receiveInitial(_ delivered: Delivered, _ envelope: Sotto_PeerMessage) throws -> Received {
         let initialHeader = envelope.initialHeader
         let pin = try store.pin(delivered.sender)
-        try Self.checkInitialHeader(delivered.sender, initialHeader, pin)
+        try X3DH.checkInitialHeader(
+            delivered.sender,
+            identityDHKey: initialHeader.identityDhKey,
+            signature: initialHeader.identityDhSignature,
+            pinnedIdentityDHKey: pin
+        )
 
         guard let record = try store.record(sender: delivered.sender, ephemeralKey: initialHeader.ephemeralKey) else {
+            guard envelope.version == Envelope.pqxdhVersion else {
+                throw SessionError.x3dhRefused
+            }
             return try acceptNew(delivered, envelope, pin)
         }
         guard let session = try store.session(record.sessionID) else {
@@ -1170,13 +1196,12 @@ public final class Client {
         throw CryptoError.decryptFailed
     }
 
-    /// Steps 3 to 9 of section 16.8 and ACCEPT-NEW of section 20.3.
+    /// Steps 2 to 7 of section 41.7 and ACCEPT-NEW of section 20.3.
     private func acceptNew(_ delivered: Delivered, _ envelope: Sotto_PeerMessage, _ pin: Data?) throws -> Received {
         let initialHeader = envelope.initialHeader
         let signedPrekeyID = initialHeader.signedPrekeyID
-        guard let signedPrekeyPrivateKey = try store.signedPrekey(
-            signedPrekeyID, replacedAfter: now() - Self.signedPrekeyGraceSeconds
-        ) else {
+        let replacedAfter = now() - Self.signedPrekeyGraceSeconds
+        guard let signedPrekeyPrivateKey = try store.signedPrekey(signedPrekeyID, replacedAfter: replacedAfter) else {
             throw SessionError.unknownSignedPrekey
         }
 
@@ -1190,15 +1215,22 @@ public final class Client {
             }
         }
 
-        let agreement = try X3DH.respond(
+        let pqPrekeyID = initialHeader.pqPrekeyID
+        guard let pqPrekey = try store.pqPrekey(pqPrekeyID, replacedAfter: replacedAfter) else {
+            throw SessionError.unknownPQPrekey
+        }
+
+        let agreement = try PQXDH.respond(
             identityKey: identityKey,
             identityDHPrivateKey: identity.identityDHPrivateKey,
             signedPrekeyPrivateKey: signedPrekeyPrivateKey,
             oneTimePrekeyPrivateKey: oneTimePrekeyPrivateKey,
+            pqPrekeySeed: pqPrekey.seed,
             senderIdentityKey: delivered.sender,
             senderIdentityDHKey: initialHeader.identityDhKey,
             senderIdentityDHSignature: initialHeader.identityDhSignature,
             ephemeralKey: initialHeader.ephemeralKey,
+            kemCiphertext: initialHeader.kemCiphertext,
             pinnedIdentityDHKey: pin
         )
         let state = try Ratchet.initResponder(
@@ -1225,6 +1257,9 @@ public final class Client {
             let dropped = try store.dropSessionsBehind(delivered.sender)
             if let oneTimePrekeyID {
                 try store.deleteOneTimePrekey(oneTimePrekeyID)
+            }
+            if pqPrekey.isOneTime {
+                try store.deletePQOneTimePrekey(pqPrekeyID)
             }
             if pin == nil {
                 try store.setPin(delivered.sender, identityDHKey: initialHeader.identityDhKey)
@@ -1405,13 +1440,18 @@ public final class Client {
         try store.setProfile(contact, name: profile.name, avatarFile: avatarFile)
     }
 
-    /// Section 17.7 on a copy of the state; any failure is DECRYPT_FAILED (section 20.2).
+    /// Section 17.7 on a copy of the state; any failure is DECRYPT_FAILED (section 20.2). A
+    /// session decrypts only an envelope of its own version, the first byte of its session
+    /// associated data (section 41.10).
     private func decrypt(
         _ state: RatchetState,
         _ associatedData: Data,
         _ delivered: Delivered,
         _ envelope: Sotto_PeerMessage
     ) throws -> Decrypted {
+        guard UInt32(associatedData.first ?? 0) == envelope.version else {
+            throw CryptoError.decryptFailed
+        }
         do {
             return try Ratchet.decrypt(
                 state,
@@ -1445,8 +1485,54 @@ public final class Client {
         return oneTimePrekeys
     }
 
-    /// An UploadBundle of section 21.4 with the newest signed prekey.
-    private func upload(_ newest: StoredSignedPrekey, _ oneTimePrekeys: [OneTimePrekey]) throws -> PrekeyUpload {
+    /// Makes `requested` one-time post-quantum prekeys, first deleting those with the lowest
+    /// ids that the batch would push past `pqOneTimePrekeyHeldMax` (section 42.2).
+    private func addPQOneTimePrekeys(_ requested: Int) throws -> [SignedPrekey] {
+        let count = max(0, min(requested, Self.pqOneTimePrekeyHeldMax, Int(try store.pqPrekeyIDsLeft())))
+        let overTheBound = try store.pqOneTimePrekeyCount() + count - Self.pqOneTimePrekeyHeldMax
+        if overTheBound > 0 {
+            try store.deleteLowestPQOneTimePrekeys(overTheBound)
+        }
+
+        var pqOneTimePrekeys: [SignedPrekey] = []
+        for _ in 0..<count {
+            let seed = randomBytes(PQXDH.kemSeedLength)
+            guard let prekeyID = try store.addPQPrekey(seed, signedPrekeyID: nil) else {
+                break
+            }
+            pqOneTimePrekeys.append(try signedPQPrekey(prekeyID, seed))
+        }
+        return pqOneTimePrekeys
+    }
+
+    /// Step 2 of section 21.2: a new signed prekey with its last-resort post-quantum prekey,
+    /// inside the caller's transaction.
+    private func addSignedPrekey() throws {
+        if let signedPrekeyID = try store.addSignedPrekey(randomBytes(Identity.keyLength), madeAt: now()) {
+            _ = try store.addPQPrekey(randomBytes(PQXDH.kemSeedLength), signedPrekeyID: signedPrekeyID)
+        }
+    }
+
+    /// Step 2 of section 21.2: no signed prekey, an old one, or one without a last-resort
+    /// post-quantum prekey while the counter can still give one (section 42.2).
+    private func isRotationDue() throws -> Bool {
+        guard let newest = try store.newestSignedPrekey() else {
+            return true
+        }
+        let isOld = now() - newest.madeAt >= Self.signedPrekeyRotationSeconds
+        let lacksAPQPrekey = newest.pqPrekey == nil
+        return try isOld || (lacksAPQPrekey && store.pqPrekeyIDsLeft() > 0)
+    }
+
+    private func signedPQPrekey(_ prekeyID: UInt32, _ seed: Data) throws -> SignedPrekey {
+        let key = try PQXDH.kemPublicKey(seed: seed)
+        return SignedPrekey(id: prekeyID, key: key, signature: try Identity.signPQPrekey(seed: identity.seed, pqPrekey: key))
+    }
+
+    /// An UploadBundle of section 21.4 with the newest signed prekey and its pair.
+    private func upload(
+        _ newest: StoredSignedPrekey, _ oneTimePrekeys: [OneTimePrekey], _ pqOneTimePrekeys: [SignedPrekey]
+    ) throws -> PrekeyUpload {
         let signedKey = try Identity.deriveX25519PublicKey(newest.privateKey)
         return PrekeyUpload(
             identityDHKey: identityDHKey,
@@ -1456,7 +1542,9 @@ public final class Client {
                 key: signedKey,
                 signature: try Identity.signSignedPrekey(seed: identity.seed, signedPrekey: signedKey)
             ),
-            oneTimePrekeys: oneTimePrekeys
+            oneTimePrekeys: oneTimePrekeys,
+            pqPrekey: try newest.pqPrekey.map { try signedPQPrekey($0.prekeyID, $0.seed) },
+            pqOneTimePrekeys: pqOneTimePrekeys
         )
     }
 
@@ -1469,22 +1557,6 @@ public final class Client {
 
     private func identityDHSignature() throws -> Data {
         try Identity.signIdentityDHKey(seed: identity.seed, identityDHKey: identityDHKey)
-    }
-
-    /// Steps 1 and 2 of section 16.8, before any Diffie-Hellman value.
-    private static func checkInitialHeader(_ sender: Data, _ initialHeader: Sotto_InitialHeader, _ pin: Data?) throws {
-        do {
-            try Identity.verifyIdentityDHKey(
-                identityKey: sender,
-                identityDHKey: initialHeader.identityDhKey,
-                signature: initialHeader.identityDhSignature
-            )
-        } catch CryptoError.badBundle {
-            throw CryptoError.badInitialHeader
-        }
-        if let pin, initialHeader.identityDhKey != pin {
-            throw CryptoError.identityKeyMismatch
-        }
     }
 
     /// The content of a message that decrypted, or the result that it has none (section

@@ -14,6 +14,7 @@ public enum CryptoError: Error, Equatable, Sendable {
     case chainExhausted
     case noSendingChain
     case badBlob
+    case pqPrekeyMissing
 
     public var result: String {
         switch self {
@@ -28,6 +29,7 @@ public enum CryptoError: Error, Equatable, Sendable {
         case .chainExhausted: "CHAIN_EXHAUSTED"
         case .noSendingChain: "NO_SENDING_CHAIN"
         case .badBlob: "BAD_BLOB"
+        case .pqPrekeyMissing: "PQ_PREKEY_MISSING"
         }
     }
 }
@@ -67,19 +69,22 @@ public struct PrekeyBundle: Sendable {
     public var identityDHSignature: Data
     public var signedPrekey: SignedPrekey
     public var oneTimePrekey: OneTimePrekey?
+    public var pqPrekey: SignedPrekey?
 
     public init(
         identity: Data,
         identityDHKey: Data,
         identityDHSignature: Data,
         signedPrekey: SignedPrekey,
-        oneTimePrekey: OneTimePrekey?
+        oneTimePrekey: OneTimePrekey?,
+        pqPrekey: SignedPrekey? = nil
     ) {
         self.identity = identity
         self.identityDHKey = identityDHKey
         self.identityDHSignature = identityDHSignature
         self.signedPrekey = signedPrekey
         self.oneTimePrekey = oneTimePrekey
+        self.pqPrekey = pqPrekey
     }
 }
 
@@ -88,11 +93,13 @@ public enum Identity {
     public static let keyLength = 32
     public static let nonceLength = 32
     public static let signatureLength = 64
+    public static let kemPublicKeyLength = 1184
     public static let longestServerName = 255
 
     static let loginPrefix = Data("sotto/1 login".utf8)
     static let identityDHPrefix = Data("sotto/1 identity-dh".utf8)
     static let signedPrekeyPrefix = Data("sotto/1 signed-prekey".utf8)
+    static let pqPrekeyPrefix = Data("sotto/1 ml-kem-768-prekey".utf8)
     static let prefixEnd = Data([0])
 
     static let topBitCleared: UInt8 = 0x7F
@@ -161,6 +168,13 @@ public enum Identity {
         return signedPrekeyPrefix + prefixEnd + identityKey + signedPrekey
     }
 
+    /// The string of section 4.5.
+    public static func pqPrekeyString(identityKey: Data, pqPrekey: Data) throws -> Data {
+        try requireLength("identity_key", identityKey, keyLength)
+        try requireLength("pq_prekey", pqPrekey, kemPublicKeyLength)
+        return pqPrekeyPrefix + prefixEnd + identityKey + pqPrekey
+    }
+
     public static func signLogin(seed: Data, serverName: String, serverNonce: Data, clientNonce: Data) throws -> Data {
         let signedString = try loginString(serverName: serverName, serverNonce: serverNonce, clientNonce: clientNonce)
         return try sign(seed: seed, signedString)
@@ -205,7 +219,20 @@ public enum Identity {
         }
     }
 
-    /// Runs the four checks of section 5.4 in order and stops at the first that fails.
+    public static func signPQPrekey(seed: Data, pqPrekey: Data) throws -> Data {
+        let signedString = try pqPrekeyString(identityKey: deriveIdentityKey(seed: seed), pqPrekey: pqPrekey)
+        return try sign(seed: seed, signedString)
+    }
+
+    public static func verifyPQPrekey(identityKey: Data, pqPrekey: Data, signature: Data) throws {
+        let signedString = try pqPrekeyString(identityKey: identityKey, pqPrekey: pqPrekey)
+        guard try verifies(identityKey, signature, signedString) else {
+            throw CryptoError.badBundle
+        }
+    }
+
+    /// Runs the first four checks of section 5.4 in order and stops at the first that fails;
+    /// `PQXDH.initiate` runs checks 5 to 7 after them.
     public static func checkBundle(
         _ bundle: PrekeyBundle,
         contactIdentityKey: Data,

@@ -10,7 +10,9 @@ identity and an app identity, and starts the app with `--data-dir` and `--relay`
 client sends texts while the app runs and while it is closed; the app is started again to
 receive the rest. Then the app sends with `--send`: once to the running Python client, once
 right after a restart, and once while the Python client is not connected, which prints that
-text when it connects again. Then files: `sotto send-file` sends the app a photo and a file,
+text when it connects again; before that last text the app starts a session of its own with
+`--reset`, so the app makes a session by PQXDH once as responder and once as initiator, and
+every session of both stores is of end-to-end version 2. Then files: `sotto send-file` sends the app a photo and a file,
 and the app sends a photo and a file with `--send-file`; each is compared byte for byte, the
 files the app received as its store keeps them (read with `sotto-mac test-query`), since
 the app keeps received files inside its encrypted store and writes nothing into its
@@ -52,8 +54,8 @@ import zlib
 from pathlib import Path
 
 from interop import (
-    FILE_PATIENCE_SECONDS, LARGE_FILE_BYTES, PATIENCE_SECONDS, PROTECTION, SOTTO, Chat, CheckFailed, command, outcome,
-    read_only, relay, work_folder,
+    FILE_PATIENCE_SECONDS, LARGE_FILE_BYTES, PATIENCE_SECONDS, PROTECTION, SOTTO, Chat, CheckFailed, command,
+    expect_versions, outcome, read_only, relay, session_versions, work_folder,
 )
 
 REPOSITORY = Path(__file__).resolve().parent.parent
@@ -238,6 +240,10 @@ async def run(run_folder: Path) -> None:
             print("ok   the app sent to the running python, also right after a restart")
 
             await python.quit()
+            expect_versions("the app, the responder", app_store, [2])
+            apps.append(App(app_dir, url, log, "--reset", "python"))
+            await until("the app started a session of its own", lambda: len(session_versions(app_store)) == 2)
+            apps[-1].stop()
             apps.append(App(app_dir, url, log, "--send", "python", TEXT_WHILE_AWAY))
             await until(
                 "the relay stored the text of the app for the absent python",
@@ -247,6 +253,8 @@ async def run(run_folder: Path) -> None:
             python = await start_python(url)
             await python.expect_message("app", TEXT_WHILE_AWAY)
             await python.quit()
+            expect_versions("the app, responder then initiator", app_store, [2, 2])
+            expect_versions("python, initiator then responder", python_dir / "store.db", [2, 2])
 
             await files_both_ways(run_folder, url, app_dir, python_dir, downloads, log, apps, start_python)
             await profiles_both_ways(run_folder, url, app_dir, python_dir, app_id, log, apps, start_python)

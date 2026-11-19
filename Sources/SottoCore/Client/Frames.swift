@@ -82,6 +82,10 @@ public enum Frames {
         if bundle.hasOneTimePrekey {
             try requireLength("one_time_prekey.key", bundle.oneTimePrekey.key, Identity.keyLength)
         }
+        if bundle.hasPqPrekey {
+            try requireLength("pq_prekey.key", bundle.pqPrekey.key, Identity.kemPublicKeyLength)
+            try requireLength("pq_prekey.signature", bundle.pqPrekey.signature, Identity.signatureLength)
+        }
     }
 
     private static func requireLength(_ field: String, _ value: Data, _ lengths: Int...) throws {

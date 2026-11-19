@@ -60,11 +60,27 @@ public struct StoredIdentity: Equatable, Sendable {
     }
 }
 
+/// A signed prekey with its last-resort post-quantum prekey, which a store of a version
+/// before PQXDH lacks (section 42.2).
 public struct StoredSignedPrekey: Equatable, Sendable {
     public var prekeyID: UInt32
     public var privateKey: Data
     public var madeAt: Int64
     public var confirmed: Bool
+    public var pqPrekey: StoredPQPrekey?
+}
+
+/// A post-quantum prekey: its id and the 64-byte seed of ML-KEM-768 (section 41.3).
+public struct StoredPQPrekey: Equatable, Sendable {
+    public var prekeyID: UInt32
+    public var seed: Data
+}
+
+/// A post-quantum prekey that a responder holds: a one-time one, or the last-resort one of
+/// a signed prekey that is held (section 41.7).
+public struct HeldPQPrekey: Equatable, Sendable {
+    public var seed: Data
+    public var isOneTime: Bool
 }
 
 public struct StoredSession: Equatable, Sendable {
@@ -73,6 +89,11 @@ public struct StoredSession: Equatable, Sendable {
     public var associatedData: Data
     public var state: RatchetState
     public var initialHeader: Data?
+
+    /// The end-to-end version of the key agreement that made the session (section 41.10).
+    public var version: UInt32 {
+        UInt32(associatedData.first ?? 0)
+    }
 }
 
 /// What an accepted initial message left behind (section 20.4).
@@ -307,6 +328,7 @@ public final class ClientStore {
             for table in ["messages", "pending", "files"] {
                 try change("INSERT OR IGNORE INTO row_numbers SELECT '\(table)', coalesce(max(position), 0) FROM \(table)")
             }
+            try change("INSERT OR IGNORE INTO pq_prekey_ids VALUES (1, 0)")
         }
     }
 
@@ -360,14 +382,32 @@ public final class ClientStore {
     }
 
     public func newestSignedPrekey() throws -> StoredSignedPrekey? {
-        try query(Schema.readNewestSignedPrekey).first.map {
+        try query(Schema.readNewestSignedPrekey).first.map { row in
             StoredSignedPrekey(
-                prekeyID: UInt32($0[0].integer!),
-                privateKey: $0[1].data!,
-                madeAt: $0[2].integer!,
-                confirmed: $0[3].integer! == 1
+                prekeyID: UInt32(row[0].integer!),
+                privateKey: row[1].data!,
+                madeAt: row[2].integer!,
+                confirmed: row[3].integer! == 1,
+                pqPrekey: row[4].integer.map { StoredPQPrekey(prekeyID: UInt32($0), seed: row[5].data!) }
             )
         }
+    }
+
+    /// A one-time post-quantum prekey, or the last-resort one of a signed prekey that
+    /// `signedPrekey` holds; any other counts as not held (section 42.2).
+    public func pqPrekey(_ prekeyID: UInt32, replacedAfter: Int64) throws -> HeldPQPrekey? {
+        try query(Schema.readPQPrekey, [.integer(Int64(prekeyID)), .integer(replacedAfter)]).first.map {
+            HeldPQPrekey(seed: $0[0].data!, isOneTime: $0[1].integer! == 1)
+        }
+    }
+
+    /// The ids that the counter of post-quantum prekeys can still give (section 42.2).
+    public func pqPrekeyIDsLeft() throws -> Int64 {
+        Int64(Self.lastPrekeyID) - (try query("SELECT last_id FROM pq_prekey_ids")[0][0].integer!)
+    }
+
+    public func pqOneTimePrekeyCount() throws -> Int {
+        Int(try query("SELECT count(*) FROM pq_prekeys WHERE signed_prekey_id IS NULL")[0][0].integer!)
     }
 
     /// The ids that the counter of one-time prekeys can still give (section 21.1).
@@ -656,6 +696,7 @@ public final class ClientStore {
     /// Deletes the signed prekeys replaced at or before the time, with the records that
     /// name them and whose session is gone (section 21.2, step 1).
     public func deleteSignedPrekeys(replacedAtOrBefore: Int64) throws {
+        try change(Schema.deleteExpiredPQPrekeys, [.integer(replacedAtOrBefore)])
         try change("DELETE FROM signed_prekeys WHERE replaced_at <= ?", [.integer(replacedAtOrBefore)])
         try change(Schema.deleteOrphanRecords)
     }
@@ -677,6 +718,29 @@ public final class ClientStore {
 
     public func deleteLowestOneTimePrekeys(_ count: Int) throws {
         try change(Schema.deleteLowestOneTimePrekeys, [.integer(Int64(count))])
+    }
+
+    /// Saves a post-quantum prekey under the next id of its counter: the last-resort key of
+    /// `signedPrekeyID` or, without one, a one-time key; nil, and nothing saved, once the
+    /// counter is at `lastPrekeyID` (section 42.2).
+    public func addPQPrekey(_ seed: Data, signedPrekeyID: UInt32?) throws -> UInt32? {
+        guard let counted = try change(Schema.countPQPrekey, [.integer(Int64(Self.lastPrekeyID))]).first else {
+            return nil
+        }
+        let prekeyID = counted[0].integer!
+        try change(
+            "INSERT INTO pq_prekeys VALUES (?, ?, ?)",
+            [.integer(prekeyID), .blob(seed), signedPrekeyID.map { .integer(Int64($0)) } ?? .null]
+        )
+        return UInt32(prekeyID)
+    }
+
+    public func deletePQOneTimePrekey(_ prekeyID: UInt32) throws {
+        try change("DELETE FROM pq_prekeys WHERE prekey_id = ? AND signed_prekey_id IS NULL", [.integer(Int64(prekeyID))])
+    }
+
+    public func deleteLowestPQOneTimePrekeys(_ count: Int) throws {
+        try change(Schema.deleteLowestPQOneTimePrekeys, [.integer(Int64(count))])
     }
 
     public func addContact(_ identityKey: Data, name: String? = nil) throws {
@@ -1564,6 +1628,22 @@ private enum Schema {
             private_key BLOB NOT NULL
         ) STRICT
         """,
+        // A post-quantum prekey with a signed prekey is its last-resort key and is deleted
+        // with it; one without is a one-time key (section 42.2). The counter of their ids
+        // has a table of its own, so that a store of a version before PQXDH gains both.
+        """
+        CREATE TABLE IF NOT EXISTS pq_prekeys (
+            prekey_id INTEGER PRIMARY KEY,
+            seed BLOB NOT NULL,
+            signed_prekey_id INTEGER UNIQUE
+        ) STRICT
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS pq_prekey_ids (
+            only_row INTEGER PRIMARY KEY CHECK (only_row = 1),
+            last_id INTEGER NOT NULL
+        ) STRICT
+        """,
         """
         CREATE TABLE IF NOT EXISTS contacts (
             identity_key BLOB PRIMARY KEY,
@@ -1882,8 +1962,30 @@ private enum Schema {
         WHERE prekey_id = ? AND (replaced_at IS NULL OR replaced_at > ?)
         """
     static let readNewestSignedPrekey = """
-        SELECT prekey_id, private_key, made_at, confirmed FROM signed_prekeys
-        WHERE replaced_at IS NULL
+        SELECT s.prekey_id, s.private_key, s.made_at, s.confirmed, p.prekey_id, p.seed
+        FROM signed_prekeys s LEFT JOIN pq_prekeys p ON p.signed_prekey_id = s.prekey_id
+        WHERE s.replaced_at IS NULL
+        """
+    static let readPQPrekey = """
+        SELECT seed, signed_prekey_id IS NULL FROM pq_prekeys
+        WHERE prekey_id = ? AND (signed_prekey_id IS NULL OR signed_prekey_id IN (
+            SELECT prekey_id FROM signed_prekeys WHERE replaced_at IS NULL OR replaced_at > ?
+        ))
+        """
+    static let countPQPrekey = """
+        UPDATE pq_prekey_ids SET last_id = last_id + 1
+        WHERE last_id < ? RETURNING last_id
+        """
+    static let deleteLowestPQOneTimePrekeys = """
+        DELETE FROM pq_prekeys WHERE prekey_id IN (
+            SELECT prekey_id FROM pq_prekeys WHERE signed_prekey_id IS NULL
+            ORDER BY prekey_id LIMIT ?
+        )
+        """
+    static let deleteExpiredPQPrekeys = """
+        DELETE FROM pq_prekeys WHERE signed_prekey_id IN (
+            SELECT prekey_id FROM signed_prekeys WHERE replaced_at <= ?
+        )
         """
     static let countSignedPrekey = """
         UPDATE identity SET last_signed_prekey_id = last_signed_prekey_id + 1
