@@ -471,7 +471,7 @@ struct MessageRow: View {
             if file.isPhoto {
                 PhotoBubble(
                     message: message, file: file, shape: shape, maxWidth: maxWidth, time: time,
-                    connected: connected, tap: tap, header: quoteView.map { AnyView($0) }
+                    connected: connected, tap: tap, header: quoteView.map { AnyView($0) }, model: model
                 ) { textWithTime }
             } else {
                 FileBubble(
@@ -530,15 +530,13 @@ struct MessageRow: View {
                 Button { model.startEdit(message.id, in: chatID) } label: { Label("Edit", systemImage: "pencil") }
             }
         }
-        if let file = message.file, let model {
-            if let url = Media.localURL(file) {
-                Button { model.saveAs(message) } label: { Label("Save as...", systemImage: "square.and.arrow.down") }
-                if file.isPhoto {
-                    Button { model.copyImage(url) } label: { Label("Copy image", systemImage: "doc.on.doc") }
-                } else {
-                    Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: {
-                        Label("Show in Finder", systemImage: "folder")
-                    }
+        if let file = message.file, let model, model.hasContents(file) {
+            Button { model.saveAs(message) } label: { Label("Save as...", systemImage: "square.and.arrow.down") }
+            if file.isPhoto {
+                Button { model.copyImage(message) } label: { Label("Copy image", systemImage: "doc.on.doc") }
+            } else if let url = Media.localURL(file) {
+                Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: {
+                    Label("Show in Finder", systemImage: "folder")
                 }
             }
         }

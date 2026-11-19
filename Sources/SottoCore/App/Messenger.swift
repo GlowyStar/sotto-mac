@@ -81,7 +81,8 @@ public struct ChatFile: Codable, Hashable, Sendable {
     /// sending or receiving; 0 before the first piece.
     public let done: Int
     public let total: Int
-    /// Where a received file was saved, or the file a sent one was read from.
+    /// Where a received file was saved, or the file a sent one was read from; nil when the
+    /// store keeps the file (`kept`) or it is not here.
     public let savedAs: String?
     /// Why the file failed: a result of section 33.6 or of a refusal.
     public let result: String?
@@ -90,10 +91,13 @@ public struct ChatFile: Codable, Hashable, Sendable {
     public var height = 0
     /// The thumbnail as the sender gave it; `Thumbnail.decode` tells whether it may be shown.
     public var thumbnail = Data()
+    /// The store keeps the bytes of the file, which `Messenger.contents` reads.
+    public var kept = false
 
     public init(
         name: String, size: Int, mediaType: String, state: FileState, done: Int = 0, total: Int = 0,
-        savedAs: String? = nil, result: String? = nil, width: Int = 0, height: Int = 0, thumbnail: Data = Data()
+        savedAs: String? = nil, result: String? = nil, width: Int = 0, height: Int = 0, thumbnail: Data = Data(),
+        kept: Bool = false
     ) {
         self.name = name
         self.size = size
@@ -106,6 +110,7 @@ public struct ChatFile: Codable, Hashable, Sendable {
         self.width = width
         self.height = height
         self.thumbnail = thumbnail
+        self.kept = kept
     }
 
     public var isPhoto: Bool { Self.isPhoto(mediaType) }
@@ -223,21 +228,30 @@ public struct NotConnectedError: Error, Equatable, Sendable {}
 /// What the app shows and does, over the store, the session layer and the transport of one
 /// identity. Every change is published on `changes` as a whole new state.
 ///
-/// What the store does not hold is kept in `app.json` next to it: the relay address once it
-/// is set here, the last read position of each chat, when each contact and message was
-/// first seen, the drafts, pins, muted and archived chats, and the settings of the app.
+/// Its notes are kept in the store with the rest (docs/key-storage.md): the relay address
+/// once it is set here, the last read position of each chat, when each contact and message
+/// was first seen, the drafts, pins, muted and archived chats, and the settings of the app.
+/// `app.json` next to the store keeps only the theme, which the lock screen shows before
+/// the store is open.
 public actor Messenger {
     public static let notesFile = "app.json"
+    /// Where a version before the notes moved into the store kept pasted pictures.
+    public static let pastedFolder = "Pasted"
     static let pollSeconds = 0.5
     static let expirySeconds = 1.0
 
     public nonisolated let changes: AsyncStream<MessengerState>
     /// Whether the store held an identity when it was opened.
     public nonisolated let hadIdentity: Bool
-    /// The settings in `app.json` when the store was opened; nil when none were saved yet.
+    /// This open took in the notes of an older `app.json`: the notifications that version
+    /// posted may still show names and texts.
+    public nonisolated let tookInOlderNotes: Bool
+    /// The settings the store held when it was opened; nil when none were saved yet.
     public nonisolated let launchSettings: AppSettings?
     private let sink: AsyncStream<MessengerState>.Continuation
     private let directory: URL
+    /// The connection that writes the notes, in the order they change.
+    private let notesStore: ClientStore
     private let launchRelay: String
     private var notes: Notes
     private var userID: String?
@@ -260,21 +274,98 @@ public actor Messenger {
     private var progress: [Data: Progress] = [:]
 
     /// Opens the store in `directory`, creating it when it is missing; `relay` is used until
-    /// an address is saved with `setRelay`. Received files are downloaded into the folder of
-    /// the settings, or `receivedFiles` when they name none, each by itself when it is within
-    /// the auto-download size of its kind and the others when `download` asks; a nil
-    /// `receivedFiles` leaves every received file offered.
+    /// an address is saved with `setRelay`. Received files are downloaded, each by itself
+    /// when it is within the auto-download size of its kind and the others when `download`
+    /// asks, and kept in the store; with "Save received files automatically" they are
+    /// written into the folder of the settings, or `receivedFiles` when they name none. A
+    /// nil `receivedFiles` leaves every received file offered.
+    ///
+    /// The first open since the notes moved into the store takes them in from `app.json`
+    /// and the pasted pictures from their folder, and leaves neither readable there.
     public init(directory: URL, relay: String, receivedFiles: URL? = nil) throws {
         self.directory = directory
         self.receivedFiles = receivedFiles
         launchRelay = relay
         let store = try ClientStore(directory: directory)
         userID = try store.identity().map { try Identity.encodeUserID(Identity.deriveIdentityKey(seed: $0.seed)) }
-        store.close()
         hadIdentity = userID != nil
-        notes = Notes.load(directory)
+        (notes, tookInOlderNotes) = try Self.takeInNotes(store, directory)
+        try Self.takeInPasted(store, directory)
+        notesStore = store
         launchSettings = notes.settings
         (changes, sink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
+    }
+
+    /// The notes of the store; at the first open since they moved there, the ones of
+    /// `app.json`, saved into the store before `app.json` is left with the theme only. A
+    /// notification of such a file shows neither the name nor the text: the file cannot
+    /// tell a choice to show them from the default of its version.
+    static func takeInNotes(_ store: ClientStore, _ directory: URL) throws -> (Notes, older: Bool) {
+        var notes: Notes
+        var older = false
+        if let stored = try Notes.load(store) {
+            notes = stored
+        } else {
+            let legacy = Notes.legacy(directory)
+            older = legacy != nil
+            notes = legacy ?? Notes()
+            notes.settings?.notificationSender = false
+            notes.settings?.notificationPreview = false
+            try notes.save(store)
+        }
+        try keepLaunchNotes(directory, theme: notes.settings?.theme ?? launchTheme(directory: directory))
+        return (notes, older)
+    }
+
+    /// The theme that `app.json` keeps for the lock screen, nil when it keeps none.
+    public static func launchTheme(directory: URL) -> AppSettings.Theme? {
+        let url = directory.appendingPathComponent(notesFile)
+        return (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(LaunchNotes.self, from: $0) }?.theme
+    }
+
+    /// Leaves `app.json` holding the theme and nothing else; a file that holds more is
+    /// overwritten with zeros before it goes (docs/key-storage.md).
+    static func keepLaunchNotes(_ directory: URL, theme: AppSettings.Theme?) throws {
+        let url = directory.appendingPathComponent(notesFile)
+        let wanted = try theme.map { try JSONEncoder().encode(LaunchNotes(theme: $0)) }
+        let present = FileManager.default.contents(atPath: url.path)
+        guard present != wanted else {
+            return
+        }
+        // A file that does not open for writing (read only, a link) is only removed: the
+        // store must open whatever app.json is.
+        if present != nil, (try? ClientStore.overwriteAndRemove(url)) == nil {
+            try FileManager.default.removeItem(at: url)
+        }
+        if let wanted {
+            try wanted.write(to: url, options: .atomic)
+            chmod(url.path, ClientStore.fileMode)
+        }
+    }
+
+    /// Moves the pictures that a version before kept in `Pasted` into the store, with the
+    /// sent files that name them, then overwrites and removes the folder; an entry that is
+    /// no plain file (a link, a folder) is only removed.
+    static func takeInPasted(_ store: ClientStore, _ directory: URL) throws {
+        let folder = directory.appendingPathComponent(pastedFolder, isDirectory: true)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else {
+            return
+        }
+        let resolved = folder.resolvingSymlinksInPath().path
+        for file in try store.files() where !file.incoming && !file.kept {
+            guard let path = file.savedAs,
+                URL(fileURLWithPath: path).deletingLastPathComponent().resolvingSymlinksInPath().path == resolved,
+                let bytes = FileManager.default.contents(atPath: path)
+            else { continue }
+            try store.transaction { try store.keepFile(file.position, bytes) }
+        }
+        for name in names {
+            let url = folder.appendingPathComponent(name)
+            if (try? ClientStore.overwriteAndRemove(url)) == nil {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        try? FileManager.default.removeItem(at: folder)
     }
 
     public var relay: String {
@@ -301,11 +392,14 @@ public actor Messenger {
         await publish()
     }
 
-    /// Stops the transport and ends `changes`.
+    /// Stops the transport, closes the store and ends `changes`.
     public func close() async {
         await disconnect()
         poller?.cancel()
         expirer?.cancel()
+        // Once more, should the last write of a change have failed.
+        try? notes.save(notesStore)
+        notesStore.close()
         sink.finish()
     }
 
@@ -329,7 +423,7 @@ public actor Messenger {
         let state = try Self.build(rows, notes: &updated, relay: relay, link: link, now: Date(), progress: progress)
         if updated != notes {
             notes = updated
-            try notes.save(directory)
+            try notes.save(notesStore)
         }
         if state != last {
             last = state
@@ -342,7 +436,7 @@ public actor Messenger {
     /// its notes.
     public static func peek(directory: URL, relay: String) throws -> MessengerState {
         let store = try ClientStore(directory: directory)
-        var notes = Notes.load(directory)
+        var notes = try Notes.load(store) ?? Notes.legacy(directory) ?? Notes()
         return try build(Rows(store: store), notes: &notes, relay: notes.relay ?? relay, link: .idle, now: Date(), progress: [:])
     }
 
@@ -362,7 +456,7 @@ public actor Messenger {
             }
         }
         if notes.drafts.removeValue(forKey: userID) != nil {
-            try notes.save(directory)
+            try notes.save(notesStore)
         }
         await publish()
         flush()
@@ -382,6 +476,34 @@ public actor Messenger {
         _ file: URL, caption: String = "", to userID: String, mediaType: String? = nil,
         width: Int = 0, height: Int = 0, thumbnail: Data = Data(), replyTo: Int64? = nil
     ) async throws -> Int64 {
+        try await sendFile(
+            .path(file), caption: caption, to: userID, mediaType: mediaType, width: width, height: height,
+            thumbnail: thumbnail, replyTo: replyTo
+        )
+    }
+
+    /// `sendFile` for bytes that are in no file, such as a pasted picture: the store keeps
+    /// them with the message.
+    @discardableResult
+    public func sendFile(
+        named name: String, contents: Data, caption: String = "", to userID: String, mediaType: String? = nil,
+        width: Int = 0, height: Int = 0, thumbnail: Data = Data(), replyTo: Int64? = nil
+    ) async throws -> Int64 {
+        try await sendFile(
+            .contents(name, contents), caption: caption, to: userID, mediaType: mediaType, width: width, height: height,
+            thumbnail: thumbnail, replyTo: replyTo
+        )
+    }
+
+    private enum Source: Sendable {
+        case path(URL)
+        case contents(String, Data)
+    }
+
+    private func sendFile(
+        _ source: Source, caption: String, to userID: String, mediaType: String?, width: Int, height: Int,
+        thumbnail: Data, replyTo: Int64?
+    ) async throws -> Int64 {
         guard let transport else {
             throw NotConnectedError()
         }
@@ -389,17 +511,26 @@ public actor Messenger {
         let replyTo = try await transport.withClient { client in
             try replyTo.flatMap { try client.store.message($0)?.contact == contact ? $0 : nil }
         }
+        func start(_ replyTo: Int64?) async throws -> Data {
+            switch source {
+            case .path(let file):
+                try await transport.sendFile(
+                    contact, file: file, caption: caption, mediaType: mediaType, width: width, height: height,
+                    thumbnail: thumbnail, replyTo: replyTo
+                )
+            case .contents(let name, let contents):
+                try await transport.sendFile(
+                    contact, named: name, contents: contents, caption: caption, mediaType: mediaType, width: width,
+                    height: height, thumbnail: thumbnail, replyTo: replyTo
+                )
+            }
+        }
         let blobID: Data
         do {
-            blobID = try await transport.sendFile(
-                contact, file: file, caption: caption, mediaType: mediaType, width: width, height: height, thumbnail: thumbnail,
-                replyTo: replyTo
-            )
+            blobID = try await start(replyTo)
         } catch ChangeError.noSuchMessage where replyTo != nil {
             // The quoted message went while the login was awaited: the file goes alone.
-            blobID = try await transport.sendFile(
-                contact, file: file, caption: caption, mediaType: mediaType, width: width, height: height, thumbnail: thumbnail
-            )
+            blobID = try await start(nil)
         }
         let position = try await transport.withClient { client -> Int64 in
             guard let sent = try client.store.files().last(where: { !$0.incoming && $0.attachment.blobID == blobID }) else {
@@ -412,7 +543,8 @@ public actor Messenger {
     }
 
     /// Sends the file of a message that was not sent again, as a new message from the file it
-    /// was read from, and deletes the old message (section 33.5). Returns the new position.
+    /// was read from or the bytes the store keeps, and deletes the old message (section
+    /// 33.5). Returns the new position.
     ///
     /// - Throws: `FileGoneError` when the file is not where it was read from; what `sendFile`
     ///   throws.
@@ -423,13 +555,18 @@ public actor Messenger {
         else {
             return position
         }
-        guard let path = file.savedAs, FileManager.default.fileExists(atPath: path) else {
+        let sent = file.attachment
+        let source: Source
+        if file.kept, let contents = try await contents(position) {
+            source = .contents(sent.fileName, contents)
+        } else if let path = file.savedAs, FileManager.default.fileExists(atPath: path) {
+            source = .path(URL(fileURLWithPath: path))
+        } else {
             throw FileGoneError()
         }
-        let sent = file.attachment
         let made = try await sendFile(
-            URL(fileURLWithPath: path), caption: sent.caption, to: Identity.encodeUserID(file.contact),
-            mediaType: sent.mediaType, width: Int(sent.width), height: Int(sent.height), thumbnail: sent.thumbnail
+            source, caption: sent.caption, to: Identity.encodeUserID(file.contact), mediaType: sent.mediaType,
+            width: Int(sent.width), height: Int(sent.height), thumbnail: sent.thumbnail, replyTo: nil
         )
         try await deleteMessage(position)
         return made
@@ -517,7 +654,7 @@ public actor Messenger {
         }
         try await transport.delete(Identity.decodeUserID(userID), position)
         notes.times[String(position)] = nil
-        try notes.save(directory)
+        try notes.save(notesStore)
         await publish()
     }
 
@@ -529,7 +666,7 @@ public actor Messenger {
         }
         try await transport.setTimer(Identity.decodeUserID(userID), seconds: seconds)
         notes.timerChanges[userID, default: []].append(TimerNote(at: Self.milliseconds(Date()), seconds: seconds, own: true))
-        try notes.save(directory)
+        try notes.save(notesStore)
         await publish()
     }
 
@@ -563,7 +700,7 @@ public actor Messenger {
             return
         }
         notes.read[userID] = newest
-        try notes.save(directory)
+        try notes.save(notesStore)
         await publish()
     }
 
@@ -591,7 +728,7 @@ public actor Messenger {
         notes.added[userID] = nil
         notes.forget(userID)
         positions.forEach { notes.times[String($0)] = nil }
-        try notes.save(directory)
+        try notes.save(notesStore)
         await publish()
     }
 
@@ -607,7 +744,7 @@ public actor Messenger {
             }
         }
         notes.times[String(position)] = nil
-        try notes.save(directory)
+        try notes.save(notesStore)
         await publish()
     }
 
@@ -617,7 +754,7 @@ public actor Messenger {
     public func setRelay(_ address: String) async throws {
         _ = try Transport.serverName(of: address, insecure: false)
         notes.relay = address
-        try notes.save(directory)
+        try notes.save(notesStore)
         await reconnect()
     }
 
@@ -628,43 +765,72 @@ public actor Messenger {
             return
         }
         notes.drafts[userID] = draft
-        try notes.save(directory)
+        try notes.save(notesStore)
     }
 
     /// Pins a chat on top of the pinned ones, or unpins it.
     public func setPinned(_ userID: String, _ pinned: Bool) async throws {
         notes.pin(userID, pinned)
-        try notes.save(directory)
+        try notes.save(notesStore)
         await publish()
     }
 
     public func setMuted(_ userID: String, _ muted: Bool) async throws {
         notes.mute(userID, muted)
-        try notes.save(directory)
+        try notes.save(notesStore)
         await publish()
     }
 
     /// Moves a chat to the archive, which unpins it, or back to the list.
     public func setArchived(_ userID: String, _ archived: Bool) async throws {
         notes.archive(userID, archived)
-        try notes.save(directory)
+        try notes.save(notesStore)
         await publish()
     }
 
-    /// Saves the settings; a new download folder or auto-download size holds for the files
-    /// that arrive from now on.
+    /// Saves the settings, and the theme into `app.json` for the lock screen; where received
+    /// files go and their auto-download sizes hold for the files that arrive from now on.
     public func saveSettings(_ settings: AppSettings) async throws {
         notes.settings = settings
-        try notes.save(directory)
-        await transport?.setDownloads(folder: downloadFolder, autoDownload: Self.autoDownload(settings))
+        try notes.save(notesStore)
+        try Self.keepLaunchNotes(directory, theme: settings.theme)
+        await transport?.setDownloads(downloads, autoDownload: Self.autoDownload(settings))
     }
 
-    /// The folder of the settings, or the one given at launch.
-    private var downloadFolder: URL? {
+    /// Received files stay in the store unless the settings ask to save them into their
+    /// folder, or the one given at launch; nowhere without a folder at launch.
+    private var downloads: Transport.Downloads {
         guard let receivedFiles else {
-            return nil
+            return .off
         }
-        return notes.settings?.downloadFolder.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? receivedFiles
+        guard let settings = notes.settings, settings.saveReceivedFiles else {
+            return .store
+        }
+        return .folder(settings.downloadFolder.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? receivedFiles)
+    }
+
+    /// The bytes of the file of a message that the store keeps; nil when it keeps none.
+    public func contents(_ position: Int64) async throws -> Data? {
+        try await withStore { store in
+            try store.files(ofMessageAt: position).first.flatMap { $0.kept ? try store.keptFile($0.position) : nil }
+        }
+    }
+
+    /// Writes the file of a message that the store keeps into `descriptor` a piece at a time,
+    /// so a large one is never whole in memory; false when the store keeps none.
+    ///
+    /// - Throws: `StoreError.system` when a write to the descriptor fails.
+    public func writeContents(_ position: Int64, to descriptor: Int32) async throws -> Bool {
+        try await withStore { store in
+            guard let file = try store.files(ofMessageAt: position).first, file.kept else {
+                return false
+            }
+            return try store.readKeptFile(file.position) { piece in
+                guard ReceivedFiles.write(descriptor, piece) else {
+                    throw StoreError.system(path: "the file being saved", errno: errno)
+                }
+            }
+        }
     }
 
     /// A photo or a file downloads by itself up to the size of its kind; 0 is off.
@@ -787,7 +953,7 @@ public actor Messenger {
         do {
             client = nil
             let made = try Transport(
-                client: Client(store: ClientStore(directory: directory)), url: relay, receivedFiles: downloadFolder,
+                client: Client(store: ClientStore(directory: directory)), url: relay, downloads: downloads,
                 autoDownload: Self.autoDownload(notes.settings ?? AppSettings())
             )
             transport = made
@@ -849,11 +1015,11 @@ public actor Messenger {
                 changed = true
             }
             if changed {
-                try? notes.save(directory)
+                try? notes.save(notesStore)
             }
         case .expired(let positions):
             positions.forEach { notes.times[String($0)] = nil }
-            try? notes.save(directory)
+            try? notes.save(notesStore)
         case .written, .sent: break
         case .refused, .transferFailed: break
         case .file(let update) where update.avatar:
@@ -890,7 +1056,7 @@ public actor Messenger {
             return
         }
         positions.forEach { notes.times[String($0)] = nil }
-        try? notes.save(directory)
+        try? notes.save(notesStore)
         await publish()
     }
 
@@ -943,7 +1109,7 @@ public actor Messenger {
                 }
                 if let logged {
                     notes.times[String(logged.position)] = row.madeAt
-                    try notes.save(directory)
+                    try notes.save(notesStore)
                 }
             } catch is CancellationError {
                 break
@@ -983,10 +1149,15 @@ public actor Messenger {
     }
 
     private func read() async throws -> Rows {
+        try await withStore { try Rows(store: $0) }
+    }
+
+    /// Runs `body` on the store of the transport or of the client, else on the notes' own.
+    private func withStore<T: Sendable>(_ body: @escaping @Sendable (ClientStore) throws -> T) async throws -> T {
         if transport != nil || client != nil {
-            return try await withClient { try Rows(store: $0.store) }
+            return try await withClient { try body($0.store) }
         }
-        return try Rows(store: ClientStore(directory: directory))
+        return try body(notesStore)
     }
 
     private static func build(
@@ -1018,7 +1189,8 @@ public actor Messenger {
                         result: file.result,
                         width: Int(file.attachment.width),
                         height: Int(file.attachment.height),
-                        thumbnail: file.attachment.thumbnail
+                        thumbnail: file.attachment.thumbnail,
+                        kept: file.kept
                     )
                 }
             }
@@ -1178,7 +1350,8 @@ struct Rows: Sendable {
     }
 }
 
-/// `app.json`: times are milliseconds since 1970, message keys are log positions.
+/// The notes of the app, kept in the store: times are milliseconds since 1970, message keys
+/// are log positions. A version before kept them in `app.json`.
 struct Notes: Codable, Equatable {
     var relay: String?
     var read: [String: Int64] = [:]
@@ -1252,24 +1425,31 @@ struct Notes: Codable, Equatable {
         archived.remove(userID)
     }
 
-    static func load(_ directory: URL) -> Notes {
-        let url = directory.appendingPathComponent(Messenger.notesFile)
-        guard let data = try? Data(contentsOf: url), let notes = try? JSONDecoder().decode(Notes.self, from: data) else {
-            return Notes()
-        }
-        return notes
+    /// The notes the store keeps; nil when it keeps none yet or none that read as notes.
+    static func load(_ store: ClientStore) throws -> Notes? {
+        try store.appNotes().flatMap { try? JSONDecoder().decode(Notes.self, from: $0) }
     }
 
-    func save(_ directory: URL) throws {
-        let url = directory.appendingPathComponent(Messenger.notesFile)
+    func save(_ store: ClientStore) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
-        try encoder.encode(self).write(to: url, options: .atomic)
-        chmod(url.path, ClientStore.fileMode)
+        let data = try encoder.encode(self)
+        try store.transaction { try store.setAppNotes(data) }
+    }
+
+    /// The notes of `app.json` of a version that kept them there; nil without the file.
+    static func legacy(_ directory: URL) -> Notes? {
+        let url = directory.appendingPathComponent(Messenger.notesFile)
+        return (try? Data(contentsOf: url)).map { (try? JSONDecoder().decode(Notes.self, from: $0)) ?? Notes() }
     }
 }
 
-/// A change of the timer of a chat as `app.json` keeps it: the time in milliseconds.
+/// What `app.json` keeps: what the app shows before the store is unlocked.
+struct LaunchNotes: Codable, Equatable {
+    var theme: AppSettings.Theme?
+}
+
+/// A change of the timer of a chat as the notes keep it: the time in milliseconds.
 struct TimerNote: Codable, Equatable {
     var at: Int64
     var seconds: Int

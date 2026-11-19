@@ -567,7 +567,7 @@ struct NotificationsPage: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.windowBgOver)
         }
-        Hint(text: "Without a preview, a notification only says that a message arrived.")
+        Hint(text: "Without the name and the preview, a notification only says that a message arrived. macOS keeps what notifications show outside Sotto's encrypted storage.")
         SectionTitle(text: "Sound")
         SettingsToggle(title: "Play a sound", isOn: $model.settings.sound)
         GroupGap()
@@ -781,8 +781,10 @@ struct DataPage: View {
         SettingsRow(
             title: "Save files to", value: model.downloadFolder.lastPathComponent, help: model.downloadFolder.path
         ) { model.chooseDownloadFolder() }
+        SettingsToggle(title: "Save received files automatically", isOn: $model.settings.saveReceivedFiles)
         SettingsToggle(title: "Ask where to save each file", isOn: $model.settings.askWhereToSave)
             .padding(.bottom, 8)
+        Hint(text: "Received files stay in Sotto's encrypted storage until you choose Save as. With automatic saving, each one is saved to this folder instead, where any app can read it.")
     }
 
     /// Photos and files are not kept on this Mac yet, so their categories are empty.

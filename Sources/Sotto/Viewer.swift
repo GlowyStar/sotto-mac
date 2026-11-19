@@ -14,6 +14,8 @@ struct MediaViewer: View {
     @State private var panStart = CGSize.zero
     @State private var controls = true
     @State private var hide: Task<Void, Never>?
+    /// The photo the store keeps, decoded at the size of the viewer, with its message.
+    @State private var large: (id: String, image: NSImage)?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let date: DateFormatter = {
@@ -74,8 +76,9 @@ struct MediaViewer: View {
 
     @ViewBuilder
     private func picture(_ message: Message, _ file: ChatFile, in window: CGSize) -> some View {
-        let url = Media.localURL(file)
-        let image = url.flatMap { Media.picture($0, side: 4096) }
+        let image = Media.localURL(file).flatMap { Media.picture($0, side: Metrics.viewerSide) }
+            ?? large.flatMap { $0.id == message.id ? $0.image : nil }
+            ?? (file.kept ? Media.cachedPicture(Media.keptKey(message.id), side: Metrics.mediaMax) : nil)
         let pixels = image?.size ?? Media.pixelSize(file) ?? CGSize(width: 400, height: 400)
         let fit = min(1, window.width / pixels.width, window.height / pixels.height)
         let shown = min(max((scale ?? fit) * pinch, fit * 0.5), 8)
@@ -129,6 +132,10 @@ struct MediaViewer: View {
         )
         .contextMenu { menuItems(message) }
         .accessibilityLabel(message.outgoing ? "Your photo" : "Photo")
+        .task(id: message.id + (file.kept ? "#kept" : "")) {
+            guard file.kept, large?.id != message.id else { return }
+            if let image = await model.keptPicture(message, side: Metrics.viewerSide) { large = (message.id, image) }
+        }
     }
 
     // MARK: Controls
@@ -179,7 +186,7 @@ struct MediaViewer: View {
 
     private func buttons(_ message: Message?) -> some View {
         HStack(spacing: 0) {
-            if let message, message.file.flatMap(Media.localURL) != nil {
+            if let message, let file = message.file, model.hasContents(file) {
                 viewerButton("square.and.arrow.down", "Save as...") { model.saveAs(message) }
             }
             if let message {
@@ -219,9 +226,9 @@ struct MediaViewer: View {
     @ViewBuilder
     private func menuItems(_ message: Message) -> some View {
         let url = message.file.flatMap(Media.localURL)
-        if let url {
+        if let file = message.file, model.hasContents(file) {
             Button("Save as...") { model.saveAs(message) }
-            Button("Copy image") { model.copyImage(url) }
+            Button("Copy image") { model.copyImage(message) }
         }
         Button("Show in chat") {
             model.viewer = nil
@@ -258,7 +265,7 @@ struct MediaViewer: View {
             Button("") { model.stepViewer(1) }.keyboardShortcut(.rightArrow, modifiers: [])
             Button("") { if let message { model.saveAs(message) } }.keyboardShortcut("s")
             Button("") {
-                if let url = message?.file.flatMap(Media.localURL) { model.copyImage(url) }
+                if let message, let file = message.file, model.hasContents(file) { model.copyImage(message) }
             }.keyboardShortcut("c")
             Button("") { scale = (scale ?? 0.5) * 1.25 }.keyboardShortcut("=")
             Button("") { scale = max((scale ?? 1) / 1.25, 0.05) }.keyboardShortcut("-")

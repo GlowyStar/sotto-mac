@@ -6,15 +6,15 @@ import Testing
     let folder = Folder()
     let directory = folder.url.appendingPathComponent("app")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-    try Notes(read: ["x": 3]).save(directory)
+    try JSONEncoder().encode(Notes(read: ["x": 3])).write(to: directory.appendingPathComponent(Messenger.notesFile))
     let first = try Messenger(directory: directory, relay: deadRelay)
     #expect(first.launchSettings == nil)
     await first.start()
 
     var changed = AppSettings()
     changed.notifications = false
-    changed.notificationSender = false
-    changed.notificationPreview = false
+    changed.notificationSender = true
+    changed.notificationPreview = true
     changed.sound = false
     changed.dockBadge = false
     changed.theme = .dark
@@ -26,6 +26,7 @@ import Testing
     changed.autoDownloadFiles = 50
     changed.downloadFolder = "/tmp/sotto-downloads"
     changed.askWhereToSave = true
+    changed.saveReceivedFiles = true
     changed.passcode = Passcode("1234")
     changed.autoLockMinutes = 5
     changed.lockOnSleep = false
@@ -46,7 +47,10 @@ import Testing
     #expect(await second.relay == "wss://relay.example.org/ws")
     #expect(second.launchSettings?.passcode?.matches("1234") == true)
     #expect(second.launchSettings?.passcode?.matches("12345") == false)
-    #expect(Notes.load(directory).read == ["x": 3])
+    #expect(try Notes.load(ClientStore(directory: directory))?.read == ["x": 3])
+    let launchFile = try Data(contentsOf: directory.appendingPathComponent(Messenger.notesFile))
+    #expect(String(decoding: launchFile, as: UTF8.self) == #"{"theme":"dark"}"#, "app.json keeps the theme only")
+    #expect(Messenger.launchTheme(directory: directory) == .dark)
 }
 
 @Test func missingAndUnknownSettingsTakeTheirDefaults() throws {

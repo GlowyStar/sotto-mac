@@ -6,7 +6,12 @@ import SwiftUI
 /// Pictures and sizes of the photos and files of a chat (DESIGN.md 13).
 @MainActor
 enum Media {
-    private static let pictures = NSCache<NSString, NSImage>()
+    /// Decoded pictures, bounded by their pixels (4 bytes each), so that old ones go first.
+    private static let pictures: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.totalCostLimit = 256 << 20
+        return cache
+    }()
     private static let thumbnails = NSCache<NSData, NSImage>()
 
     /// The file of a message on this Mac: a received file, or the file a sent one was read from.
@@ -20,17 +25,57 @@ enum Media {
     static func picture(_ url: URL, side: CGFloat) -> NSImage? {
         let key = "\(url.path)#\(Int(side))" as NSString
         if let kept = pictures.object(forKey: key) { return kept }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), let made = picture(source, side: side) else {
+            return nil
+        }
+        pictures.setObject(made, forKey: key, cost: cost(made))
+        return made
+    }
+
+    /// `picture` of bytes in memory; kept for the next draw under `key` when one is given.
+    static func picture(_ data: Data, side: CGFloat, key: String? = nil) -> NSImage? {
+        let name = key.map { "\($0)#\(Int(side))" as NSString }
+        if let name, let kept = pictures.object(forKey: name) { return kept }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil), let made = picture(source, side: side) else {
+            return nil
+        }
+        if let name { pictures.setObject(made, forKey: name, cost: cost(made)) }
+        return made
+    }
+
+    /// A picture `picture(_:side:key:)` decoded under `key` at `side`, while the cache holds it.
+    static func cachedPicture(_ key: String, side: CGFloat) -> NSImage? {
+        pictures.object(forKey: "\(key)#\(Int(side))" as NSString)
+    }
+
+    /// The cache key of a photo the store keeps, by its message.
+    static func keptKey(_ messageID: String) -> String {
+        "kept-\(messageID)"
+    }
+
+    /// Drops the decoded picture of a photo the store keeps: its message is gone.
+    static func forgetKept(_ messageID: String) {
+        pictures.removeObject(forKey: "\(keptKey(messageID))#\(Int(Metrics.mediaMax))" as NSString)
+    }
+
+    private static func cost(_ image: NSImage) -> Int {
+        Int(image.size.width * image.size.height) * 4
+    }
+
+    private static func picture(_ source: CGImageSource, side: CGFloat) -> NSImage? {
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: Int(side * 2),
         ]
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-            let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
-        else { return nil }
-        let made = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
-        pictures.setObject(made, forKey: key)
-        return made
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+    }
+
+    /// Drops every picture and thumbnail held for the next draw, on lock.
+    static func forget() {
+        pictures.removeAllObjects()
+        thumbnails.removeAllObjects()
     }
 
     /// A received thumbnail, only when it decodes as a JPEG (protocol section 32.2).
@@ -45,17 +90,18 @@ enum Media {
         return made
     }
 
-    /// The size of a photo: from the attachment, else from the picture on this Mac.
-    static func pixelSize(_ file: ChatFile) -> CGSize? {
+    /// The size of a photo: from the attachment, else from the picture on this Mac or the
+    /// one decoded from the store (`kept`).
+    static func pixelSize(_ file: ChatFile, kept: NSImage? = nil) -> CGSize? {
         if file.width > 0, file.height > 0 { return CGSize(width: file.width, height: file.height) }
-        guard let url = localURL(file), let image = picture(url, side: Metrics.mediaMax) else { return nil }
+        guard let image = localURL(file).flatMap({ picture($0, side: Metrics.mediaMax) }) ?? kept else { return nil }
         return image.size
     }
 
     /// The frame of a photo in a bubble: its size fitted into 430 x 430, never scaled up, at
     /// least 200 wide and 100 high and at most `maxWidth` wide (DESIGN.md 13.1).
-    static func photoFrame(_ file: ChatFile, maxWidth: CGFloat) -> CGSize {
-        let size = pixelSize(file) ?? CGSize(width: Metrics.photoMinWidth, height: Metrics.photoMinWidth)
+    static func photoFrame(_ file: ChatFile, maxWidth: CGFloat, kept: NSImage? = nil) -> CGSize {
+        let size = pixelSize(file, kept: kept) ?? CGSize(width: Metrics.photoMinWidth, height: Metrics.photoMinWidth)
         let scale = min(1, Metrics.mediaMax / size.width, Metrics.mediaMax / size.height, maxWidth / size.width)
         return CGSize(
             width: min(max((size.width * scale).rounded(), Metrics.photoMinWidth), maxWidth),
@@ -235,10 +281,18 @@ struct PhotoBubble<Caption: View>: View {
     let tap: () -> Void
     /// The quote of a reply, over the picture (DESIGN.md 20.3).
     var header: AnyView?
+    /// Reads and decodes the picture the store keeps (`AppModel.keptPicture`).
+    var model: AppModel?
     @ViewBuilder let caption: () -> Caption
+    /// The picture the store keeps once decoded; only this bubble redraws when it comes.
+    @State private var loaded: NSImage?
+
+    private var kept: NSImage? {
+        loaded ?? (file.kept ? Media.cachedPicture(Media.keptKey(message.id), side: Metrics.mediaMax) : nil)
+    }
 
     var body: some View {
-        let size = Media.photoFrame(file, maxWidth: maxWidth)
+        let size = Media.photoFrame(file, maxWidth: maxWidth, kept: kept)
         let captioned = !message.text.isEmpty
         VStack(alignment: .leading, spacing: 0) {
             if let header {
@@ -268,12 +322,15 @@ struct PhotoBubble<Caption: View>: View {
         .frame(width: size.width)
         .background { BubbleBackground(shape: shape, out: message.outgoing) }
         .clipShape(shape)
+        .task(id: file.kept) {
+            if file.kept, kept == nil { loaded = await model?.keptPicture(message, side: Metrics.mediaMax) }
+        }
     }
 
     /// The picture fills its frame; under the tail it reaches out to fill the tail too.
     private func picture(_ size: CGSize, underTail: Bool) -> some View {
         let reach = underTail ? Metrics.tailWidth : 0
-        let local = Media.localURL(file).flatMap { Media.picture($0, side: max(size.width, size.height)) }
+        let local = Media.localURL(file).flatMap { Media.picture($0, side: max(size.width, size.height)) } ?? kept
         return ZStack {
             if let local {
                 Image(nsImage: local).resizable().aspectRatio(contentMode: .fill)

@@ -23,6 +23,19 @@ public enum ReceivedFiles {
     /// fails leaves no file. The file is marked as downloaded from elsewhere (quarantine), so
     /// macOS asks before it runs anything the peer sent.
     public static func save(_ data: Data, named fileName: String, into folder: URL) throws -> URL {
+        let (path, descriptor) = try create(named: fileName, into: folder)
+        guard write(descriptor, data) else {
+            let failure = errno
+            discard(path, descriptor)
+            throw StoreError.system(path: path.path, errno: failure)
+        }
+        try finish(path, descriptor)
+        return path
+    }
+
+    /// The new empty file of `save` (mode 0600, its folder 0700) with a descriptor open for
+    /// writing; `finish` or `discard` closes it.
+    public static func create(named fileName: String, into folder: URL) throws -> (URL, Int32) {
         try FileManager.default.createDirectory(
             at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: folderMode]
         )
@@ -44,33 +57,55 @@ public enum ReceivedFiles {
                 }
                 throw StoreError.system(path: path.path, errno: errno)
             }
-            let written = data.withUnsafeBytes { bytes in
-                var offset = 0
-                while offset < bytes.count {
-                    let count = write(descriptor, bytes.baseAddress! + offset, bytes.count - offset)
-                    if count <= 0 {
-                        return false
-                    }
-                    offset += count
-                }
-                return true
-            }
-            let failure = errno
-            let synced = written && fsync(descriptor) == 0
-            close(descriptor)
-            guard synced else {
-                unlink(path.path)
-                throw StoreError.system(path: path.path, errno: written ? errno : failure)
-            }
-            var marked = URLResourceValues()
-            marked.quarantineProperties = [
-                kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
-                kLSQuarantineAgentNameKey as String: "Sotto",
-            ]
-            var quarantined = path
-            try? quarantined.setResourceValues(marked)
-            return path
+            return (path, descriptor)
         }
+    }
+
+    /// Writes all of `data` at the offset of the descriptor; false, with `errno` set, when a
+    /// write fails.
+    public static func write(_ descriptor: Int32, _ data: Data) -> Bool {
+        data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.write(descriptor, bytes.baseAddress! + offset, bytes.count - offset)
+                if count <= 0 {
+                    return false
+                }
+                offset += count
+            }
+            return true
+        }
+    }
+
+    /// Syncs and closes a file of `create` and marks it as downloaded; one that does not sync
+    /// is removed.
+    public static func finish(_ path: URL, _ descriptor: Int32) throws {
+        let synced = fsync(descriptor) == 0
+        let failure = errno
+        close(descriptor)
+        guard synced else {
+            unlink(path.path)
+            throw StoreError.system(path: path.path, errno: failure)
+        }
+        markAsDownloaded(path)
+    }
+
+    /// Closes and removes a file of `create` whose writing failed.
+    public static func discard(_ path: URL, _ descriptor: Int32) {
+        close(descriptor)
+        unlink(path.path)
+    }
+
+    /// Marks a file as downloaded from elsewhere (quarantine), so macOS asks before it runs
+    /// anything the peer sent.
+    public static func markAsDownloaded(_ path: URL) {
+        var marked = URLResourceValues()
+        marked.quarantineProperties = [
+            kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
+            kLSQuarantineAgentNameKey as String: "Sotto",
+        ]
+        var quarantined = path
+        try? quarantined.setResourceValues(marked)
     }
 
     /// The stem and the suffix of a name as Python's `pathlib` splits them.

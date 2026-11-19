@@ -74,6 +74,20 @@ public actor Transport {
     /// Whether a file that arrives is downloaded by itself; the others wait for `download`.
     public typealias AutoDownload = @Sendable (Sotto_Attachment) -> Bool
 
+    /// Where a received file goes once its blob is here (section 33.3).
+    public enum Downloads: Equatable, Sendable {
+        /// Every received file stays offered.
+        case off
+        /// The store keeps the file until the user saves a copy (docs/key-storage.md).
+        case store
+        /// The file is written into the folder.
+        case folder(URL)
+
+        var folder: URL? {
+            if case .folder(let url) = self { url } else { nil }
+        }
+    }
+
     public static let retryMaxSeconds = 60.0
     public static let expiryCheckSeconds = 1.0
     public static let frameRefillSeconds = 1.0
@@ -115,8 +129,7 @@ public actor Transport {
     /// Why the expiry of messages failed, which ends `run` (section 39.6).
     private var expiryFailure: String?
     private var stopping = false
-    /// The folder for received files (section 33.3); nil leaves every file offered.
-    private var receivedFiles: URL?
+    private var downloads: Downloads
     private var autoDownload: AutoDownload
     /// The `blob_max_bytes` of the last LoggedIn: 0 before a login and for a relay without
     /// the blob frames (section 28.2).
@@ -144,7 +157,7 @@ public actor Transport {
         client: sending Client,
         url: String,
         insecure: Bool = false,
-        receivedFiles: URL? = nil,
+        downloads: Downloads = .off,
         autoDownload: @escaping AutoDownload = { _ in true },
         dialer: any RelayDialer = URLSessionDialer(),
         jitter: @escaping Jitter = Transport.evenJitter,
@@ -156,7 +169,7 @@ public actor Transport {
         }
         self.url = parsed
         self.client = client
-        self.receivedFiles = receivedFiles
+        self.downloads = downloads
         self.autoDownload = autoDownload
         self.dialer = dialer
         self.jitter = jitter
@@ -499,18 +512,44 @@ public actor Transport {
         let size = try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int ?? 0
         try client.checkFile(contact, size: size, blobMaxBytes: blobMaxBytes)
         let data = try Data(contentsOf: file, options: .mappedIfSafe)
-        let mediaType = mediaType ?? UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? ""
+        return try startFile(
+            contact, data, name: file.lastPathComponent, localPath: file.path, caption: caption, mediaType: mediaType,
+            width: width, height: height, thumbnail: thumbnail, replyTo: replyTo
+        )
+    }
+
+    /// `sendFile` for bytes that are in no file, such as a pasted picture: the store keeps
+    /// them with the sent file, so that it can be shown and sent again.
+    @discardableResult
+    public func sendFile(
+        _ contact: Data, named name: String, contents: Data, caption: String = "", mediaType: String? = nil,
+        width: Int = 0, height: Int = 0, thumbnail: Data = Data(), replyTo: Int64? = nil
+    ) async throws -> Data {
+        try await waitUntilReady()
+        try Task.checkCancellation()
+        return try startFile(
+            contact, contents, name: name, localPath: nil, caption: caption, mediaType: mediaType,
+            width: width, height: height, thumbnail: thumbnail, replyTo: replyTo
+        )
+    }
+
+    private func startFile(
+        _ contact: Data, _ data: Data, name: String, localPath: String?, caption: String, mediaType: String?,
+        width: Int, height: Int, thumbnail: Data, replyTo: Int64?
+    ) throws -> Data {
+        let mediaType = mediaType ?? UTType(filenameExtension: (name as NSString).pathExtension)?.preferredMIMEType ?? ""
         let upload = try client.startUpload(
             contact,
             file: data,
             blobMaxBytes: blobMaxBytes,
-            fileName: Envelope.cut(file.lastPathComponent, to: Envelope.maxFileNameBytes),
+            fileName: Envelope.cut(name, to: Envelope.maxFileNameBytes),
             mediaType: mediaType.utf8.count <= Envelope.maxMediaTypeBytes ? mediaType : "",
             caption: caption,
             width: width,
             height: height,
             thumbnail: thumbnail.count <= Envelope.maxThumbnailBytes ? thumbnail : Data(),
-            localPath: file.path,
+            localPath: localPath,
+            keep: localPath == nil,
             replyTo: replyTo
         )
         report(upload, .sending)
@@ -521,7 +560,7 @@ public actor Transport {
     /// Downloads a received file that is offered, paused or could not be received, from the
     /// bytes it holds; without a connection it starts after the next login.
     public func download(_ position: Int64) throws {
-        guard receivedFiles != nil, let file = try client.store.file(position), file.incoming,
+        guard downloads != .off, let file = try client.store.file(position), file.incoming,
             [.offered, .receiving, .notReceived].contains(file.state)
         else {
             return
@@ -541,9 +580,9 @@ public actor Transport {
         eventSink.yield(.file(Self.update(file, .offered, done: file.held)))
     }
 
-    /// The folder for received files and the rule for files that arrive from now on.
-    public func setDownloads(folder: URL?, autoDownload: @escaping AutoDownload) {
-        receivedFiles = folder
+    /// Where received files go and the rule for files that arrive from now on.
+    public func setDownloads(_ downloads: Downloads, autoDownload: @escaping AutoDownload) {
+        self.downloads = downloads
         self.autoDownload = autoDownload
     }
 
@@ -743,7 +782,7 @@ public actor Transport {
             try await socket.send(ack.serializedBytes())
         }
         eventSink.yield(.incoming(sender: deliver.sender, received: received))
-        if let attachment = received.attachment, receivedFiles != nil, autoDownload(attachment),
+        if let attachment = received.attachment, downloads != .off, autoDownload(attachment),
             let file = try client.store.files().last(where: {
                 $0.incoming && $0.contact == deliver.sender && $0.messageID == deliver.messageID
             })
@@ -1000,7 +1039,7 @@ public actor Transport {
                 report(upload, .notSent, result: result.result)
             }
         }
-        if blobMaxBytes == 0, receivedFiles != nil {
+        if blobMaxBytes == 0, downloads != .off {
             let result = FileError.filesUnsupported.result
             for file in try client.downloads() where file.state == .receiving && !file.avatar {
                 eventSink.yield(.file(Self.update(file, try client.failDownload(file.position, result: result), result: result)))
@@ -1009,7 +1048,7 @@ public actor Transport {
     }
 
     /// Starts a task for every upload and download of the store that has none. An avatar
-    /// downloads by itself into the store (section 36.3), a file into the folder.
+    /// downloads by itself into the store (section 36.3), a file where `downloads` says.
     private func startTransfers() {
         guard ready, blobMaxBytes > 0 else {
             return
@@ -1023,9 +1062,9 @@ public actor Transport {
                 guard transfers[key] == nil, (try? client.beginDownload(file.position)) != nil else {
                     continue
                 }
-                track(key) { try await $0.download(file, into: nil) }
-            } else if let folder = receivedFiles, file.state == .receiving {
-                track(key) { try await $0.download(file, into: folder) }
+                track(key) { try await $0.download(file) }
+            } else if downloads != .off, file.state == .receiving {
+                track(key) { try await $0.download(file) }
             }
         }
     }
@@ -1162,9 +1201,9 @@ public actor Transport {
         await sendBlobDeletions()
     }
 
-    /// Steps 2 to 6 of section 33.3 from the bytes the store holds; `folder` is nil for an
-    /// avatar, which stays in the store (section 36.3).
-    private func download(_ file: FileRow, into folder: URL?) async throws {
+    /// Steps 2 to 6 of section 33.3 from the bytes the store holds. An avatar stays with its
+    /// profile (section 36.3); a file goes where `downloads` says when its last piece is here.
+    private func download(_ file: FileRow) async throws {
         let attachment = file.attachment
         let length = Blob.blobLength(Int(attachment.size))
         var held = file.held
@@ -1204,10 +1243,10 @@ public actor Transport {
 
         var path: URL?
         do {
-            if let folder {
-                path = try client.finishDownload(file.position, folder: folder)
-            } else {
+            if file.avatar {
                 try client.finishAvatarDownload(file.position)
+            } else {
+                path = try client.finishDownload(file.position, folder: downloads.folder)
             }
         } catch CryptoError.badBlob {
             return try await notReceived(file, CryptoError.badBlob.result)

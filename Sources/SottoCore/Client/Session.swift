@@ -678,7 +678,8 @@ public final class Client {
 
     /// Steps 1 and 2 of section 33.2: the checks, the blob and the upload, committed with
     /// the file and the logged message (its text is the caption) that the upload becomes.
-    /// `localPath`, where the file was read from, is kept with the file for this client.
+    /// `localPath`, where the file was read from, is kept with the file for this client; with
+    /// `keep` the store keeps the bytes of the file instead, for a file that is nowhere else.
     ///
     /// - Throws: a check of section 33.1; `InvalidInputError` when a name, media type or
     ///   caption is beyond its limit of section 32.1.
@@ -693,6 +694,7 @@ public final class Client {
         height: Int = 0,
         thumbnail: Data = Data(),
         localPath: String? = nil,
+        keep: Bool = false,
         replyTo: Int64? = nil
     ) throws -> UploadRow {
         try checkFile(contact, size: file.count, blobMaxBytes: blobMaxBytes)
@@ -712,10 +714,13 @@ public final class Client {
         )
         try store.transaction {
             try store.addUpload(upload, blob: blob)
-            try store.addFile(
+            let position = try store.addFile(
                 contact, incoming: false, messageID: upload.messageID, attachment: attachment, state: .sending,
                 savedAs: localPath
             )
+            if keep {
+                try store.keepFile(position, file)
+            }
             let outgoing = Outgoing(messageID: upload.messageID, recipient: contact, payload: Data())
             _ = try logOwn(outgoing, caption, quote, expiresAfter: 0, sent: false)
         }
@@ -848,21 +853,26 @@ public final class Client {
         try store.transaction { try store.addDownloadPiece(position, data) }
     }
 
-    /// Step 4 of section 33.3: opens the blob, writes the file into the folder, drops the
-    /// downloaded bytes and saves the DeleteBlob of the blob.
+    /// Step 4 of section 33.3: opens the blob, writes the file into the folder (or, without
+    /// one, keeps its bytes in the store), drops the downloaded bytes and saves the DeleteBlob
+    /// of the blob. Returns the path of the file written.
     ///
     /// - Throws: `CryptoError.badBlob` when the blob does not open (section 29.7), and
     ///   nothing is written; `StoreError.system` when the file cannot be written, and the
     ///   downloaded bytes stay.
-    public func finishDownload(_ position: Int64, folder: URL) throws -> URL {
+    @discardableResult
+    public func finishDownload(_ position: Int64, folder: URL?) throws -> URL? {
         let file = try file(position)
         let attachment = file.attachment
         let data = try Blob.open(
             store.downloaded(position), fileKey: attachment.key, size: Int(attachment.size), digest: attachment.digest
         )
-        let path = try ReceivedFiles.save(data, named: attachment.fileName, into: folder)
+        let path = try folder.map { try ReceivedFiles.save(data, named: attachment.fileName, into: $0) }
         try store.transaction {
-            try store.setFileState(position, .received, savedAs: path.path)
+            if path == nil {
+                try store.keepFile(position, data)
+            }
+            try store.setFileState(position, .received, savedAs: path?.path)
             try store.addBlobDeletion(uploader: file.contact, blobID: attachment.blobID)
         }
         return path

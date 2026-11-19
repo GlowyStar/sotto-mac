@@ -6,7 +6,11 @@ import UniformTypeIdentifiers
 /// A file picked, dropped or pasted, waiting in the send box (DESIGN.md 14.2).
 struct Pick: Identifiable, Hashable {
     let id = UUID()
-    let url: URL
+    /// The file picked or dropped; nil for a pasted picture.
+    let url: URL?
+    /// A pasted picture: in memory only until the store keeps it with its message.
+    let pasted: Data?
+    let name: String
     let size: Int
     /// A picture that is sent as a photo unless "Send as file" is checked.
     let isPicture: Bool
@@ -16,12 +20,33 @@ struct Pick: Identifiable, Hashable {
         guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey]), values.isDirectory == false
         else { return nil }
         self.url = url
+        pasted = nil
+        name = url.lastPathComponent
         size = values.fileSize ?? 0
-        isPicture = ChatFile.isPhoto(Self.mediaType(url) ?? "")
+        isPicture = ChatFile.isPhoto(Self.mediaType(name) ?? "")
     }
 
-    static func mediaType(_ url: URL) -> String? {
-        UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
+    init(pasted png: Data, name: String) {
+        url = nil
+        pasted = png
+        self.name = name
+        size = png.count
+        isPicture = true
+    }
+
+    static func mediaType(_ name: String) -> String? {
+        UTType(filenameExtension: (name as NSString).pathExtension)?.preferredMIMEType
+    }
+
+    /// The picture for the send box, scaled down to `side`.
+    @MainActor func picture(side: CGFloat) -> NSImage? {
+        if let url { return Media.picture(url, side: side) }
+        return pasted.flatMap { Media.picture($0, side: side, key: id.uuidString) }
+    }
+
+    var thumbnail: (width: Int, height: Int, jpeg: Data)? {
+        if let url { return Thumbnail.make(url) }
+        return pasted.flatMap(Thumbnail.make)
     }
 
     /// Why the file is left out when sending.
@@ -76,26 +101,22 @@ extension AppModel {
         guard openChatID != nil else { return }
         let picked = urls.compactMap(Pick.init)
         if picked.count < urls.count { showToast("Folders can not be sent.") }
+        openSendBox(picked, asFile: asFile)
+    }
+
+    /// A picture from the pasteboard, held in memory; once sent, the store keeps it with its
+    /// message, so that the photo can be shown and sent again (docs/key-storage.md).
+    func stagePasted(_ png: Data) {
+        guard openChatID != nil else { return }
+        openSendBox([Pick(pasted: png, name: "Pasted image \(Self.fileStamp.string(from: Date())).png")], asFile: false)
+    }
+
+    private func openSendBox(_ picked: [Pick], asFile: Bool) {
         guard !picked.isEmpty else { return }
         attachMenuOpen = false
         picks = picked
         sendAsFile = asFile
         modal = .sendFiles
-    }
-
-    /// A picture from the pasteboard, kept as a PNG in the data folder so that the photo can
-    /// be shown and sent again later.
-    func stagePasted(_ png: Data) {
-        let folder = (dataDirectory ?? FileManager.default.temporaryDirectory).appendingPathComponent("Pasted", isDirectory: true)
-        let stamp = Self.fileStamp.string(from: Date())
-        let url = folder.appendingPathComponent("Pasted image \(stamp).png")
-        do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            try png.write(to: url, options: .withoutOverwriting)
-            stage([url])
-        } catch {
-            showToast("The picture could not be kept: \(error.localizedDescription)")
-        }
     }
 
     static let fileStamp: DateFormatter = {
@@ -118,19 +139,24 @@ extension AppModel {
     /// The first file answers the message `replyTo` when one is given (DESIGN.md 20.2).
     func send(_ picks: [Pick], caption: String, asFile: Bool, to chat: String, replyTo: String? = nil) {
         let jobs = picks.filter { $0.problem == nil }.enumerated().map { index, pick in
-            let photo = pick.isPicture && !asFile ? Thumbnail.make(pick.url) : nil
-            let mediaType = pick.isPicture && asFile ? "" : Pick.mediaType(pick.url)
+            let photo = pick.isPicture && !asFile ? pick.thumbnail : nil
+            let mediaType = pick.isPicture && asFile ? "" : Pick.mediaType(pick.name)
             let file = ChatFile(
-                name: pick.url.lastPathComponent, size: pick.size, mediaType: mediaType ?? "",
-                state: messenger == nil ? .sent : .sending, savedAs: pick.url.path,
-                width: photo?.width ?? 0, height: photo?.height ?? 0, thumbnail: photo?.jpeg ?? Data())
+                name: pick.name, size: pick.size, mediaType: mediaType ?? "",
+                state: messenger == nil ? .sent : .sending, savedAs: pick.url?.path,
+                width: photo?.width ?? 0, height: photo?.height ?? 0, thumbnail: photo?.jpeg ?? Data(),
+                kept: pick.pasted != nil)
             var message = Message(
                 id: "local-\(UUID().uuidString)", outgoing: true, text: index == 0 ? caption : "", date: Date(),
                 state: .waiting, file: file)
             if index == 0 {
                 message.quote = replyTo.flatMap { quote(of: $0, in: chat) }
             }
-            return (message, pick.url, mediaType, photo)
+            if let pasted = pick.pasted {
+                _ = Media.picture(pasted, side: Metrics.mediaMax, key: Media.keptKey(message.id))
+                keptDecoded.insert(message.id)
+            }
+            return (message, pick, mediaType, photo)
         }
         withAnimation(Motion.reorder) {
             for (message, _, _, _) in jobs {
@@ -142,16 +168,23 @@ extension AppModel {
             jobs.forEach { store($0.0.id, in: chat) }
             return
         }
-        for (message, url, mediaType, photo) in jobs {
+        for (message, pick, mediaType, photo) in jobs {
             let before = lastFileSend
             let task = Task { [weak self] in
                 await before?.value
                 do {
                     try Task.checkCancellation()
-                    let position = try await messenger.sendFile(
-                        url, caption: message.text, to: chat, mediaType: mediaType,
-                        width: photo?.width ?? 0, height: photo?.height ?? 0, thumbnail: photo?.jpeg ?? Data(),
-                        replyTo: message.quote?.messageID.flatMap { Int64($0) })
+                    let (width, height, thumbnail) = (photo?.width ?? 0, photo?.height ?? 0, photo?.jpeg ?? Data())
+                    let replyTo = message.quote?.messageID.flatMap { Int64($0) }
+                    let position = if let url = pick.url {
+                        try await messenger.sendFile(
+                            url, caption: message.text, to: chat, mediaType: mediaType, width: width, height: height,
+                            thumbnail: thumbnail, replyTo: replyTo)
+                    } else {
+                        try await messenger.sendFile(
+                            named: pick.name, contents: pick.pasted ?? Data(), caption: message.text, to: chat,
+                            mediaType: mediaType, width: width, height: height, thumbnail: thumbnail, replyTo: replyTo)
+                    }
                     // Cancelled while the upload was being made: its message goes at once.
                     if Task.isCancelled || position == 0 {
                         if position != 0 { try? await messenger.deleteMessage(position) }
@@ -186,6 +219,7 @@ extension AppModel {
     private func dropLocal(_ localID: String, in chat: String) {
         localSends[chat]?.removeAll { $0.message.id == localID }
         messages[chat]?.removeAll { $0.id == localID }
+        Media.forgetKept(localID)
     }
 
     // MARK: Photo and file actions (DESIGN.md 13)
@@ -205,6 +239,8 @@ extension AppModel {
                 withAnimation(Motion.viewer) { viewer = ViewerItem(chatID: chat, messageID: message.id) }
             } else if let url = Media.localURL(file) {
                 NSWorkspace.shared.open(url)
+            } else if file.kept {
+                openKept(message)
             }
         case .notAvailable: break
         }
@@ -214,14 +250,35 @@ extension AppModel {
         Int64(message.id) ?? 0
     }
 
-    /// The system save panel, then a copy of the file where it says.
+    /// The system save panel, then a copy of the file where it says: of the file on this Mac,
+    /// or of the bytes the store keeps, marked as downloaded when it was received.
     func saveAs(_ message: Message) {
-        guard let file = message.file, let source = Media.localURL(file) else { return }
+        guard let file = message.file, hasContents(file) else { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = file.name.isEmpty ? "Photo \(Self.fileStamp.string(from: message.date)).jpg" : file.name
         panel.directoryURL = downloadFolder
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let target = panel.url else { return }
+        guard let source = Media.localURL(file) else {
+            Task { [weak self] in
+                let descriptor = Darwin.open(target.path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+                guard descriptor >= 0 else {
+                    self?.showToast("Could not save: \(String(cString: strerror(errno)))")
+                    return
+                }
+                let written = await self?.writeKept(message, to: descriptor) == true
+                let synced = written && fsync(descriptor) == 0
+                Darwin.close(descriptor)
+                guard synced else {
+                    unlink(target.path)
+                    self?.showToast("Could not save the file.")
+                    return
+                }
+                if !message.outgoing { ReceivedFiles.markAsDownloaded(target) }
+                self?.showToast("Saved to \(target.deletingLastPathComponent().lastPathComponent)")
+            }
+            return
+        }
         // Saved onto itself: removing the target would remove the only copy.
         guard target.standardizedFileURL.resolvingSymlinksInPath() != source.standardizedFileURL.resolvingSymlinksInPath() else {
             return showToast("Saved to \(target.deletingLastPathComponent().lastPathComponent)")
@@ -235,11 +292,91 @@ extension AppModel {
         }
     }
 
-    func copyImage(_ url: URL) {
-        guard let image = NSImage(contentsOf: url) else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([image])
-        showToast("Image copied")
+    func copyImage(_ message: Message) {
+        Task { [weak self] in
+            guard let data = await self?.contents(message), let image = NSImage(data: data) else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects([image])
+            self?.showToast("Image copied")
+        }
+    }
+
+    // MARK: Files the store keeps (docs/key-storage.md)
+
+    /// Whether the window can show and save the file: it is on this Mac, or the store keeps it.
+    func hasContents(_ file: ChatFile) -> Bool {
+        Media.localURL(file) != nil || (file.kept && messenger != nil)
+    }
+
+    /// The bytes of the file of a message, whole: the file on this Mac, else what the store
+    /// keeps. For a photo to decode or copy; Save as and Open stream through `writeKept`.
+    func contents(_ message: Message) async -> Data? {
+        guard let file = message.file else { return nil }
+        if let url = Media.localURL(file) { return try? Data(contentsOf: url) }
+        guard file.kept, let position = message.position, let messenger else { return nil }
+        return try? await messenger.contents(position)
+    }
+
+    /// Writes the file the store keeps for a message into an open descriptor, a piece at a
+    /// time; false when nothing or not all of it was written.
+    private func writeKept(_ message: Message, to descriptor: Int32) async -> Bool {
+        guard let position = message.position, let messenger else { return false }
+        return (try? await messenger.writeContents(position, to: descriptor)) == true
+    }
+
+    /// A photo the store keeps, decoded in memory at `side`. At the size of a bubble it stays
+    /// in the picture cache of `Media`, which a lock empties; nothing of it reaches the disk.
+    func keptPicture(_ message: Message, side: CGFloat) async -> NSImage? {
+        guard let file = message.file, file.kept, Media.localURL(file) == nil else { return nil }
+        let key = side == Metrics.mediaMax ? Media.keptKey(message.id) : nil
+        if let key, let cached = Media.cachedPicture(key, side: side) { return cached }
+        guard let data = await contents(message), !storeLocked else { return nil }
+        if key != nil { keptDecoded.insert(message.id) }
+        return Media.picture(data, side: side, key: key)
+    }
+
+    /// The private folder where a file the store keeps is written for another app to open;
+    /// emptied at launch, on lock and before quitting. Spotlight skips a `.noindex` folder.
+    var openedFolder: URL? {
+        dataDirectory?.appendingPathComponent("temp.noindex", isDirectory: true)
+    }
+
+    /// Writes the file into the private folder, a piece at a time, and opens it in its app;
+    /// a lock that comes meanwhile takes the copy away instead.
+    func openKept(_ message: Message) {
+        guard let file = message.file, let folder = openedFolder, !storeLocked else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let (url, descriptor) = try ReceivedFiles.create(named: file.name, into: folder)
+                var excluded = URLResourceValues()
+                excluded.isExcludedFromBackup = true
+                var marked = folder
+                try? marked.setResourceValues(excluded)
+                let written = await writeKept(message, to: descriptor)
+                guard written, !storeLocked else {
+                    ReceivedFiles.discard(url, descriptor)
+                    if !storeLocked { showToast("Could not open the file.") }
+                    return
+                }
+                try ReceivedFiles.finish(url, descriptor)
+                NSWorkspace.shared.open(url)
+            } catch {
+                showToast("Could not open: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Overwrites and removes what the private folder holds.
+    func clearOpenedFiles() {
+        guard let folder = openedFolder, let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else {
+            return
+        }
+        for name in names {
+            let url = folder.appendingPathComponent(name)
+            if (try? ClientStore.overwriteAndRemove(url)) == nil { try? FileManager.default.removeItem(at: url) }
+        }
+        try? FileManager.default.removeItem(at: folder)
     }
 
     /// The photos of a chat, oldest first: the pictures of the media viewer.
@@ -362,7 +499,7 @@ struct SendBox: View {
     @ViewBuilder
     private var items: some View {
         if model.picks.count == 1, let pick = model.picks.first {
-            if pick.isPicture, !model.sendAsFile, let image = Media.picture(pick.url, side: Metrics.sendPreview) {
+            if pick.isPicture, !model.sendAsFile, let image = pick.picture(side: Metrics.sendPreview) {
                 let scale = min(1, Metrics.sendPreview / image.size.width, Metrics.sendPreview / image.size.height)
                 Image(nsImage: image)
                     .resizable()
@@ -395,7 +532,7 @@ struct PickRow: View {
         HStack(spacing: 11) {
             tile
             VStack(alignment: .leading, spacing: 3) {
-                Text(pick.url.lastPathComponent)
+                Text(pick.name)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.windowBoldFg)
                     .lineLimit(1)
@@ -406,7 +543,7 @@ struct PickRow: View {
             }
             Spacer(minLength: 0)
             if let remove {
-                IconButton(symbol: "xmark", size: 14, label: "Remove \(pick.url.lastPathComponent)", side: 34, action: remove)
+                IconButton(symbol: "xmark", size: 14, label: "Remove \(pick.name)", side: 34, action: remove)
             }
         }
         .frame(height: Metrics.fileTile)
@@ -414,14 +551,14 @@ struct PickRow: View {
 
     @ViewBuilder
     private var tile: some View {
-        if pick.isPicture, let image = Media.picture(pick.url, side: Metrics.fileTile) {
+        if pick.isPicture, let image = pick.picture(side: Metrics.fileTile) {
             Image(nsImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fill)
                 .frame(width: Metrics.fileTile, height: Metrics.fileTile)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
         } else {
-            let ext = String(pick.url.pathExtension.prefix(4)).lowercased()
+            let ext = String((pick.name as NSString).pathExtension.prefix(4)).lowercased()
             RoundedRectangle(cornerRadius: 4)
                 .fill(Color.fileTones[Int(ext.unicodeScalars.reduce(0) { $0 &+ $1.value }) % Color.fileTones.count])
                 .frame(width: Metrics.fileTile, height: Metrics.fileTile)

@@ -190,7 +190,7 @@ struct MessengerRelayTests {
         await peer.stop()
     }
 
-    @Test func filesBothWaysShowTheirStateAndWhereTheyWereSaved() async throws {
+    @Test func filesBothWaysShowTheirStateAndAReceivedOneOpensFromTheStore() async throws {
         let relay = try await RealRelay()
         defer { relay.stop() }
         let received = folder.url.appendingPathComponent("received")
@@ -221,9 +221,12 @@ struct MessengerRelayTests {
         try Data("a reply".utf8).write(to: incoming)
         try await peer.transport.sendFile(appKey, file: incoming)
         try await waitFor(messenger) { $0.chats.first?.messages.last?.file?.state == .received }
-        let file = try #require(try await chat(messenger)?.messages.last?.file)
-        #expect(file.savedAs == received.appendingPathComponent("from peer.txt").path)
-        #expect(try String(contentsOfFile: file.savedAs!, encoding: .utf8) == "a reply")
+        let message = try #require(try await chat(messenger)?.messages.last)
+        let file = try #require(message.file)
+        #expect(file.kept && file.savedAs == nil, "a received file stays in the store")
+        #expect(try await messenger.contents(message.id) == Data("a reply".utf8))
+        #expect(!FileManager.default.fileExists(atPath: received.path), "nothing is written into the download folder")
+        #expect(try await messenger.contents(sent.id) == nil, "a sent file read from a file is not copied into the store")
         #expect(try await chat(messenger)?.unread == 1)
         await messenger.close()
         await peer.stop()
@@ -237,6 +240,7 @@ struct MessengerRelayTests {
         await messenger.start()
         var settings = AppSettings()
         settings.autoDownloadFiles = 0
+        settings.saveReceivedFiles = true
         try await messenger.saveSettings(settings)
         let appID = try await messenger.createIdentity()
         try folder.open("peer").addContact(appID)
@@ -271,6 +275,7 @@ struct MessengerRelayTests {
         try await messenger.download(offered.id)
         try await waitFor(messenger) { $0.chats.first?.messages.last?.file?.state == .received }
         let file = try #require(try await chat(messenger)?.messages.last?.file)
+        #expect(!file.kept && file.savedAs == received.appendingPathComponent("waits.txt").path, "saved automatically")
         #expect(try String(contentsOfFile: file.savedAs!, encoding: .utf8) == "click me")
         await messenger.close()
         await peer.stop()

@@ -331,6 +331,8 @@ enum Metrics {
 
     // Media (DESIGN.md 13 to 15)
     static let mediaMax: CGFloat = 430
+    /// The longest side, in points at 2x, of a picture decoded for the viewer.
+    static let viewerSide: CGFloat = 4096
     static let photoMinWidth: CGFloat = 200
     static let photoMinHeight: CGFloat = 100
     static let mediaCircle: CGFloat = 44

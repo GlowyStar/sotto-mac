@@ -51,6 +51,13 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
     }
 
+    /// Takes away every notification Sotto posted: those of a version that showed names and
+    /// texts by default.
+    func removeAll() {
+        guard Self.available else { return }
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+    }
+
     /// Takes away the notifications of a chat that was read.
     func clear(_ chatID: String) {
         guard Self.available else { return }

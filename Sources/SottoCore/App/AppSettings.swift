@@ -1,9 +1,9 @@
 import CryptoKit
 import Foundation
 
-/// The settings of the app (DESIGN.md 11), kept in `app.json` with the other notes of
-/// `Messenger`. A key that is missing or unreadable takes its default, so an older file and
-/// a newer one both load.
+/// The settings of the app (DESIGN.md 11), kept in the store with the other notes of
+/// `Messenger`. A key that is missing or unreadable takes its default, so older notes and
+/// newer ones both load.
 public struct AppSettings: Codable, Equatable, Sendable {
     public enum Theme: String, Codable, CaseIterable, Sendable {
         case system, light, dark
@@ -18,10 +18,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public static let downloadStops = [0, 1, 5, 10, 25, 50, 100]
     public static let autoLockStops = [1, 5, 60, 300]
 
-    // Notifications (posted from SOTTO-36 on)
+    // Notifications (posted from SOTTO-36 on); the name and the text stay out of them unless
+    // the user turns them on
     public var notifications = true
-    public var notificationSender = true
-    public var notificationPreview = true
+    public var notificationSender = false
+    public var notificationPreview = false
     public var sound = true
     public var dockBadge = true
     // Chat settings
@@ -37,6 +38,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// Nil is the user's Downloads folder.
     public var downloadFolder: String?
     public var askWhereToSave = false
+    /// Received files are written into the download folder too; off keeps them in the store
+    /// until "Save as".
+    public var saveReceivedFiles = false
     // Privacy and security
     public var passcode: Passcode?
     public var autoLockMinutes = 60
@@ -48,7 +52,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey, CaseIterable {
         case notifications, notificationSender, notificationPreview, sound, dockBadge
         case theme, textSize, background, sendWithCommandEnter, clock24
-        case autoDownloadPhotos, autoDownloadFiles, downloadFolder, askWhereToSave
+        case autoDownloadPhotos, autoDownloadFiles, downloadFolder, askWhereToSave, saveReceivedFiles
         case passcode, autoLockMinutes, lockOnSleep, hideContentsWhileLocked
     }
 
@@ -72,6 +76,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         autoDownloadFiles = value(.autoDownloadFiles, defaults.autoDownloadFiles)
         downloadFolder = value(.downloadFolder, defaults.downloadFolder)
         askWhereToSave = value(.askWhereToSave, defaults.askWhereToSave)
+        saveReceivedFiles = value(.saveReceivedFiles, defaults.saveReceivedFiles)
         passcode = value(.passcode, defaults.passcode)
         autoLockMinutes = value(.autoLockMinutes, defaults.autoLockMinutes)
         lockOnSleep = value(.lockOnSleep, defaults.lockOnSleep)

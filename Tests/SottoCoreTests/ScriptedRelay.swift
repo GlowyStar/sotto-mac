@@ -477,9 +477,10 @@ func makeTransport(
     scale: Double = 0.02,
     receivedFiles: URL? = nil
 ) throws -> Transport {
-    try Transport(client: client, url: url, receivedFiles: receivedFiles, dialer: dialer, jitter: { _ in 0 }, sleep: { seconds in
-        try await Task.sleep(nanoseconds: UInt64(seconds * scale * 1_000_000_000))
-    })
+    try Transport(
+        client: client, url: url, downloads: receivedFiles.map { .folder($0) } ?? .off, dialer: dialer, jitter: { _ in 0 },
+        sleep: { seconds in try await Task.sleep(nanoseconds: UInt64(seconds * scale * 1_000_000_000)) }
+    )
 }
 
 struct Timeout: Error {}

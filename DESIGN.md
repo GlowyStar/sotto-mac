@@ -297,7 +297,7 @@ The system `.contextMenu` is acceptable for the first build; the custom look bel
 | Shadow | `shadow`, blur 12, y 2 (estimate) |
 | Minimum width | 200 (estimate) |
 
-Message menu: Reply and Edit (20.8); for a photo, Save as... and Copy image; for a file, Save as... and Show in Finder; then Copy text; Delete (danger), which opens the box of 20.6. Chat row menu: Pin or Unpin (disabled for an archived chat); Mute notifications or Unmute; Archive or Unarchive; a separator; Contact info; Delete contact (danger).
+Message menu: Reply and Edit (20.8); for a photo, Save as... and Copy image; for a file, Save as... and, when it was saved into a folder, Show in Finder; then Copy text; Delete (danger), which opens the box of 20.6. Chat row menu: Pin or Unpin (disabled for an archived chat); Mute notifications or Unmute; Archive or Unarchive; a separator; Contact info; Delete contact (danger).
 
 ### 5.10 Modal box
 
@@ -602,6 +602,14 @@ Built as 20 says; estimates and departures of the build, worth a look by the own
 - The quote of a photo or a file sits over the picture or the file row inside the bubble; no thumbnail is drawn in the quote.
 - 19.7 says the highlight holds for 3 s; the reference fades in over 500ms and starts its 3000ms fade out at once. The highlight of a click on a quote uses the existing 19.7 timings.
 
+### Added with the storage inside the store (SOTTO-43, 2026-11-19)
+
+Own departures from the reference, worth a look by the owner:
+- Notifications show neither the name nor the text by default (11.3); the reference shows both.
+- Data and storage has "Save received files automatically", off by default, and a hint under the download folder group (11.5); the reference saves every download into its folder. Off, a received photo or file is kept in the encrypted store and leaves it only by "Save as...".
+- A photo kept in the store shows its blurred thumbnail until it is decoded in memory; "Show in Finder" is offered only for a file that is in a folder (5.9, 13.2, 15).
+- The lock screen takes the theme from `app.json`, the one setting kept outside the store.
+
 ## 10. Additions to tokens and existing sections
 
 ### 10.1 New colour tokens
@@ -719,8 +727,8 @@ A row opens its page with the push of 11.1.
 | Order | Row |
 |---|---|
 | Title | "Notifications" |
-| Section "macOS notifications" | toggle "Show notifications" (default on); toggle "Show sender name" (default on); toggle "Show message preview" (default on) |
-| Hint | "Without a preview, a notification only says that a message arrived." |
+| Section "macOS notifications" | toggle "Show notifications" (default on); toggle "Show sender name" (default off); toggle "Show message preview" (default off) |
+| Hint | "Without the name and the preview, a notification only says that a message arrived. macOS keeps what notifications show outside Sotto's encrypted storage." |
 | Section "Sound" | toggle "Play a sound" (default on) |
 | Section "Dock" | toggle "Show unread count on the Dock icon" (default on) |
 | Preview card | see below, at the end of the page |
@@ -730,6 +738,8 @@ The Dock badge is the number of unread messages of all chats, muted and archived
 If macOS refuses notifications, the first toggle is disabled (50% opacity) and a hint under the first section reads "Notifications are turned off for Sotto in System Settings." with a text button "Open System Settings" (14 semibold `accentText`, left 22).
 
 Preview card (a sample of the notification, drawn in the page): margins 40, 20, 40, 58 around it as in the reference; the card is a rounded rectangle (radius 8, `windowBgOver`, estimate) with: avatar 36 at x 14, y 11; the title (sender, 14 semibold `windowBoldFg`) at x 64, y 9; the text (13 regular `windowSubFg`) at x 64, y 30; 9 below the text. It follows the three toggles live: sender name hidden shows "Sotto" as the title, preview hidden shows "New message".
+
+Defaults (own, SOTTO-43): name and preview are off, so that no text of a chat reaches the notification database of macOS, which lies outside the encrypted store (docs/key-storage.md); the reference shows both by default. Notes of an earlier version, which cannot tell a choice to show them from the old default, are read with both off; an off stays off. Snapshots: `settings-notifications` (the defaults), `settings-notifications-on` (dark, both on).
 
 Rules for the real notification: it never shows contents when the passcode lock is on and the lock is engaged (11.6). A message from an unknown sender never produces one (7.6).
 
@@ -774,7 +784,8 @@ Time: the toggle switches message times, the list time and the date pill between
 | Hint | "Larger photos and files wait for a tap. Small previews always load." |
 | Section "Storage" | usage block, category rows, button "Clear cache" |
 | Hint | "Files cleared from the cache can be downloaded again only while they are still stored on the relay." |
-| Section "Download folder" | row "Save files to" with the folder name as value; toggle "Ask where to save each file" |
+| Section "Download folder" | row "Save files to" with the folder name as value; toggle "Save received files automatically" (default off); toggle "Ask where to save each file" |
+| Hint | "Received files stay in Sotto's encrypted storage until you choose Save as. With automatic saving, each one is saved to this folder instead, where any app can read it." |
 
 Automatic download: the row is the button row of 11.1 with a right value (14 regular `accentText`): "Off", "Up to 1 MB", "Up to 10 MB"... The slider below has the padding 22, 8, 22, 8 and stops Off, 1, 5, 10, 25, 50, 100 MB (estimate; 100 MB is the proposed largest file). Default 10 MB for both rows (the reference default download limit is 10 MB).
 
@@ -782,7 +793,7 @@ Storage block: a bar 4 high (radius 2) under a first line "Used by Sotto" with t
 
 Clear button: a filled button, margin 12, 6, 12, 9, height 38, radius 6, fill `accent` (hover `accentOver`), text 13 semibold white "Clear cache (245 MB)", disabled (`windowBgOver` fill, `windowSubFg` text) when nothing is checked. A click opens a 320 box: title "Clear cache?", body "Photos and files saved on this Mac will be removed from it. Messages stay. A file can be downloaded again only if the relay still has it." buttons "Cancel", "Clear" (destructive). Then the toast "Cache cleared". A cleared photo shows its small thumbnail and the download circle again (13.1); a file shows the not-downloaded state (13.2).
 
-Download folder: the row opens the system folder panel; the value is the folder name (middle truncation), the full path is the hover help. Default: the user's Downloads folder.
+Download folder: the row opens the system folder panel; the value is the folder name (middle truncation), the full path is the hover help. Default: the user's Downloads folder. It is where "Save as..." starts, and, with "Save received files automatically" on, where each received file is written as it arrives instead of being kept in the store (the behaviour before SOTTO-43). Off, the default (own; the closest to Signal Desktop, which keeps attachments in its encrypted storage until "Save"), a received photo or file stays inside the store: a photo is decoded in memory, a file opened with a click is written for its app into the private folder `temp.noindex` of the data folder, which Spotlight skips and which is emptied at launch, on lock and on quit. Files saved into a folder by an earlier version stay there. Snapshots: `settings-data` (the default), `settings-data-dark` (automatic saving on).
 
 ### 11.6 Privacy and security
 
@@ -931,7 +942,7 @@ States:
 |---|---|---|---|
 | Not downloaded | `arrow.down` | the size, "1.4 MB" | starts the download |
 | Downloading | `xmark` with the ring at the progress | "0.4 / 1.4 MB" | pauses (partial data kept); the state goes back to "not downloaded" with the size |
-| Downloaded | `doc.fill` | the size | opens the file with the system (Open); the context menu also has "Show in Finder" and "Save as..." |
+| Downloaded | `doc.fill` | the size | opens the file with the system (Open); the context menu also has "Save as..." and, for a file saved into a folder, "Show in Finder" |
 | Uploading | `xmark` with the ring | "0.4 / 1.4 MB" | cancels and removes the pending message |
 | Waiting for the connection | `xmark`, no ring | "Waiting for connection..." | cancels |
 | Failed | `arrow.clockwise` | "Not sent. Click to retry." (outgoing) or "Could not download. Click to retry." (incoming), in `danger` | retries; the upload resumes from the last stored offset |
@@ -1012,7 +1023,7 @@ Controls (shown on mouse movement, hidden after 1100ms without movement over a 6
 | Arrows | left and right zones 90 wide over the full height; inside, a glyph box of 46 x 54 centered vertically holding `chevron.left` / `chevron.right` 28pt `viewerControlFg`; the glyph shows with the controls and gets a 36 round `viewerControlBg` circle on hover |
 | Caption | bottom center, 11 above the bottom controls (estimate): a plate with padding 11, 6, 11, 6, radius 6, fill `viewerCaptionBg`, text 13 regular `viewerCaptionFg`, links `viewerLinkFg`, at most as wide as the picture and 600 (estimate), up to 4 lines then it scrolls |
 
-Context menu (right click on the picture, or the `ellipsis` button): the dark menu of 5.9 with `viewerMenuBg`, hover `viewerMenuBgOver`, text `viewerMenuFg`, destructive `danger`: "Save as...", "Copy image", "Show in chat", "Show in Finder", "Delete for me". Cmd+S saves, Cmd+C copies.
+Context menu (right click on the picture, or the `ellipsis` button): the dark menu of 5.9 with `viewerMenuBg`, hover `viewerMenuBgOver`, text `viewerMenuFg`, destructive `danger`: "Save as...", "Copy image", "Show in chat", "Show in Finder" (only for a photo saved into a folder), "Delete for me". Cmd+S saves, Cmd+C copies.
 
 Save: the system save panel (default name the file name, or "Photo 2026-11-17 14.05.jpg"), then a toast at the top center, 24 from the top: fill `toastBg`, text 13 regular `toastFg`, "Saved to Downloads", paddings 55, 19, 29, 20 with a `checkmark` 18pt `toastFg` at x 23, y 21 (the reference save message); in at 200ms, visible until 2000ms, out by 2500ms.
 
@@ -1129,7 +1140,7 @@ Pin, mute and archive are changed from the row menu (5.9) and kept in `app.json`
 | Item | Value |
 |---|---|
 | When | one macOS notification per chat for each batch of incoming messages that arrived after the app started, about the newest of them; none while "Show notifications" is off, none for a muted chat, none for the chat that is open while the window is in front and unlocked; a message from an unknown sender never has a chat, so never a notification (7.6) |
-| Content | title: the contact's local name, or "Sotto" with "Show sender name" off; body: the text, or "New message" with "Show message preview" off; the default sound with "Play a sound" on |
+| Content | title: the contact's local name with "Show sender name" on, else "Sotto" (the default); body: the text with "Show message preview" on, else "New message" (the default); the default sound with "Play a sound" on |
 | Locked | while the lock screen is shown and "Hide contents while locked" is on, the title is "Sotto" and the body "New message" |
 | Grouping and click | notifications are grouped by chat; reading the chat removes its notifications; a click brings the window to the front and opens the chat |
 | Read state | the open chat counts as read only while the window is in front and unlocked; otherwise its row and the Dock badge count its new messages until the window comes back |

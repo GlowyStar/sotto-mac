@@ -150,7 +150,7 @@ struct FileTests {
         let pair = Pair()
         let (alice, bob) = try await pair.start()
         let bobKey = try pair.key("bob")
-        await bob.transport.setDownloads(folder: pair.received, autoDownload: { $0.size < 1000 })
+        await bob.transport.setDownloads(.folder(pair.received), autoDownload: { $0.size < 1000 })
         let tally = Tally()
         // The third piece comes late once, while the download is paused.
         await pair.relay.edit(toClient: { link, message in

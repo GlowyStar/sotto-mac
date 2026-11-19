@@ -51,7 +51,7 @@ import Testing
     try await second.deleteContact(dave)
     await second.close()
 
-    let notes = Notes.load(directory)
+    let notes = try #require(try Notes.load(ClientStore(directory: directory)))
     #expect(notes.drafts == [:])
     #expect(notes.pins == [])
     #expect(notes.muted == [])
@@ -94,7 +94,14 @@ private func chat(_ id: String, _ messages: [ChatMessage], unread: Int = 0, mute
         chat("b", [ChatMessage(id: -1, outgoing: true, text: "mine", date: Date(), waiting: true), incoming(5, "hi")], unread: 1),
         chat("m", [incoming(6, "shh")], unread: 1, muted: true),
     ])
+    // By default a notification names nobody and quotes nothing.
+    #expect(Alerts.make(old: before, new: after, settings: AppSettings(), quietChat: nil, locked: false) == [
+        Alert(chatID: "a", messageID: 4, title: "Sotto", body: "New message", sound: true),
+        Alert(chatID: "b", messageID: 5, title: "Sotto", body: "New message", sound: true),
+    ])
     var settings = AppSettings()
+    settings.notificationSender = true
+    settings.notificationPreview = true
 
     #expect(Alerts.make(old: nil, new: after, settings: settings, quietChat: nil, locked: false).isEmpty)
     let all = Alerts.make(old: before, new: after, settings: settings, quietChat: nil, locked: false)
@@ -117,6 +124,7 @@ private func chat(_ id: String, _ messages: [ChatMessage], unread: Int = 0, mute
 
     // Locked with a passcode: no contents, unless the owner chose to show them.
     settings = AppSettings()
+    settings.notificationPreview = true
     settings.passcode = Passcode("1234")
     let locked = Alerts.make(old: before, new: after, settings: settings, quietChat: "b", locked: true)
     #expect(locked.map(\.title) == ["Sotto"] && locked.map(\.body) == ["New message"])
@@ -153,9 +161,11 @@ private func chat(_ id: String, _ messages: [ChatMessage], unread: Int = 0, mute
     #expect([photo, document, asFile].map(Alerts.preview) == ["Photo", "File: report.pdf, see this", "File: b.png"])
     let before = state([chat("a", [])])
     let after = state([chat("a", [photo], unread: 1)])
-    #expect(Alerts.make(old: before, new: after, settings: AppSettings(), quietChat: nil, locked: false).map(\.body) == ["Photo"])
-
     var settings = AppSettings()
+    settings.notificationPreview = true
+    #expect(Alerts.make(old: before, new: after, settings: settings, quietChat: nil, locked: false).map(\.body) == ["Photo"])
+
+    settings = AppSettings()
     settings.autoDownloadPhotos = 1
     settings.autoDownloadFiles = 0
     let rule = Messenger.autoDownload(settings)

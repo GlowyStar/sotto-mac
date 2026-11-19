@@ -372,6 +372,9 @@ final class AppModel {
     var drop: DropState?
     /// The photo open in the media viewer (DESIGN.md 15).
     var viewer: ViewerItem?
+    /// The messages whose kept photo the picture cache of `Media` may hold, so that a photo
+    /// that goes leaves memory too; a lock empties the cache (docs/key-storage.md).
+    @ObservationIgnored var keptDecoded: Set<String> = []
     /// Files handed to the messenger that it has not logged yet, by chat; each shows as a
     /// message until the message of its upload replaces it.
     @ObservationIgnored var localSends: [String: [LocalSend]] = [:]
@@ -423,8 +426,9 @@ final class AppModel {
         relayAddress = ""
         connection = .idle
         dataDirectory = directory
-        settings = Self.legacySettings()
+        settings = Self.launchSettings(directory)
         storeLocked = true
+        clearOpenedFiles()
         scriptedSends = Launch.current.sends
         scriptedFileSends = Launch.current.fileSends
         scriptedProfile = Launch.current.profile
@@ -449,11 +453,12 @@ final class AppModel {
                 }
                 try StoreKeys.unlock(directory, protection: protection, context: context)
                 let messenger = try Self.messenger(directory)
-                settings = messenger.launchSettings ?? Self.legacySettings()
+                settings = messenger.launchSettings ?? Self.launchSettings(directory)
                 locked = settings.passcode != nil
                 storeLocked = false
                 lastActivity = Date()
                 attach(messenger)
+                if messenger.tookInOlderNotes { alerts?.removeAll() }
                 alerts?.refresh(ask: settings.notifications)
             } catch let error as LAError where [.userCancel, .appCancel, .systemCancel].contains(error.code) {
             } catch {
@@ -463,10 +468,12 @@ final class AppModel {
         }
     }
 
-    /// Before the settings moved to `app.json` the theme was kept in the user defaults.
-    private static func legacySettings() -> AppSettings {
+    /// The settings before the store opens: the theme of `app.json`, which the lock screen
+    /// shows; before the settings had a page the theme was kept in the user defaults.
+    private static func launchSettings(_ directory: URL) -> AppSettings {
         var settings = AppSettings()
-        if let theme = UserDefaults.standard.string(forKey: "theme").flatMap(AppSettings.Theme.init(rawValue:)) {
+        let legacy = UserDefaults.standard.string(forKey: "theme").flatMap(AppSettings.Theme.init(rawValue:))
+        if let theme = Messenger.launchTheme(directory: directory) ?? legacy {
             settings.theme = theme
         }
         return settings
@@ -491,8 +498,8 @@ final class AppModel {
         return AppModel(directory: launch.directory)
     }
 
-    /// The messenger of a data folder; received files go to the user's Downloads folder unless
-    /// the settings name another.
+    /// The messenger of a data folder; received files stay in the store unless the settings
+    /// save them into a folder, the user's Downloads folder unless they name another.
     static func messenger(_ directory: URL) throws -> Messenger {
         try Messenger(
             directory: directory, relay: Launch.current.relay,
@@ -527,6 +534,10 @@ final class AppModel {
             localSends[chat.userID]?.removeAll { $0.resolved.map(ids.contains) ?? false }
             return (chat.userID, logged + (localSends[chat.userID] ?? []).filter { !$0.cancelled }.map(\.message))
         })
+        // A photo that is gone, deleted or expired, leaves memory too.
+        let shown = Set(messages.values.joined().map(\.id))
+        for id in keptDecoded.subtracting(shown) { Media.forgetKept(id) }
+        keptDecoded.formIntersection(shown)
         if let quiet, state.chats.contains(where: { $0.userID == quiet && $0.unread > 0 }) {
             run { try await $0.markRead(quiet) }
         }
@@ -728,6 +739,7 @@ final class AppModel {
         self.messenger = nil
         await messenger?.close()
         if let dataDirectory { StoreKeys.lock(dataDirectory) }
+        clearOpenedFiles()
     }
 
     /// Forgets what the window shows of the chats.
@@ -749,6 +761,9 @@ final class AppModel {
         replies = [:]
         edits = [:]
         picks = []
+        keptDecoded = []
+        Media.forget()
+        clearOpenedFiles()
     }
 
     func unlock(_ text: String) -> Bool {
@@ -808,7 +823,7 @@ final class AppModel {
             welcome = .start
             return
         }
-        try? FileManager.default.removeItem(at: directory.appendingPathComponent("Pasted", isDirectory: true))
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent(Messenger.pastedFolder, isDirectory: true))
         welcome = .start
         Task { [weak self] in
             await messenger.close()

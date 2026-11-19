@@ -11,10 +11,13 @@ client sends texts while the app runs and while it is closed; the app is started
 receive the rest. Then the app sends with `--send`: once to the running Python client, once
 right after a restart, and once while the Python client is not connected, which prints that
 text when it connects again. Then files: `sotto send-file` sends the app a photo and a file,
-and the app sends a photo and a file with `--send-file`; each is compared byte for byte. A
-large upload of the app is cut by killing the app when the relay holds part of its blob, and
-a large download of the app by killing it when its store holds part of the blob; each ends
-whole after the next start of the app, going on from where it stopped. Then profiles:
+and the app sends a photo and a file with `--send-file`; each is compared byte for byte, the
+files the app received as its store keeps them (read with `sotto-mac test-query`), since
+the app keeps received files inside its encrypted store and writes nothing into its
+download folder. A large upload of the app is cut by killing the app when the relay holds
+part of its blob, and a large download of the app by killing it when its store holds part
+of the blob; each ends whole after the next start of the app, going on from where it
+stopped. Then profiles:
 `sotto profile set` gives the Python client a name and an avatar, which the app receives
 and keeps byte for byte; the app sets its own with `--profile`, which `sotto contacts` and
 `sotto profile show` print and save byte for byte; a rename and a removed avatar of each
@@ -23,10 +26,12 @@ side reach the other, and none of it becomes a message. Then part 5: the app sta
 (`--reply`, `--edit`, `--delete`, `--send`, `--timer`) each reply with a quote, see their
 messages read, edit, delete for both, and send a message under a 3 second timer that
 disappears from both stores; a timer change is no message. The store is read back with
-`Sotto --dump` and drawn with `Sotto --snapshot`. The app's own `app.json` turns
-notifications off before the first start, so that a run posts nothing on the screen, and
-names a download folder of the run. Exits 0 only if every text and file arrived; stops
-everything it started.
+`Sotto --dump` and drawn with `Sotto --snapshot`. The app's own `app.json`, written in the
+format of a version before the notes moved into the store, turns notifications off before
+the first start, so that a run posts nothing on the screen, and names a download folder of
+the run; the first start moves it into the store. At the end no file of the app's data
+folder holds a text of the chat or the bytes of a file of the run. Exits 0 only if every
+text and file arrived; stops everything it started.
 
 The data lives in a temporary directory that is removed at the end; `--keep DIR` keeps the
 stores, the relay database, the app log and the pictures in DIR instead.
@@ -92,6 +97,33 @@ def same(sent: Path, saved: Path | str) -> None:
     if Path(saved).read_bytes() != sent.read_bytes():
         raise CheckFailed(f"{saved} is not the file {sent.name}")
     print(f"ok   {saved} holds the {sent.stat().st_size} bytes of {sent.name}")
+
+
+def kept(store: Path, sent: Path) -> bool:
+    """Whether the store keeps a received file with the bytes of `sent`; the bytes are read,
+    spelled in hex by SQLite, only for the files of its size."""
+    rows = read_only(
+        store,
+        "SELECT f.position FROM files f JOIN kept_files k USING (position)"
+        f" WHERE f.direction = 'in' AND f.state = 'received' AND length(k.bytes) = {sent.stat().st_size}",
+    )
+    content = sent.read_bytes()
+    return any(
+        bytes.fromhex(str(read_only(store, f"SELECT hex(bytes) FROM kept_files WHERE position = {int(row[0])}")[0][0]))
+        == content
+        for row in rows
+    )
+
+
+def markers_of(*folders: Path) -> dict[str, bytes]:
+    """64 bytes from the middle of every file in the folders, by name."""
+    found = {}
+    for folder in folders:
+        for path in folder.iterdir():
+            data = path.read_bytes()
+            if len(data) >= 64:
+                found[path.name] = data[len(data) // 2 - 32:len(data) // 2 + 32]
+    return found
 
 
 
@@ -225,12 +257,20 @@ async def run(run_folder: Path) -> None:
         if not info["cipherVersion"] or not info["library"].startswith(str(frameworks)):
             raise CheckFailed(f"the app's store is not served by its SQLCipher: {info}")
         print(f"ok   the app's store is served by SQLCipher {info['cipherVersion']} over {info['cipherProvider']}")
-        stored = b"".join(path.read_bytes() for path in app_dir.iterdir() if path.name.startswith("store."))
-        if stored.startswith(b"SQLite format 3") or any(
-            text.encode() in stored for text in TEXTS_WHILE_RUNNING + TEXTS_WHILE_CLOSED + [TEXT_TO_RUNNING]
-        ):
-            raise CheckFailed("the files of the app's store hold readable text")
-        print("ok   no text of the chat is readable in the files of the app's store")
+        if (app_dir / "store.db").read_bytes().startswith(b"SQLite format 3"):
+            raise CheckFailed("the app's store is a plain SQLite file")
+        texts_of_run = TEXTS_WHILE_RUNNING + TEXTS_WHILE_CLOSED + [
+            TEXT_TO_RUNNING, TEXT_AFTER_RESTART, TEXT_WHILE_AWAY, WAVE_TWO, ANSWER_OF_APP, ANSWER_OF_PYTHON,
+            EDITED_BY_PYTHON, EDITED_BY_APP, VANISHING_FROM_PYTHON, VANISHING_FROM_APP, PYTHON_RENAMED,
+        ]
+        secrets = {text: text.encode() for text in texts_of_run} | markers_of(run_folder / "files", run_folder / "profiles")
+        for path in (path for path in app_dir.rglob("*") if path.is_file()):
+            data = path.read_bytes()
+            found = [name for name, secret in secrets.items() if secret in data]
+            if found:
+                raise CheckFailed(f"{path} holds {found} readable")
+        names = sorted(path.relative_to(app_dir).as_posix() for path in app_dir.rglob("*"))
+        print(f"ok   no text of the chat and no byte of a file of the run is readable in the app's data folder {names}")
 
         code, dumped, errors = await outcome(APP, "--data-dir", app_dir, "--dump")
         if code != 0:
@@ -285,10 +325,15 @@ async def run(run_folder: Path) -> None:
         if code != 0 or missing:
             raise CheckFailed(f"Sotto --snapshot exited {code}, missing {missing}: {errors}")
         print(f"ok   the store is drawn in {pictures}")
-        settings = json.loads((app_dir / "app.json").read_text()).get("settings", {})
-        if settings.get("notifications") is not False:
-            raise CheckFailed(f"the app turned notifications on again: {settings}")
-        print("ok   notifications stayed off for the whole run")
+        notes = read_only(app_store, "SELECT notes FROM app_notes")[0][0]
+        settings = json.loads(notes).get("settings", {})  # type: ignore[arg-type]
+        if settings.get("notifications") is not False or settings.get("downloadFolder") != str(run_folder / "downloads"):
+            raise CheckFailed(f"the store holds the settings {settings}")
+        print("ok   notifications stayed off for the whole run, the settings moved into the store")
+        launch_file = app_dir / "app.json"
+        if launch_file.exists() and not set(json.loads(launch_file.read_text())) <= {"theme"}:
+            raise CheckFailed(f"app.json holds {launch_file.read_text()}")
+        print("ok   app.json keeps nothing but the theme")
     finally:
         for app in apps:
             app.stop()
@@ -316,9 +361,12 @@ async def files_both_ways(
     photo_out.write_bytes(png(640, 480))
     file_out.write_bytes(os.urandom(90_000))
 
-    def received(name: str) -> Path | None:
-        rows = read_only(app_store, "SELECT saved_as FROM files WHERE direction = 'in' AND state = 'received'")
-        return next((Path(str(row[0])) for row in rows if Path(str(row[0])).name == name), None)
+    def received(path: Path) -> bool:
+        return kept(app_store, path)
+
+    def downloads_empty() -> None:
+        if downloads.exists() and any(downloads.iterdir()):
+            raise CheckFailed(f"the app wrote {sorted(item.name for item in downloads.iterdir())} into its download folder")
 
     async def python_sends(path: Path) -> None:
         await command(SOTTO, "--data-dir", python_dir, "send-file", "app", path, "--relay", url)
@@ -327,12 +375,8 @@ async def files_both_ways(
     apps.append(App(app_dir, url, log))
     for path in (photo_in, file_in):
         await python_sends(path)
-        await until(f"the running app saved {path.name}", lambda: received(path.name) is not None)
-        saved = received(path.name)
-        assert saved is not None
-        same(path, saved)
-        if saved.parent != downloads:
-            raise CheckFailed(f"the app saved {path.name} into {saved.parent}, not the folder of its settings")
+        await until(f"the running app keeps {path.name} in its store, byte for byte", lambda: received(path))
+        downloads_empty()
     apps[-1].stop()
 
     python: Chat = await start_python(url)  # type: ignore[operator]
@@ -398,7 +442,7 @@ async def files_both_ways(
     apps[-1].kill()
     stopped = download()
     assert stopped is not None
-    if received(large_in.name) is not None:
+    if received(large_in):
         raise CheckFailed("the download ended before the kill could cut it")
     print(f"ok   the app was killed holding {stopped[1]} of {stopped[2]} bytes of the blob")
     if stopped[1] != read_only(app_store, "SELECT held FROM files WHERE direction = 'in' AND state = 'receiving'")[0][0]:
@@ -410,15 +454,15 @@ async def files_both_ways(
         held = download()
         if held is not None:
             held_after.append(held[1])
-        return received(large_in.name) is not None
+            return False
+        return received(large_in)
 
-    await until("the started app saved the large file", downloaded, FILE_PATIENCE_SECONDS, 0.02)
+    await until("the started app keeps the large file in its store, byte for byte", downloaded, FILE_PATIENCE_SECONDS, 0.02)
     if min(held_after, default=stopped[1]) < stopped[1]:
         raise CheckFailed(f"the download started again below the bytes it held: {min(held_after)} < {stopped[1]}")
     print("ok   the download went on from the bytes it held")
-    saved = received(large_in.name)
-    assert saved is not None
-    same(large_in, saved)
+    downloads_empty()
+    print("ok   the download folder of the app stayed empty")
     apps[-1].stop()
 
 

@@ -28,8 +28,11 @@ interoperate with sotto's command-line client byte for byte.
 - The store is encrypted at rest: SQLCipher over the whole `store.db`, its random 256-bit
   key wrapped to a Secure Enclave key of this Mac that asks for Touch ID or the Mac
   password; the app and `sotto-mac` open it only after that, and every lock drops the key
-  (`docs/key-storage.md`). The tests check that no text of the store is readable in its
-  files and that a copy of the folder does not open without its Secure Enclave key.
+  (`docs/key-storage.md`). Drafts, settings, pasted pictures and received files are kept
+  inside it too, and notifications name nobody and quote nothing by default. The tests
+  check that no text of the store is readable in its files, that after a run no file of
+  the data folder holds a text, a pasted picture or a received file of it, and that a copy
+  of the folder does not open without its Secure Enclave key.
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
 
@@ -68,9 +71,10 @@ deletes a message or changes the timer; a printed message counts as read. It tak
 commands of sotto's `chat`: `/reply N text`, `/edit N text`, `/delete N` (for both sides)
 and `/timer [off|30s|5m|1h|1d|1w]`.
 
-Received files are saved into the folder `received` of the data directory, under the name
-the sender gave when it is a plain file name, never over a file that is there; a file whose
-sending stopped goes on at the next `chat` or `send-file`.
+Received files are saved, readable, into the folder `received` of the data directory (a
+console has no viewer: the file is its output; the app keeps them inside its store), under
+the name the sender gave when it is a plain file name, never over a file that is there; a
+file whose sending stopped goes on at the next `chat` or `send-file`.
 
 A `ws://` URL is dialed only to a loopback host unless `--insecure` is given. Part of the
 tests starts the relay of a sotto checkout at `../../python/sotto` (they are skipped when
@@ -161,17 +165,22 @@ A text sent to a contact without a session (nobody has written yet) waits in the
 with a clock until a connection fetches the contact's keys, also across a restart. A
 message that the relay refuses ends as not sent, with a red mark and the reason on hover.
 
-Next to the store, `app.json` keeps what the store has no place for: the relay address
-saved in Settings, how far each chat was read, when each contact and message was
-first seen by the app, the draft of each chat, the pinned, muted and archived chats, and
-every other setting (theme, text size, chat background, send key, clock, the passcode
-check, auto-lock, notification and download choices). "Reset
-Sotto..." in Settings, Advanced, deletes the store, its wrapped key and `app.json` and then
-the data directory only if nothing else is left in it.
+The encrypted store also keeps the app's own notes: the relay address saved in Settings,
+how far each chat was read, when each contact and message was first seen by the app, the
+draft of each chat, the pinned, muted and archived chats, and every setting (theme, text
+size, chat background, send key, clock, the passcode check, auto-lock, notification and
+download choices). Next to the store, `app.json` keeps only the theme, which the lock
+screen shows before the store opens. The first launch of this version moves an older
+`app.json` into the store and leaves it with the theme only. `docs/key-storage.md` lists
+every place the app writes anything outside the store. "Reset Sotto..." in Settings,
+Advanced, deletes the store, its wrapped key and `app.json` and then the data directory
+only if nothing else is left in it.
 
 A new message posts a macOS notification (not for the chat open in the front window, not
-for a muted chat; without its text while the passcode lock is shown, unless that is turned
-off) and the Dock icon shows the number of unread messages. Notifications need the bundled
+for a muted chat) and the Dock icon shows the number of unread messages. By default a
+notification says only "New message" from "Sotto": the name of the contact and the text
+come back with "Show sender name" and "Show message preview" in Settings, Notifications,
+and stay out while the passcode lock is shown, unless that is turned off. Notifications need the bundled
 app: under `swift run` none are posted. Search finds chats by name and messages by text,
 across chats from the list and inside the open chat (Cmd+F); the emoji button opens the
 macOS character palette. All of this stays on the Mac: nothing new is sent to the relay.
@@ -183,15 +192,21 @@ A picture goes as a photo with its size and a small JPEG preview made on the Mac
 "Send as file" is checked, which sends it with an empty media type so that it shows as a
 file. A transfer shows a ring with its progress: a click on the ring cancels a sending
 (the message is deleted, which ends its upload) or pauses a download (the bytes stay). A
-received photo or file within the auto-download size of Settings, Data and storage, is
-saved into the download folder of the settings (Downloads by default) by itself; a larger
-one waits for a click. Transfers go on after a reconnect and after a restart without a
+received photo or file within the auto-download size of Settings, Data and storage,
+downloads by itself and a larger one waits for a click; either way it is kept inside the
+encrypted store, and "Save as..." writes a readable copy where the user says. With "Save
+received files automatically" (off by default) each received file is written into the
+download folder of the settings (Downloads by default) instead, as earlier versions did;
+files they saved there stay where they are. Transfers go on after a reconnect and after a restart without a
 click. A file that was not sent is sent again from the file it was read from with a
 click on its circle: a new upload, as the protocol says. A photo opens in a viewer (zoom,
-the other photos of the chat with the arrow keys, "Save as..."); a file opens with the
-system only on a click, and every received file is marked as downloaded (quarantine), so
-macOS asks before it runs anything a contact sent. A picture pasted into the field is kept as a PNG in the folder
-`Pasted` of the data directory, so that the photo can be shown and sent again.
+the other photos of the chat with the arrow keys, "Save as..."), decoded in memory; a file
+opens with the system only on a click, from a copy in the folder `temp.noindex` of the data
+directory (Spotlight skips it) that is overwritten and removed at launch, on lock and on
+quit. Every received
+file written to disk is marked as downloaded (quarantine), so macOS asks before it runs
+anything a contact sent. A picture pasted into the field stays in memory until it is sent;
+then the store keeps it with its message, so that the photo can be shown and sent again.
 
 The profile: Settings shows the own photo, name and short id at the top; a click on the
 photo opens the file panel and then the crop box, a click on the name the Edit profile page
@@ -228,10 +243,12 @@ with it, and it cannot be recovered. While the store is locked the app has no co
 The end-to-end check of the app (a relay on a free port; the Python client writing to the
 app while it runs and while it is closed; the app sending with `--send` to the running
 Python client, right after a restart, and while the Python client is away; a photo and a
-file each way, compared byte for byte; a large upload and a large download of the app, each
-cut by killing the app in the middle and ended whole after its next start; the profiles
-both ways; a reply, an edit, a delete for both, the read marks and a message under a short
-timer each way; then a dump and a snapshot of its store):
+file each way, compared byte for byte, the received ones as the store keeps them; a large
+upload and a large download of the app, each cut by killing the app in the middle and
+ended whole after its next start; the profiles both ways; a reply, an edit, a delete for
+both, the read marks and a message under a short timer each way; then a check that no file
+of the app's data folder holds a text or a file of the run in the clear, a dump and a
+snapshot of its store):
 
 ```sh
 ../../python/sotto/.venv/bin/python scripts/app-interop.py [--keep DIR]
@@ -244,11 +261,13 @@ Limits as they are:
 
 - A plain `ws://` address is dialed only to a loopback host; a relay on another machine
   belongs behind TLS and is dialed as `wss://`.
-- `app.json` (drafts, read positions, settings) and received files saved into a folder are
-  not encrypted yet. With message previews on, macOS also keeps the text of each
-  notification in its own notification database, outside the data directory. A store of
-  the previous version is encrypted on the first launch and its plain file overwritten,
-  but older Time Machine snapshots and backups keep it (`docs/key-storage.md`).
+- What leaves the store is readable: a copy made with "Save as..." or "Save received
+  files automatically", a file opened in another app while the store is open, what
+  "Copy" puts on the pasteboard, and, with the name or the preview turned on, what macOS
+  keeps of each notification in its own notification database. A store, an `app.json` or
+  pasted pictures of a previous version are encrypted or moved on the first launch and
+  their plain files overwritten, but older Time Machine snapshots and backups keep them
+  (`docs/key-storage.md`).
 - Whoever knows the Mac password, or has malware running as the user while the store is
   open, gets the chats.
 - One device per identity: when the same identity logs in elsewhere, the relay closes the

@@ -10,7 +10,16 @@ public enum Thumbnail {
     /// The pixel size of the picture at `url` as it is shown (its orientation applied) and a
     /// JPEG thumbnail of at most `Envelope.maxThumbnailBytes`; nil when it is not a picture.
     public static func make(_ url: URL) -> (width: Int, height: Int, jpeg: Data)? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0,
+        CGImageSourceCreateWithURL(url as CFURL, nil).flatMap(make)
+    }
+
+    /// `make` for a picture in memory.
+    public static func make(_ data: Data) -> (width: Int, height: Int, jpeg: Data)? {
+        CGImageSourceCreateWithData(data as CFData, nil).flatMap(make)
+    }
+
+    private static func make(_ source: CGImageSource) -> (width: Int, height: Int, jpeg: Data)? {
+        guard CGImageSourceGetCount(source) > 0,
             let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
             var width = properties[kCGImagePropertyPixelWidth] as? Int,
             var height = properties[kCGImagePropertyPixelHeight] as? Int, width > 0, height > 0

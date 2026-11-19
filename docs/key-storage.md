@@ -7,6 +7,10 @@ random 256-bit key; that key is kept on disk only wrapped to a Secure Enclave ke
 Mac, whose use needs the user's presence (Touch ID or the Mac password). Nothing about the
 store is in the keychain. The directory keeps mode 0700 and the files 0600.
 
+Since SOTTO-43 the store also holds what the app kept beside it: its notes (drafts, read
+positions, pins, settings), pasted pictures and received files. What still leaves it, and
+why, is listed in "What is written outside the store".
+
 | Part | What it is |
 | --- | --- |
 | Pages | SQLCipher 4.20.0 community edition by Zetetic (the official Swift package `SQLCipher.swift`, a binary framework signed with Zetetic's Developer ID), crypto provider CommonCrypto. Its defaults of version 4: every page of 4096 bytes is AES-256-CBC with a random IV and an HMAC-SHA512, the journal likewise; the first 16 bytes of the file are its salt. |
@@ -96,11 +100,32 @@ older backups after that first launch.
 A store without `store.key` whose pages are encrypted does not open ("the store is
 encrypted and its key ... is missing"); no new key is made over it.
 
+## Notes and pasted pictures of the previous version
+
+The first open of a store by this version (the store has no row in `app_notes`) moves what
+the previous version kept outside it:
+
+1. the notes of `app.json` (relay address, read positions, first-seen times, drafts, pins,
+   muted and archived chats, timer changes, settings) are committed into `app_notes`;
+   notification name and preview are set off, since that file cannot tell a choice to
+   show them from the old default, and every other setting stays as it was;
+2. `app.json` is overwritten with zeros, synced and removed, and written again holding the
+   theme only (or not at all when no theme was chosen);
+3. every picture in the folder `Pasted` of the data folder that a sent file names is
+   committed into `kept_files` with that file; then every file of the folder is
+   overwritten with zeros and removed, and the folder too.
+
+A stop before step 1 commits leaves everything as it was; after it the store holds the
+notes and the next open only finishes step 2 (a file that holds more than the theme is
+overwritten again). The limits of the overwrite are those of the store above: APFS, the
+SSD and older snapshots and backups keep the old blocks.
+
 ## Reset
 
-"Reset Sotto..." deletes `store.db`, its journal, `store.key` and `app.json` and drops the
-key. With `store.key` gone, whatever pages of the old store remain on the disk can never be
-decrypted again. The next store gets a new key after one more sheet.
+"Reset Sotto..." deletes `store.db`, its journal, `store.key` and `app.json`, overwrites
+and removes the folder `temp.noindex`, and drops the key. With `store.key` gone,
+whatever pages of the old store remain on the disk can never be decrypted again. The next
+store gets a new key after one more sheet.
 
 ## A Mac without a Secure Enclave
 
@@ -117,17 +142,40 @@ button and `sotto-mac` prints it and exits 1. There is no fallback to a weaker k
 - This Mac in someone else's hands: the Secure Enclave asks for Touch ID or the Mac password
   first. Whoever knows the Mac password opens the chats.
 - Not protected: malware that runs as the user while the store is open; what the window
-  shows; `app.json` (drafts, read positions, settings), received files saved into a folder
-  and the text of notifications in macOS's own database, which stay readable until the next
-  card of this stage.
+  shows; and what the user lets out of the store, each listed in "What is written outside
+  the store" below: a copy made with "Save as..." or by automatic saving, a file opened in
+  another app, the pasteboard, and notifications with the name or the preview turned on.
 
 ## Files
 
 The same encrypted file holds the files of part 3 (section 33.7 of the protocol): an upload
 with the whole encrypted blob until its message is committed, the attachment of each sent
-and received file with its file key, and the bytes of a download so far. A received file
-is written in readable form, outside the encryption, into the folder the caller names
-(`received` in the data directory of `sotto-mac`), mode 0600 in a folder of mode 0700.
+and received file with its file key, and the bytes of a download so far. Where a received
+file goes once its blob is here is the caller's choice (`Transport.Downloads`):
+
+- the app, by default: its bytes stay in the store, in `kept_files` beside its row of
+  `files`, and leave only through "Save as..." (a readable copy where the user says, marked
+  as downloaded) or a click that opens it (below). A photo is decoded in memory for the
+  bubble and the viewer, never written; the decoded bubble pictures sit in a cache bounded
+  at 256 MB of pixels that a lock empties;
+- the app with "Save received files automatically" in Data and storage (off by default),
+  and `sotto-mac` always (into `received` in its data directory): the file is written in
+  readable form, outside the encryption, into the folder instead of the store, mode 0600
+  in a folder of mode 0700, marked as downloaded. Files that a previous version saved
+  there stay: they are the user's files now.
+
+A kept file goes into `kept_files` and out of it (Save as, Open) 1 MB at a time through
+SQLite's blob calls, so a large one is never copied whole on its way; only a photo to
+decode or copy and a file sent again are read whole.
+
+A sent file read from a file of the user is not copied into the store: its path is kept and
+the file stays his. A pasted picture is in no file: it is held in memory until it is sent,
+and then `kept_files` keeps it with the sent file, for the bubble, "Save as..." and a retry.
+A file of `kept_files` goes with its row of `files` (a trigger deletes it with the row), so
+a delete, an expiry or a deleted contact takes it too, under `secure_delete`.
+
+The store grows by every file it keeps (at most 100 MB each). "Clear cache" of Data and
+storage, which would drop kept files that the relay still holds, is not built yet.
 
 ## Deleted and expired messages
 
@@ -137,6 +185,30 @@ of the author and the id only (section 39.4 of the protocol); the text of every 
 the message is cleared in the same transaction. After a delete for both or an expiry, a
 received file that was saved into a folder is removed after the commit; the file a sent
 one was read from is the user's own and stays.
+
+## What is written outside the store
+
+Every place where the app (`Sotto`) or `sotto-mac` writes anything of the chats, or that
+shows it, outside `store.db`; "before" is the version of 2026-11-19 (SOTTO-42), "now" this
+version (SOTTO-43). `test-query`, `--dump` and `--snapshot` are tools of the scripts and
+print or draw on request; they are left out.
+
+| Place | Before | Now |
+| --- | --- | --- |
+| `store.db`, `store.db-journal` | the store, encrypted | the same, now also holding the app's notes (`app_notes`) and the files it keeps (`kept_files`) |
+| `store.key` | the wrapped store key; nothing of the chats | unchanged |
+| `app.json` in the data folder | in the clear: the relay address, the last read position and the first-seen time of each contact by its id, the time of every message, the drafts, pinned, muted and archived chats, timer changes, every setting with the passcode check (salt and HMAC) and the download folder | the theme only, which the lock screen shows before the store opens; the rest is in `app_notes`. An older file is moved once and overwritten (above) |
+| `Pasted` in the data folder | every pasted picture as a readable PNG, for the bubble and a retry | not written: a pasted picture is in memory until it is sent, then in `kept_files`. An older folder is moved into the store and overwritten |
+| `temp.noindex` in the data folder (new) | none | a file the store keeps, written when the user clicks it so that its app can open it (a photo never is): 0600 in a 0700 folder that Spotlight skips, marked as downloaded, excluded from backups; overwritten and removed at launch, on lock, on quit and by Reset. Readable while it is there; the app that opened it keeps what it read, and macOS may list its name among that app's recent items |
+| The download folder (Downloads by default) | every received file of the app, readable | nothing by default; with "Save received files automatically" each received file, as before. What is already there stays; after a delete for both or an expiry a file saved there is still removed |
+| Where "Save as..." points | a copy of the file | the same, from the store when it keeps the file: the user's own copy, readable, marked as downloaded when it was received |
+| `received` in the data directory of `sotto-mac` | every received file, readable | unchanged: the file is what the console command delivers, with no viewer to show it from the store |
+| Notifications (macOS keeps them in its own database, outside the data folder) | the contact's local name and the text of the message | "Sotto" and "New message" by default; name and text only with "Show sender name" and "Show message preview" on. The identifiers of a notification still carry the chat's id (the contact's public id) and the message position, for the grouping and the click; how long macOS keeps them is its own |
+| Dock badge | the unread count | unchanged; no text |
+| Pasteboard | what the user copies: a text, a picture, an id | unchanged: the user's act. Every app may read it and Universal Clipboard may carry it to the user's other devices |
+| Logs | none through the unified log; the app writes a line to stderr when a scripting flag names no contact, `sotto-mac` prints the chats to its terminal | unchanged |
+| Caches | none on disk: pictures and thumbnails in memory, the socket on an ephemeral `URLSession` (no URL cache, no cookies), SQLite temporary tables in memory | the same; the pictures decoded for the window are dropped on lock |
+| User defaults and saved window state | the window frame and the theme of a version before the settings page | unchanged; nothing of the chats |
 
 ## Why not the keychain: what was observed (before 2026-11-19)
 

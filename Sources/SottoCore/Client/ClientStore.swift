@@ -202,7 +202,7 @@ public struct UploadRow: Equatable, Sendable {
 
 /// An attachment of the message log, sent or received: `held` bytes of its blob are
 /// downloaded, `savedAs` is the path of a received file or the file a sent one was read
-/// from, `result` why it failed.
+/// from, `result` why it failed; `kept` when the store holds the bytes of the file itself.
 public struct FileRow: Equatable, Sendable {
     public var position: Int64
     public var contact: Data
@@ -215,6 +215,9 @@ public struct FileRow: Equatable, Sendable {
     public var result: String?
     /// The file is the avatar of a contact's profile, no file of the message log (section 36.1).
     public var avatar = false
+    /// The store holds the bytes of the file: a received file not saved into a folder, or a
+    /// sent one that exists nowhere else, such as a pasted picture (docs/key-storage.md).
+    public var kept = false
 }
 
 /// The client's own profile (section 36.1): the name, the picture with its media type, and
@@ -265,6 +268,8 @@ public final class ClientStore {
     /// How long a statement waits for a lock that another connection holds, such as a reader
     /// of the same file in another process, before it fails with SQLITE_BUSY.
     public static let busyTimeoutMilliseconds: Int32 = 5000
+    /// The piece in which a kept file goes into the store and out of it.
+    public static let keptPieceBytes = 1 << 20
 
     public let path: URL
     public let directory: URL
@@ -553,6 +558,35 @@ public final class ClientStore {
         return row[0].data ?? Data()
     }
 
+    /// The bytes of a file that the store keeps, nil when it keeps none: whole, for a picture
+    /// to decode or a file to send again; `readKeptFile` hands out a large one in pieces.
+    public func keptFile(_ position: Int64) throws -> Data? {
+        try query("SELECT bytes FROM kept_files WHERE position = ?", [.integer(position)]).first?[0].data
+    }
+
+    /// Hands the bytes of a file that the store keeps to `piece`, `keptPieceBytes` at a time;
+    /// false when it keeps none.
+    public func readKeptFile(_ position: Int64, _ piece: (Data) throws -> Void) throws -> Bool {
+        guard let length = try query("SELECT length(bytes) FROM kept_files WHERE position = ?", [.integer(position)])
+            .first?[0].integer
+        else {
+            return false
+        }
+        var offset = 0
+        while offset < Int(length) {
+            let read = try readBlob("kept_files", "bytes", row: position, offset: offset, length: Self.keptPieceBytes)
+            guard !read.isEmpty else { break }
+            try piece(read)
+            offset += read.count
+        }
+        return true
+    }
+
+    /// The notes of the app (`Messenger`), nil until they are first saved.
+    public func appNotes() throws -> Data? {
+        try query("SELECT notes FROM app_notes").first?[0].data
+    }
+
     /// The DeleteBlob frames to send, as (uploader, blob id).
     public func blobDeletions() throws -> [(uploader: Data, blobID: Data)] {
         try query("SELECT uploader, blob_id FROM blob_deletions ORDER BY uploader, blob_id").map {
@@ -802,6 +836,28 @@ public final class ClientStore {
             "INSERT INTO timers VALUES (?, ?) ON CONFLICT (contact) DO UPDATE SET seconds = excluded.seconds",
             [.blob(contact), .integer(Int64(seconds))]
         )
+    }
+
+    public func setAppNotes(_ notes: Data) throws {
+        try change(
+            "INSERT INTO app_notes VALUES (1, ?) ON CONFLICT (only_row) DO UPDATE SET notes = excluded.notes", [.blob(notes)]
+        )
+    }
+
+    /// Keeps the bytes of a file in the store, written `keptPieceBytes` at a time into room
+    /// made for them, as a download is, and clears the path the file named.
+    public func keepFile(_ position: Int64, _ bytes: Data) throws {
+        try change(
+            "INSERT INTO kept_files VALUES (?, zeroblob(?)) ON CONFLICT (position) DO UPDATE SET bytes = excluded.bytes",
+            [.integer(position), .integer(Int64(bytes.count))]
+        )
+        var offset = 0
+        while offset < bytes.count {
+            let end = min(offset + Self.keptPieceBytes, bytes.count)
+            try writeBlob("kept_files", "bytes", row: position, offset: offset, bytes[bytes.startIndex + offset ..< bytes.startIndex + end])
+            offset = end
+        }
+        try change("UPDATE files SET saved_as = NULL WHERE position = ?", [.integer(position)])
     }
 
     public func setReadReceipts(_ on: Bool) throws {
@@ -1186,7 +1242,8 @@ public final class ClientStore {
             held: Int(row[6].integer!),
             savedAs: row[7].text,
             result: row[8].text,
-            avatar: row[9].integer! == 1
+            avatar: row[9].integer! == 1,
+            kept: row[10].integer! == 1
         )
     }
 
@@ -1399,7 +1456,7 @@ public final class ClientStore {
 
     /// Writes zeros over the whole file, syncs it and removes it. On an SSD and under
     /// snapshots the old blocks may outlive this (docs/key-storage.md).
-    static func overwriteAndRemove(_ file: URL) throws {
+    public static func overwriteAndRemove(_ file: URL) throws {
         let descriptor = Darwin.open(file.path, O_WRONLY | O_NOFOLLOW)
         guard descriptor >= 0 else { throw StoreError.system(path: file.path, errno: errno) }
         defer { Darwin.close(descriptor) }
@@ -1682,6 +1739,26 @@ private enum Schema {
             read_receipts INTEGER NOT NULL
         ) STRICT
         """,
+        // This client's own: the bytes of a file kept in the store instead of a folder, which
+        // go with their row of `files` (docs/key-storage.md).
+        """
+        CREATE TABLE IF NOT EXISTS kept_files (
+            position INTEGER PRIMARY KEY,
+            bytes BLOB NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS kept_files_go_with_their_file AFTER DELETE ON files BEGIN
+            DELETE FROM kept_files WHERE position = old.position;
+        END
+        """,
+        // The notes of the app: drafts, read positions, times, pins and its settings, as JSON.
+        """
+        CREATE TABLE IF NOT EXISTS app_notes (
+            only_row INTEGER PRIMARY KEY CHECK (only_row = 1),
+            notes BLOB NOT NULL
+        ) STRICT
+        """,
         // This client's own: the highest position that a row of `messages`, `pending` and
         // `files` ever had (section 39.8), and the message a pending text answers.
         """
@@ -1741,7 +1818,8 @@ private enum Schema {
 
     static let readFiles = """
         SELECT position, contact, direction, message_id, attachment, state, held, saved_as, result,
-            position IN (SELECT avatar_file FROM profiles WHERE avatar_file IS NOT NULL)
+            position IN (SELECT avatar_file FROM profiles WHERE avatar_file IS NOT NULL),
+            position IN (SELECT position FROM kept_files)
         FROM files
         """
     static let readUploads = """

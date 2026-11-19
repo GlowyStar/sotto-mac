@@ -59,9 +59,9 @@ enum Snapshot {
         Shot(name: "settings-dark", dark: true) { $0.openSettings() },
         Shot(name: "settings-narrow", size: CGSize(width: 380, height: 600)) { $0.openSettings() },
         Shot(name: "settings-notifications") { page($0, .notifications) },
-        Shot(name: "settings-notifications-off", dark: true) { model in
-            model.settings.notificationSender = false
-            model.settings.notificationPreview = false
+        Shot(name: "settings-notifications-on", dark: true) { model in
+            model.settings.notificationSender = true
+            model.settings.notificationPreview = true
             page(model, .notifications)
         },
         Shot(name: "settings-chats", size: CGSize(width: 900, height: 1180)) { page($0, .chats) },
@@ -72,7 +72,11 @@ enum Snapshot {
             model.settings.clock24 = false
             page(model, .chats)
         },
-        Shot(name: "settings-data", size: CGSize(width: 900, height: 900)) { page($0, .data) },
+        Shot(name: "settings-data", size: CGSize(width: 900, height: 980)) { page($0, .data) },
+        Shot(name: "settings-data-dark", size: CGSize(width: 900, height: 980), dark: true) { model in
+            model.settings.saveReceivedFiles = true
+            page(model, .data)
+        },
         Shot(name: "settings-privacy") { page($0, .privacy) },
         Shot(name: "settings-privacy-on") { model in
             model.settings.passcode = Passcode("1234")

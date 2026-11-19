@@ -193,7 +193,7 @@ func makeTransport(_ client: sending Client, _ arguments: Arguments) throws -> T
             client: client,
             url: arguments.relay,
             insecure: arguments.insecure,
-            receivedFiles: storeDirectory(arguments).appendingPathComponent(receivedFolder)
+            downloads: .folder(storeDirectory(arguments).appendingPathComponent(receivedFolder))
         )
     } catch let error as URLRefusedError {
         throw CommandError(message: "the relay URL is refused: \(error.message)")
