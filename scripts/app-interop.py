@@ -36,8 +36,13 @@ the run; the first start moves it into the store. Before the first start, the sa
 is the one `sotto verify app` prints, with the halves of the payload swapped, and
 `sotto-mac verify python mark` marks the contact in the app's store; the dump at the end
 still shows it verified, with no warning of a refused key. At the end no file of the app's data
-folder holds a text of the chat or the bytes of a file of the run. Exits 0 only if every
-text and file arrived; stops everything it started.
+folder holds a text of the chat or the bytes of a file of the run. Last, the app itself: its
+signature has the hardened runtime and one entitlement, a DYLD_INSERT_LIBRARIES naming a
+missing library is ignored by the app and stops the unsigned build; `--dump`, `--snapshot`
+and `--send` refuse a store whose `store.key` is of the presence kind before anything is
+unlocked; and a lock while the first-launch screen shows (the auto-lock after one minute)
+closes the store. Exits 0 only if every text and file arrived and every check held; stops
+everything it started.
 
 The data lives in a temporary directory that is removed at the end; `--keep DIR` keeps the
 stores, the relay database, the app log and the pictures in DIR instead.
@@ -48,6 +53,7 @@ import asyncio
 import base64
 import json
 import os
+import plistlib
 import re
 import sqlite3
 import struct
@@ -355,6 +361,7 @@ async def run(run_folder: Path) -> None:
         if launch_file.exists() and not set(json.loads(launch_file.read_text())) <= {"theme"}:
             raise CheckFailed(f"app.json holds {launch_file.read_text()}")
         print("ok   app.json keeps nothing but the theme")
+        await the_app_itself(run_folder, app_dir, log, apps)
     finally:
         for app in apps:
             app.stop()
@@ -662,6 +669,75 @@ async def part_five_both_ways(
         if left:
             raise CheckFailed(f"the store of {label} still holds {left}")
     print("ok   the deleted, replaced and expired texts are in neither store")
+
+
+def open_files(process: subprocess.Popen[bytes]) -> list[str]:
+    """The paths that a process holds open."""
+    listed = subprocess.run(["lsof", "-a", "-p", str(process.pid), "-Fn"], capture_output=True, text=True).stdout
+    return [line[1:] for line in listed.splitlines() if line.startswith("n")]
+
+
+async def the_app_itself(run_folder: Path, app_dir: Path, log: Path, apps: list[App]) -> None:
+    """The signature, the environment of dyld, the scripting flags on a store of the presence
+    kind, and a lock while the first-launch screen shows."""
+    bundle = APP.parent.parent.parent
+    shown = subprocess.run(["codesign", "-dv", bundle], capture_output=True, text=True).stderr
+    flags = re.search(r"flags=0x[0-9a-f]+\(([^)]*)\)", shown)
+    entitlements = plistlib.loads(
+        subprocess.run(["codesign", "-d", "--entitlements", "-", "--xml", bundle], capture_output=True, check=True).stdout
+    )
+    if not flags or "runtime" not in flags.group(1).split(",") or set(entitlements) != {
+        "com.apple.security.cs.disable-library-validation"
+    }:
+        raise CheckFailed(f"the app is signed with {flags and flags.group(0)} and the entitlements {entitlements}")
+    print(f"ok   the app is signed with {flags.group(0)} and only {sorted(entitlements)}")
+
+    missing = run_folder / "missing.dylib"
+    injected = {**os.environ, "DYLD_INSERT_LIBRARIES": str(missing)}
+    unsigned = Path(await command("swift", "build", "-c", "release", "--show-bin-path")) / "Sotto"
+    for binary, honoured in ((unsigned, True), (APP, False)):
+        process = await asyncio.create_subprocess_exec(
+            binary, "--data-dir", app_dir, "--store-info", env=injected,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        async with asyncio.timeout(PATIENCE_SECONDS):
+            _, errors = await process.communicate()
+        tried = str(missing) in errors.decode()
+        if tried != honoured or (process.returncode == 0) == honoured:
+            raise CheckFailed(f"{binary} with DYLD_INSERT_LIBRARIES exited {process.returncode}: {errors.decode()}")
+    print("ok   dyld tries the inserted library for the unsigned build and ignores it for the app")
+
+    presence = run_folder / "presence"
+    presence.mkdir(mode=0o700)
+    key = presence / "store.key"
+    junk = {
+        "version": 1, "protection": "presence", "enclaveKey": base64.b64encode(b"\x01" * 8).decode(),
+        "encapsulatedKey": base64.b64encode(b"\x02" * 65).decode(), "sealedKey": base64.b64encode(b"\x03" * 48).decode(),
+    }
+    key.write_text(json.dumps(junk))
+    key.chmod(0o600)
+    for flag, *rest in (("--dump",), ("--snapshot", str(run_folder / "refused")), ("--send", "python", "never sent")):
+        code, printed, errors = await outcome(APP, "--data-dir", presence, flag, *rest)
+        if code != 1 or printed or f"{flag}: only a store of the test kind answers this" not in errors:
+            raise CheckFailed(f"Sotto {flag} on a store of the presence kind exited {code}: {printed} {errors}")
+    if sorted(path.name for path in presence.iterdir()) != ["store.key"] or (run_folder / "refused").exists():
+        raise CheckFailed(f"a refused flag wrote {sorted(presence.iterdir())}")
+    print("ok   --dump, --snapshot and --send refuse a store of the presence kind before any unlock")
+
+    welcome = run_folder / "welcome"
+    welcome.mkdir(mode=0o700)
+    (welcome / "app.json").write_text(json.dumps({"settings": {"notifications": False, "autoLockMinutes": 1}}))
+    store = str((welcome / "store.db").resolve())
+    apps.append(App(welcome, "ws://127.0.0.1:9/ws", log))
+    process = apps[-1].process
+    await until("the first-launch screen holds the new store open", lambda: store in open_files(process))
+    await until(
+        "the auto-lock on the first-launch screen closed the store",
+        lambda: store not in open_files(process), patience=FILE_PATIENCE_SECONDS, step=1,
+    )
+    if process.poll() is not None:
+        raise CheckFailed(f"the app on the first-launch screen exited {process.returncode}")
+    apps[-1].stop()
 
 
 async def main() -> int:

@@ -55,16 +55,15 @@ public enum StoreKeys {
         }
         try ClientStore.makePrivateDirectory(directory)
         let file = directory.appendingPathComponent(fileName)
-        if !FileManager.default.fileExists(atPath: file.path) {
+        if try storedKey(directory) == nil {
             let store = directory.appendingPathComponent(ClientStore.fileName)
             if try ClientStore.holdsEncryptedPages(store) {
                 throw StoreError.missingKey(path: file.path)
             }
-            try write(enclave.withLock { try make(protection) }, to: file)
+            let plain = try ClientStore.isPlain(store)
+            try write(enclave.withLock { try make(protection, overPlainStore: plain) }, to: file)
         }
-        guard let wrapped = try? JSONDecoder().decode(WrappedKey.self, from: Data(contentsOf: file)),
-            wrapped.version == wrapVersion
-        else { throw StoreError.damagedKey(path: file.path) }
+        guard let wrapped = try storedKey(directory) else { throw StoreError.damagedKey(path: file.path) }
         guard wrapped.protection == protection else {
             throw StoreError.protectionMismatch(path: file.path, stored: wrapped.protection, asked: protection)
         }
@@ -93,6 +92,26 @@ public enum StoreKeys {
     /// The protection of the key held for `directory`; nil while it is locked.
     public static func protection(_ directory: URL) -> StoreProtection? {
         if case .open(_, let protection) = registry.get(directory) { protection } else { nil }
+    }
+
+    /// The kind that the `store.key` of `directory` names, read without the Secure Enclave;
+    /// nil when there is none.
+    public static func storedProtection(_ directory: URL) throws -> StoreProtection? {
+        try storedKey(directory)?.protection
+    }
+
+    /// Refuses unless the store in `directory` is of the test kind: by the key held for it,
+    /// else by its `store.key`, else, for a folder without one, by what the run asks for.
+    /// Nothing is unlocked and the Secure Enclave is not asked, so a store of the presence
+    /// kind is refused without a prompt. The scripting aids that print, draw or act on the
+    /// chats answer for such a store only (docs/key-storage.md).
+    public static func requireTestKind(
+        _ directory: URL, environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws {
+        let kind =
+            try protection(directory) ?? storedProtection(directory)
+            ?? StoreProtection.asked(for: directory, environment: environment)
+        guard kind == .test else { throw StoreError.notATestStore }
     }
 
     /// Whether `directory` is one of `ownerDirectories`, also by another spelling of the
@@ -143,6 +162,40 @@ public enum StoreKeys {
         var enclaveKey: Data
         var encapsulatedKey: Data
         var sealedKey: Data
+        /// Set when the key was made over a plain store of the version before the encryption,
+        /// until that store is encrypted: only then is a plain `store.db` encrypted under it.
+        var plainStore: Bool?
+    }
+
+    /// The `store.key` of `directory`; nil when there is none.
+    static func storedKey(_ directory: URL) throws -> WrappedKey? {
+        let file = directory.appendingPathComponent(fileName)
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        guard let wrapped = try? JSONDecoder().decode(WrappedKey.self, from: Data(contentsOf: file)),
+            wrapped.version == wrapVersion
+        else { throw StoreError.damagedKey(path: file.path) }
+        return wrapped
+    }
+
+    /// Whether a plain `store.db` in `directory` is the store of the previous version that its
+    /// key was made over and that is not encrypted yet. A plain file found once the store was
+    /// encrypted was put there by someone else (docs/key-storage.md).
+    static func expectsPlainStore(_ directory: URL) throws -> Bool {
+        try storedKey(directory)?.plainStore == true
+    }
+
+    /// Records in `store.key` that its store is encrypted, so that a plain `store.db` is
+    /// refused from now on; the key it wraps stays the same. Called under the lock of the
+    /// directory that every open of the store holds; the file is replaced by a rename.
+    static func recordEncrypted(_ directory: URL) throws {
+        guard var wrapped = try storedKey(directory), wrapped.plainStore != nil else { return }
+        wrapped.plainStore = nil
+        let file = directory.appendingPathComponent(fileName)
+        let staging = file.appendingPathExtension(UUID().uuidString)
+        defer { unlink(staging.path) }
+        try stage(wrapped, at: staging)
+        guard rename(staging.path, file.path) == 0 else { throw StoreError.system(path: file.path, errno: errno) }
+        try ClientStore.fullSync(directory)
     }
 
     static let suite = HPKE.Ciphersuite.P256_SHA256_AES_GCM_256
@@ -151,7 +204,7 @@ public enum StoreKeys {
         Data("sotto-mac store key \(wrapVersion) \(protection.rawValue)".utf8)
     }
 
-    static func make(_ protection: StoreProtection) throws -> WrappedKey {
+    static func make(_ protection: StoreProtection, overPlainStore: Bool = false) throws -> WrappedKey {
         var flags: SecAccessControlCreateFlags = [.privateKeyUsage]
         if protection == .presence { flags.insert(.userPresence) }
         var failure: Unmanaged<CFError>?
@@ -169,7 +222,7 @@ public enum StoreKeys {
         let sealed = try sender.seal(storeKey)
         return WrappedKey(
             version: wrapVersion, protection: protection, enclaveKey: enclaveKey.dataRepresentation,
-            encapsulatedKey: sender.encapsulatedKey, sealedKey: sealed)
+            encapsulatedKey: sender.encapsulatedKey, sealedKey: sealed, plainStore: overPlainStore ? true : nil)
     }
 
     static func unwrap(_ wrapped: WrappedKey, context: LAContext?) throws -> KeyBytes {
@@ -201,17 +254,22 @@ public enum StoreKeys {
     /// opener put there first: every opener then unwraps the one key the file holds.
     static func write(_ wrapped: WrappedKey, to file: URL) throws {
         let staging = file.appendingPathExtension(UUID().uuidString)
-        let descriptor = open(staging.path, O_WRONLY | O_CREAT | O_EXCL, ClientStore.fileMode)
-        guard descriptor >= 0 else { throw StoreError.system(path: staging.path, errno: errno) }
         defer { unlink(staging.path) }
-        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        try handle.write(contentsOf: JSONEncoder().encode(wrapped))
-        guard fcntl(descriptor, F_FULLFSYNC) == 0 else { throw StoreError.system(path: staging.path, errno: errno) }
-        try handle.close()
+        try stage(wrapped, at: staging)
         guard link(staging.path, file.path) == 0 || errno == EEXIST else {
             throw StoreError.system(path: file.path, errno: errno)
         }
         try ClientStore.fullSync(file.deletingLastPathComponent())
+    }
+
+    /// Writes `wrapped` into a new file of mode 0600 and syncs it.
+    private static func stage(_ wrapped: WrappedKey, at staging: URL) throws {
+        let descriptor = open(staging.path, O_WRONLY | O_CREAT | O_EXCL, ClientStore.fileMode)
+        guard descriptor >= 0 else { throw StoreError.system(path: staging.path, errno: errno) }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        try handle.write(contentsOf: JSONEncoder().encode(wrapped))
+        guard fcntl(descriptor, F_FULLFSYNC) == 0 else { throw StoreError.system(path: staging.path, errno: errno) }
+        try handle.close()
     }
 
     static func wipe(_ data: inout Data) {

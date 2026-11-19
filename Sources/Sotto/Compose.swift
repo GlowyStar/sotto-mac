@@ -139,6 +139,19 @@ struct GrowingTextView: NSViewRepresentable {
         var pasteImage: ((Data) -> Void)?
         var appliedSize = 0
 
+        /// A copy of the draft is a copy of the chats (docs/key-storage.md).
+        override func copy(_ sender: Any?) {
+            let before = NSPasteboard.general.changeCount
+            super.copy(sender)
+            if NSPasteboard.general.changeCount != before { ChatPasteboard.mark() }
+        }
+
+        override func cut(_ sender: Any?) {
+            let before = NSPasteboard.general.changeCount
+            super.cut(sender)
+            if NSPasteboard.general.changeCount != before { ChatPasteboard.mark() }
+        }
+
         /// Files on the pasteboard and a picture without text go to the send box (DESIGN.md 14.1).
         override func paste(_ sender: Any?) {
             let board = NSPasteboard.general

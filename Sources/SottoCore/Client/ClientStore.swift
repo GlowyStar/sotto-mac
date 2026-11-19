@@ -24,6 +24,8 @@ public enum StoreError: Error, Equatable, Sendable {
     case notSQLCipher
     case migrationLostRows(table: String)
     case notATestStore
+    /// A plain SQLite file in place of a store that was encrypted already.
+    case plainStoreRefused(path: String)
 }
 
 extension StoreError: CustomStringConvertible {
@@ -46,6 +48,8 @@ extension StoreError: CustomStringConvertible {
         case .notSQLCipher: "the store is not served by SQLCipher"
         case .migrationLostRows(let table): "the encrypted copy of the store lacks rows of \(table); the plain store is kept"
         case .notATestStore: "only a store of the test kind answers this"
+        case .plainStoreRefused(let path):
+            "\(path) is a plain SQLite file, but this store was encrypted already: someone else put it there, and it is not opened"
         }
     }
 }
@@ -299,7 +303,7 @@ public final class ClientStore {
     /// Opens the store in `directory` with the key `StoreKeys` holds for it, making the
     /// directory and the file when they are missing, and refuses either when its mode has
     /// one of the bits 077. A plain store of a version before the encryption is encrypted
-    /// first (docs/key-storage.md).
+    /// first, once: a plain file found after that is refused (docs/key-storage.md).
     public init(directory: URL) throws {
         self.directory = directory
         path = directory.appendingPathComponent(Self.fileName)
@@ -309,10 +313,14 @@ public final class ClientStore {
             try Self.makePrivateFile(path)
             try StoreKeys.withKeyLiteral(directory) { literal in
                 if try Self.isPlain(path) {
+                    guard try StoreKeys.expectsPlainStore(directory) else {
+                        throw StoreError.plainStoreRefused(path: path.path)
+                    }
                     try Self.encrypt(path, literal)
                 }
                 connection = try Self.connect(path, literal, flags: SQLITE_OPEN_READWRITE)
             }
+            try StoreKeys.recordEncrypted(directory)
         }
         try Self.check(connection)
         try query("PRAGMA journal_mode=DELETE")
@@ -1188,6 +1196,7 @@ public final class ClientStore {
     // MARK: SQLite
 
     private func readBlob(_ table: String, _ column: String, row: Int64, offset: Int, length: Int) throws -> Data {
+        guard let connection else { throw StoreError.locked }
         var handle: OpaquePointer?
         defer { sqlite3_blob_close(handle) }
         var code = sqlite3_blob_open(connection, "main", table, column, row, 0, &handle)
@@ -1222,7 +1231,7 @@ public final class ClientStore {
     }
 
     var isInTransaction: Bool {
-        sqlite3_get_autocommit(connection) == 0
+        connection != nil && sqlite3_get_autocommit(connection) == 0
     }
 
     @discardableResult
@@ -1236,6 +1245,8 @@ public final class ClientStore {
     /// Runs one statement with its values bound as parameters and returns its rows.
     @discardableResult
     func query(_ statement: String, _ parameters: [SQLValue] = []) throws -> [[SQLValue]] {
+        // A closed connection answers as a locked store.
+        guard let connection else { throw StoreError.locked }
         var prepared: OpaquePointer?
         let code = sqlite3_prepare_v2(connection, statement, -1, &prepared, nil)
         defer { sqlite3_finalize(prepared) }

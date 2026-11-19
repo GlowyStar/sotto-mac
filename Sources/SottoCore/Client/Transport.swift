@@ -406,6 +406,12 @@ public actor Transport {
         await dialed?.close(code: Self.normalClosure)
     }
 
+    /// Closes the connection of the client to the store, once `run` has ended: a later call
+    /// that reads or writes the store fails as a locked store.
+    public func closeStore() {
+        client.store.close()
+    }
+
     /// Commits a text to the outbox and sends it; a Send without a Stored is sent again
     /// after the next login. A contact without a session gets its bundle fetched first,
     /// which waits for a login.

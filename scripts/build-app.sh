@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds build/Sotto.app: the release binary, SQLCipher.framework, Info.plist and an
-# ad-hoc signature.
+# ad-hoc signature with the hardened runtime.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -18,6 +18,9 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$app/Contents/Mac
 mv -f "$app/Contents/MacOS/Sotto.new" "$app/Contents/MacOS/Sotto"
 cp -f Info.plist "$app/Contents/Info.plist"
 # The requirement names the bundle, not the hash of this build, so macOS grants keyed to
-# it survive a rebuild.
-codesign --force --sign - -r='designated => identifier "com.glowystar.sotto"' "$app"
+# it survive a rebuild. Under the hardened runtime dyld ignores DYLD_* variables; its one
+# entitlement lets the process load SQLCipher.framework, which Zetetic signed as another
+# team than this ad-hoc signature.
+codesign --force --sign - --options runtime --entitlements Sotto.entitlements \
+    -r='designated => identifier "com.glowystar.sotto"' "$app"
 echo "$PWD/$app"

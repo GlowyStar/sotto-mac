@@ -45,8 +45,8 @@ interoperate with sotto's command-line client byte for byte.
   reading them.
 - The store is encrypted at rest: SQLCipher over the whole `store.db`, its random 256-bit
   key wrapped to a Secure Enclave key of this Mac that asks for Touch ID or the Mac
-  password; the app and `sotto-mac` open it only after that, and every lock drops the key
-  (`docs/key-storage.md`). Drafts, settings, pasted pictures and received files are kept
+  password; the app and `sotto-mac` open it only after that, and every lock, also on the
+  first-launch screen, drops the key (`docs/key-storage.md`). Drafts, settings, pasted pictures and received files are kept
   inside it too, and notifications name nobody and quote nothing by default. The tests
   check that no text of the store is readable in its files, that after a run no file of
   the data folder holds a text, a pasted picture or a received file of it, and that a copy
@@ -64,7 +64,7 @@ SQLCipher 4.20.0, Zetetic's official Swift package, a binary framework that
 ```sh
 swift build                 # all targets
 scripts/test.sh             # the tests (Swift Testing)
-scripts/build-app.sh        # build/Sotto.app, signed ad hoc
+scripts/build-app.sh        # build/Sotto.app, signed ad hoc with the hardened runtime
 open build/Sotto.app
 swift run sotto-mac         # the command-line tool
 ```
@@ -179,7 +179,15 @@ Launch arguments of the app:
 | `--send-file <name> <path>` | the same for a file, through the action of the send box; a picture goes as a photo |
 | `--profile <name> <path>` | a scripting aid: once connected, sets the own profile through the action of "Save" on the Edit profile page, the picture cut to its centered square; an empty path is no picture |
 | `--read <name>` | a scripting aid: the chat of that contact counts as open on the screen for the whole run, so its messages are seen as they arrive (their read receipts and timers start) |
-| `--reply <name> <text>`, `--edit <name> <text>`, `--delete <name>`, `--timer <name> <seconds>` | scripting aids: once connected, a reply to the newest message of the contact, an edit of the newest own message that can still be edited, a delete for both of the newest own message, and the timer of the chat, each through the action of the screen |
+| `--reply <name> <text>`, `--edit <name> <text>`, `--delete <name>`, `--timer <name> <seconds>`, `--reset <name>` | scripting aids: once connected, a reply to the newest message of the contact, an edit of the newest own message that can still be edited, a delete for both of the newest own message, the timer of the chat, and a new session with the contact, each through the action of the screen |
+
+The flags that print, draw or act on the chats serve the check scripts and answer for a
+store of the test kind only, the kind that `SOTTO_STORE_PROTECTION=test` makes: `--dump`,
+`--snapshot` and `--safety-number` with `--data-dir`, and `--send`, `--send-file`,
+`--profile`, `--read`, `--reply`, `--edit`, `--delete`, `--timer` and `--reset`. Any other
+store, the owner's included, is refused before it is unlocked, with no sheet ("--dump:
+only a store of the test kind answers this"). `--store-info` works on any store, and
+`--demo` or `--snapshot` without `--data-dir` draw mock data.
 
 A text sent to a contact without a session (nobody has written yet) waits in the store
 with a clock until a connection fetches the contact's keys, also across a restart. A
@@ -267,7 +275,10 @@ the mark.
 
 The app starts locked and opens the store after the system sheet of Touch ID or the Mac
 password. After the auto-lock time, on Cmd+L, on sleep (unless turned off) and on quit it
-closes the store and overwrites its key in memory; the next unlock asks again. A local
+overwrites the store key in memory and closes the store, also on the first-launch screen;
+the next unlock asks again. On sleep the Mac waits until the store is closed (30 seconds
+at most). A text or a picture copied from a chat is marked for clipboard managers as
+concealed and transient, and a lock clears the pasteboard while it still holds it. A local
 passcode, when set, is asked after that: it only covers the window, nothing is encrypted
 with it, and it cannot be recovered. While the store is locked the app has no connection.
 
@@ -280,7 +291,9 @@ ended whole after its next start; the profiles both ways; a reply, an edit, a de
 both, the read marks and a message under a short timer each way; the safety number of
 both sides and a mark that stays through the run; then a check that no file
 of the app's data folder holds a text or a file of the run in the clear, a dump and a
-snapshot of its store):
+snapshot of its store; last the app itself: the hardened runtime of its signature, a
+`DYLD_INSERT_LIBRARIES` that it ignores, the scripting flags refused on a store of the
+presence kind, and a lock on the first-launch screen that closes the store):
 
 ```sh
 ../../python/sotto/.venv/bin/python scripts/app-interop.py [--keep DIR]
@@ -297,14 +310,19 @@ Limits as they are:
   encrypted store with the other private keys (`docs/key-storage.md`); the last-resort one
   goes with its signed prekey, a one-time one when the session it started is accepted.
 - What leaves the store is readable: a copy made with "Save as..." or "Save received
-  files automatically", a file opened in another app while the store is open, what
-  "Copy" puts on the pasteboard, and, with the name or the preview turned on, what macOS
-  keeps of each notification in its own notification database. A store, an `app.json` or
+  files automatically", a file opened in another app until its message goes or the store
+  locks, what "Copy" puts on the pasteboard until a lock, and, with the name or the preview
+  turned on, what macOS keeps of each notification in its own notification database. A store, an `app.json` or
   pasted pictures of a previous version are encrypted or moved on the first launch and
   their plain files overwritten, but older Time Machine snapshots and backups keep them
   (`docs/key-storage.md`).
-- Whoever knows the Mac password, or has malware running as the user while the store is
-  open, gets the chats.
+- The presence check stops someone at the keyboard who does not know the Mac password, and
+  any copy of the store taken to another Mac or read offline. It does not stop code that
+  runs as the user: such code can ask for the same sheet in Sotto's name, and an approval
+  given as usual opens the chats to it; it can wait for the next normal unlock; and while
+  Sotto is unlocked it reads what the window shows. Whoever knows the Mac password gets the
+  chats, and a Time Machine backup or a local snapshot of the data folder opens on this Mac
+  with it, also one from before a Reset (`docs/key-storage.md`).
 - One device per identity: when the same identity logs in elsewhere, the relay closes the
   older connection and the app says so instead of reconnecting.
 - One-to-one chats with texts, photos and files. No groups, no albums, no reactions or

@@ -295,8 +295,7 @@ extension AppModel {
     func copyImage(_ message: Message) {
         Task { [weak self] in
             guard let data = await self?.contents(message), let image = NSImage(data: data) else { return }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.writeObjects([image])
+            ChatPasteboard.copy(image)
             self?.showToast("Image copied")
         }
     }
@@ -309,7 +308,8 @@ extension AppModel {
     }
 
     /// The bytes of the file of a message, whole: the file on this Mac, else what the store
-    /// keeps. For a photo to decode or copy; Save as and Open stream through `writeKept`.
+    /// keeps. For a photo to decode or copy; Save as streams through `writeKept`, Open through
+    /// `Messenger.openCopy`.
     func contents(_ message: Message) async -> Data? {
         guard let file = message.file else { return nil }
         if let url = Media.localURL(file) { return try? Data(contentsOf: url) }
@@ -335,48 +335,27 @@ extension AppModel {
         return Media.picture(data, side: side, key: key)
     }
 
-    /// The private folder where a file the store keeps is written for another app to open;
-    /// emptied at launch, on lock and before quitting. Spotlight skips a `.noindex` folder.
-    var openedFolder: URL? {
-        dataDirectory?.appendingPathComponent("temp.noindex", isDirectory: true)
-    }
-
-    /// Writes the file into the private folder, a piece at a time, and opens it in its app;
-    /// a lock that comes meanwhile takes the copy away instead.
+    /// Has the messenger write the file into the private folder of the data folder and opens
+    /// it in its app; the copy goes when its message goes, on lock and on quit.
     func openKept(_ message: Message) {
-        guard let file = message.file, let folder = openedFolder, !storeLocked else { return }
+        guard let file = message.file, let position = message.position, let messenger, !storeLocked else { return }
         Task { [weak self] in
-            guard let self else { return }
             do {
-                let (url, descriptor) = try ReceivedFiles.create(named: file.name, into: folder)
-                var excluded = URLResourceValues()
-                excluded.isExcludedFromBackup = true
-                var marked = folder
-                try? marked.setResourceValues(excluded)
-                let written = await writeKept(message, to: descriptor)
-                guard written, !storeLocked else {
-                    ReceivedFiles.discard(url, descriptor)
-                    if !storeLocked { showToast("Could not open the file.") }
+                guard let url = try await messenger.openCopy(position, named: file.name) else {
+                    if self?.storeLocked == false { self?.showToast("Could not open the file.") }
                     return
                 }
-                try ReceivedFiles.finish(url, descriptor)
                 NSWorkspace.shared.open(url)
             } catch {
-                showToast("Could not open: \(error.localizedDescription)")
+                self?.showToast("Could not open: \(error.localizedDescription)")
             }
         }
     }
 
-    /// Overwrites and removes what the private folder holds.
+    /// Overwrites and removes what the private folder holds; emptied at launch, on lock,
+    /// before quitting and by Reset.
     func clearOpenedFiles() {
-        guard let folder = openedFolder, let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else {
-            return
-        }
-        for name in names {
-            let url = folder.appendingPathComponent(name)
-            if (try? ClientStore.overwriteAndRemove(url)) == nil { try? FileManager.default.removeItem(at: url) }
-        }
-        try? FileManager.default.removeItem(at: folder)
+        if let dataDirectory { Messenger.clearOpened(directory: dataDirectory) }
     }
 
     /// The photos of a chat, oldest first: the pictures of the media viewer.

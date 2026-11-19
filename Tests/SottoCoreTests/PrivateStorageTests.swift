@@ -130,6 +130,60 @@ private func filesUnder(_ directory: URL) -> [(URL, Data)] {
     #expect(try store.keptFile(inPasted) == nil)
 }
 
+/// A copy written for another app to open is overwritten and removed as soon as its message
+/// is gone: deleted, then expired; the others go when the messenger closes.
+@Test func anOpenedCopyGoesWhenItsMessageIsDeletedOrExpires() async throws {
+    let folder = Folder()
+    let directory = folder.url.appendingPathComponent("app")
+    // A ws address off loopback is refused, so the messenger runs on a client alone.
+    let messenger = try Messenger(directory: directory, relay: "ws://relay.example.org/ws")
+    await messenger.start()
+    _ = try await messenger.createIdentity()
+    let bob = Data(repeating: 7, count: 32)
+    let other = try ClientStore(directory: directory)
+    try other.transaction { try other.addContact(bob, name: "bob") }
+    func received(_ id: UInt8, _ bytes: Data) throws -> Int64 {
+        try other.transaction {
+            let position = try other.logMessage(bob, direction: .incoming, messageID: Data([id]), text: "")
+            let file = try other.addFile(bob, incoming: true, messageID: Data([id]), attachment: Sotto_Attachment(), state: .received)
+            try other.keepFile(file, bytes)
+            return position
+        }
+    }
+    let deleted = try received(1, Data("deleted for me".utf8))
+    let expiring = try received(2, Data("under a timer".utf8))
+    let staying = try received(3, Data("stays until the close".utf8))
+    try await until { try await messenger.state().chats.first?.messages.count == 3 }
+
+    var opened: [URL] = []
+    for position in [deleted, expiring, staying] {
+        opened.append(try #require(try await messenger.openCopy(position, named: "notes.txt")))
+    }
+    let copies = opened
+    #expect(copies.map { $0.deletingLastPathComponent().lastPathComponent } == Array(repeating: Messenger.openedFolder, count: 3))
+    #expect(FileManager.default.contents(atPath: copies[0].path) == Data("deleted for me".utf8))
+    // A second name of the first copy sees what is written over it.
+    let witness = folder.url.appendingPathComponent("witness")
+    #expect(link(copies[0].path, witness.path) == 0)
+
+    try await messenger.deleteMessage(deleted)
+    #expect(!FileManager.default.fileExists(atPath: copies[0].path))
+    #expect(FileManager.default.contents(atPath: witness.path) == Data(count: 14), "the copy was overwritten")
+    #expect(FileManager.default.fileExists(atPath: copies[1].path))
+
+    let now = Int64(Date().timeIntervalSince1970)
+    try other.transaction {
+        try other.saveState(bob, incoming: true, messageID: Data([2]), state: NewState(writtenAt: now, expiresAfter: 1, expiresAt: now + 1))
+    }
+    try await until { !FileManager.default.fileExists(atPath: copies[1].path) }
+    #expect(try await messenger.state().chats.first?.messages.map(\.id) == [staying])
+    #expect(FileManager.default.fileExists(atPath: copies[2].path))
+
+    other.close()
+    await messenger.close()
+    #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent(Messenger.openedFolder).path))
+}
+
 extension MessengerRelayTests {
     @Test func nothingOfTheChatsIsReadableInTheDataFolder() async throws {
         let relay = try await RealRelay()

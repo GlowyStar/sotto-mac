@@ -4,8 +4,9 @@
 
 The whole store, `store.db` and its rollback journal, is encrypted with SQLCipher under a
 random 256-bit key; that key is kept on disk only wrapped to a Secure Enclave key of this
-Mac, whose use needs the user's presence (Touch ID or the Mac password). Nothing about the
-store is in the keychain. The directory keeps mode 0700 and the files 0600.
+Mac, whose use needs the user's presence (Touch ID or the Mac password; Apple's
+documentation of the policy names a paired Apple Watch too, which was not tried here).
+Nothing about the store is in the keychain. The directory keeps mode 0700 and the files 0600.
 
 Since SOTTO-45 it holds the private keys of PQXDH too (below, "Post-quantum prekeys").
 Since SOTTO-43 the store also holds what the app kept beside it: its notes (drafts, read
@@ -17,8 +18,8 @@ why, is listed in "What is written outside the store".
 | Pages | SQLCipher 4.20.0 community edition by Zetetic (the official Swift package `SQLCipher.swift`, a binary framework signed with Zetetic's Developer ID), crypto provider CommonCrypto. Its defaults of version 4: every page of 4096 bytes is AES-256-CBC with a random IV and an HMAC-SHA512, the journal likewise; the first 16 bytes of the file are its salt. |
 | Store key | 32 bytes from `SecRandomCopyBytes`, made on this Mac, given to SQLCipher as a raw key (`x'<64 hex digits>'` through `sqlite3_key`), so no passphrase derivation runs. |
 | Wrap | HPKE of RFC 9180 in base mode, CryptoKit `HPKE.Ciphersuite.P256_SHA256_AES_GCM_256` (DHKEM P-256 with HKDF-SHA256, HKDF-SHA256, AES-256-GCM), to the public key of the Secure Enclave key; info `sotto-mac store key 1 <kind>`, no associated data. |
-| Secure Enclave key | `SecureEnclave.P256.KeyAgreement.PrivateKey`, access control `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` with `.privateKeyUsage` and, for the presence kind, `.userPresence`: the Secure Enclave itself asks for Touch ID or the Mac password before each key agreement. The private key never leaves the chip; its `dataRepresentation` is a blob that only this Secure Enclave can use. |
-| `store.key` | JSON next to the store, mode 0600, written by a rename: `version` 1, `protection` (`presence` or `test`), `enclaveKey` (the blob), `encapsulatedKey` (65 bytes), `sealedKey` (the 32 bytes and the 16-byte tag). |
+| Secure Enclave key | `SecureEnclave.P256.KeyAgreement.PrivateKey`, access control `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` with `.privateKeyUsage` and, for the presence kind, `.userPresence`: the Secure Enclave itself asks for the user's presence (Touch ID or the Mac password; on the Apple Watch see above) before each key agreement. The private key never leaves the chip; its `dataRepresentation` is a blob that only this Secure Enclave can use. |
+| `store.key` | JSON next to the store, mode 0600, put in place by `link(2)`, which never replaces a key already there: `version` 1, `protection` (`presence` or `test`), `enclaveKey` (the blob), `encapsulatedKey` (65 bytes), `sealedKey` (the 32 bytes and the 16-byte tag), and `plainStore` while the key waits to encrypt a plain store of the previous version (below), after which a rename replaces the file by one without it and with the same key. |
 
 Every connection checks, before it serves anything, that its key opens the pages (else
 "the key does not open this store") and that `PRAGMA cipher_version` is not empty (else
@@ -74,14 +75,19 @@ identity signed in place of the pinned one is refused, the time goes into the ap
 ## Unlock and lock
 
 - The app starts locked. At launch it shows the system sheet of Touch ID or the Mac password
-  with the reason "open your chats"; the evaluated `LAContext` is handed to the Secure
-  Enclave key, so one sheet unwraps the key. Cancel leaves the window on "Sotto is
-  locked" with an Unlock button, which asks again. The passcode, when one is set, is asked
+  (or a paired Apple Watch, where macOS offers it) with the reason "open your chats"; the
+  evaluated `LAContext` is handed to the Secure Enclave key, so one sheet unwraps the key.
+  Cancel leaves the window on "Sotto is locked" with an Unlock button, which asks again. The passcode, when one is set, is asked
   after the store opens: it still only covers the window.
 - The idle time of Auto-lock, Cmd+L, "Lock Sotto now", sleep (with "Lock when the Mac
-  sleeps", on by default) and quit stop the messenger, close every connection to the
-  store and overwrite the key bytes; the next unlock asks again. While the store is locked
-  there is no connection to the relay, so messages wait there.
+  sleeps", on by default) and quit overwrite the key bytes at once, then stop the messenger
+  and close every connection to the store, the transport's included; the next unlock asks
+  again. A lock works from the moment the store is open, also on the first-launch screen
+  before Continue. On sleep the Mac waits for it: Sotto answers the system's sleep
+  notification of IOKit (`IOAllowPowerChange`) once the store is closed, and macOS sleeps
+  anyway after 30 seconds. A lock also clears the pasteboard while it still holds a text or
+  a picture copied from the chats (below). While the store is locked there is no
+  connection to the relay, so messages wait there.
 - `sotto-mac` unwraps the key once per command; the sheet names the data directory.
 - In memory the key lives in an `mlock`ed buffer that `memset_s` overwrites on lock, and
   its hex spelling for SQLCipher in a second buffer overwritten after each open. Out of
@@ -111,6 +117,19 @@ identity signed in place of the pinned one is refused, the time goes into the ap
 - The tests call `StoreKeys.unlock(_:protection: .test)` themselves or rely on the variable
   of `scripts/test.sh`; `sotto-mac test-query` (left out of its help) answers the scripts'
   read-only checks from a store of the test kind only.
+- The scripting flags of the app answer for a store of the test kind only: `--dump`,
+  `--snapshot` and `--safety-number` with `--data-dir`, and `--send`, `--send-file`,
+  `--profile`, `--read`, `--reply`, `--edit`, `--delete`, `--timer` and `--reset` (which act
+  on the default folder without `--data-dir`). The kind is read from `store.key` (for a
+  folder without one, from what the run asks for) before anything is unlocked, and again
+  from the key held after the unlock: any other store is refused ("--dump: only a store of
+  the test kind answers this", exit 1) and no sheet shows. Without this rule any process of
+  the user could start the app binary on the owner's folder with `--dump` while Sotto is
+  locked, and the sheet would name Sotto and say "open your chats" as at every launch.
+  `--store-info` prints no chat and works on any store; `--demo` and `--snapshot` without
+  `--data-dir` draw mock data. The commands of `sotto-mac` are the owner's tool by hand and
+  work on any store: each shows a sheet that names its folder, none prints the stored
+  history, and `chat` prints only what arrives while it runs.
 
 ## The store of the previous version
 
@@ -124,6 +143,20 @@ the previous version. The first open makes the key (one sheet) and then:
 3. hard-links the plain store as `store.db.plain` and renames the copy over `store.db`:
    until this rename the plain store is the store and whole, after it the encrypted one is;
 4. writes zeros over the whole of `store.db.plain`, syncs it and removes it.
+
+The key made over a plain store says so in `store.key` (`plainStore`), and once the
+encrypted store is in place `store.key` is replaced, under the same lock, by one without
+it. Only such a key encrypts a plain `store.db`: next to any other key, a key of a version
+before this record included, a plain file is refused ("... is a plain SQLite file, but
+this store was encrypted already") and left as it is. So whoever can write the folder
+while Sotto is locked cannot have a store of his own, with an identity he chose, encrypted
+under the key that is there. This does not make the files of the folder authentic: the
+same writer can delete `store.key` and `store.db` and leave a plain store, which the next
+launch takes for one of the previous version after the usual sheet; the owner's chats are
+then gone from the window. A store left by an encryption of the version before this record
+that stopped before its rename (`store.key` there, `store.db` still plain) is refused as
+well; if no encrypted store ever lived in that folder, removing `store.key` lets the next
+launch encrypt it.
 
 Every open of a store holds an exclusive `flock` on the data directory while it checks
 for leftovers, migrates and opens, and `store.key` is put in place by a link that never
@@ -167,9 +200,16 @@ SSD and older snapshots and backups keep the old blocks.
 ## Reset
 
 "Reset Sotto..." deletes `store.db`, its journal, `store.key` and `app.json`, overwrites
-and removes the folder `temp.noindex`, and drops the key. With `store.key` gone,
-whatever pages of the old store remain on the disk can never be decrypted again. The next
-store gets a new key after one more sheet.
+and removes the folder `temp.noindex`, and drops the key. The next store gets a new key
+after one more sheet.
+
+Deleting `store.key` does not erase the Secure Enclave key it wrapped: that key stays in
+the chip, and `store.key` held only its blob and the wrapped store key. Pages of the old
+store left on the disk do not open without a copy of `store.key`, but a Time Machine backup
+or a local APFS snapshot taken before the Reset holds both files, and it opens on this Mac
+with Touch ID or the Mac password like the store it was. To leave nothing that opens, delete
+the local snapshots taken before the Reset (`tmutil listlocalsnapshots /`,
+`tmutil deletelocalsnapshots <date>`) and the backups that hold the data folder.
 
 ## A Mac without a Secure Enclave
 
@@ -179,16 +219,28 @@ button and `sotto-mac` prints it and exits 1. There is no fallback to a weaker k
 
 ## What it protects and what it does not
 
-- A copy of the data folder, a disk image, a backup or the folder on another Mac: the pages
-  open only with the store key, which exists only wrapped to the Secure Enclave of this
-  Mac. A copy to another folder of this Mac opens with the user's presence: same chip, same
-  user.
-- This Mac in someone else's hands: the Secure Enclave asks for Touch ID or the Mac password
-  first. Whoever knows the Mac password opens the chats.
-- Not protected: malware that runs as the user while the store is open; what the window
-  shows; and what the user lets out of the store, each listed in "What is written outside
-  the store" below: a copy made with "Save as..." or by automatic saving, a file opened in
-  another app, the pasteboard, and notifications with the name or the preview turned on.
+- Stopped: a copy of the store taken to another Mac or read offline (a disk image, a disk
+  in another machine, a backup restored elsewhere): the pages open only with the store key,
+  which exists only wrapped to the Secure Enclave of this Mac.
+- Stopped: someone at the keyboard of this Mac who does not know the Mac password. The
+  Secure Enclave asks for the user's presence first; whoever knows the Mac password opens
+  the chats.
+- Not stopped: a copy on this Mac. It opens with the user's presence wherever it lies: in
+  another folder, in a Time Machine backup or a local snapshot, also one from before a
+  Reset (above). Whether another account of this Mac, such as an administrator who copies
+  the folder with sudo, can use the Secure Enclave key was not measured.
+- Not stopped: code that runs as the user. It can ask for the same sheet in Sotto's name
+  (with a program of its own, or a changed copy of Sotto, which an ad-hoc signature does
+  not bind to the key; the scripting flags of Sotto itself refuse such a store, above), and
+  a user who approves it as usual opens the chats to it; it can wait for the next normal
+  unlock; and while Sotto is unlocked it reads what the window shows. The hardened runtime
+  of the signature makes dyld ignore `DYLD_INSERT_LIBRARIES` (`scripts/app-interop.py`
+  checks it), but the app bundle is the user's files, and whoever can write them can
+  replace the code.
+- Not protected: what the user lets out of the store, each listed in "What is written
+  outside the store" below: a copy made with "Save as..." or by automatic saving, a file
+  opened in another app, the pasteboard, and notifications with the name or the preview
+  turned on.
 
 ## Files
 
@@ -234,8 +286,8 @@ one was read from is the user's own and stays.
 
 Every place where the app (`Sotto`) or `sotto-mac` writes anything of the chats, or that
 shows it, outside `store.db`; "before" is the version of 2026-11-19 (SOTTO-42), "now" this
-version (SOTTO-43). `test-query`, `--dump` and `--snapshot` are tools of the scripts and
-print or draw on request; they are left out.
+version (SOTTO-43). `test-query`, `--dump` and `--snapshot` are tools of the scripts that
+print or draw on request, for a store of the test kind only; they are left out.
 
 | Place | Before | Now |
 | --- | --- | --- |
@@ -243,13 +295,13 @@ print or draw on request; they are left out.
 | `store.key` | the wrapped store key; nothing of the chats | unchanged |
 | `app.json` in the data folder | in the clear: the relay address, the last read position and the first-seen time of each contact by its id, the time of every message, the drafts, pinned, muted and archived chats, timer changes, every setting with the passcode check (salt and HMAC) and the download folder | the theme only, which the lock screen shows before the store opens; the rest is in `app_notes`. An older file is moved once and overwritten (above) |
 | `Pasted` in the data folder | every pasted picture as a readable PNG, for the bubble and a retry | not written: a pasted picture is in memory until it is sent, then in `kept_files`. An older folder is moved into the store and overwritten |
-| `temp.noindex` in the data folder (new) | none | a file the store keeps, written when the user clicks it so that its app can open it (a photo never is): 0600 in a 0700 folder that Spotlight skips, marked as downloaded, excluded from backups; overwritten and removed at launch, on lock, on quit and by Reset. Readable while it is there; the app that opened it keeps what it read, and macOS may list its name among that app's recent items |
+| `temp.noindex` in the data folder (new) | none | a file the store keeps, written when the user clicks it so that its app can open it (a photo never is): 0600 in a 0700 folder that Spotlight skips, marked as downloaded, excluded from backups (which keeps it out of Time Machine, not out of a local APFS snapshot taken while it is there); overwritten and removed as soon as its message goes (a delete by either side, an expiry, a deleted contact), at launch, on lock, on quit and by Reset. Readable while it is there; the app that opened it keeps what it read, and macOS may list its name among that app's recent items |
 | The download folder (Downloads by default) | every received file of the app, readable | nothing by default; with "Save received files automatically" each received file, as before. What is already there stays; after a delete for both or an expiry a file saved there is still removed |
 | Where "Save as..." points | a copy of the file | the same, from the store when it keeps the file: the user's own copy, readable, marked as downloaded when it was received |
 | `received` in the data directory of `sotto-mac` | every received file, readable | unchanged: the file is what the console command delivers, with no viewer to show it from the store |
 | Notifications (macOS keeps them in its own database, outside the data folder) | the contact's local name and the text of the message | "Sotto" and "New message" by default; name and text only with "Show sender name" and "Show message preview" on. The identifiers of a notification still carry the chat's id (the contact's public id) and the message position, for the grouping and the click; how long macOS keeps them is its own |
 | Dock badge | the unread count | unchanged; no text |
-| Pasteboard | what the user copies: a text, a picture, an id | unchanged: the user's act. Every app may read it and Universal Clipboard may carry it to the user's other devices |
+| Pasteboard | what the user copies: a text, a picture, an id | a text or a picture copied from the chats (Copy text, Copy image, Cmd+C in a bubble, in the viewer or in the field) is marked `org.nspasteboard.ConcealedType` and `org.nspasteboard.TransientType`, which clipboard managers that follow nspasteboard.org neither show nor keep, and a lock clears the pasteboard while it still holds that copy. Until then every app may read it, and Universal Clipboard may carry it to the user's other devices. An id copied with "Copy id" is public and left as it is |
 | Logs | none through the unified log; the app writes a line to stderr when a scripting flag names no contact, `sotto-mac` prints the chats to its terminal | unchanged |
 | Caches | none on disk: pictures and thumbnails in memory, the socket on an ephemeral `URLSession` (no URL cache, no cookies), SQLite temporary tables in memory | the same; the pictures decoded for the window are dropped on lock |
 | User defaults and saved window state | the window frame and the theme of a version before the settings page | unchanged; nothing of the chats |

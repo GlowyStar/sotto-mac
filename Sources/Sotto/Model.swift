@@ -1,4 +1,5 @@
 import AppKit
+import IOKit.pwr_mgt
 import LocalAuthentication
 import Observation
 import SottoCore
@@ -242,6 +243,15 @@ struct Launch {
     /// a timer of the chat, each through the action of the screen. `--reset NAME`: a new
     /// session with the contact, through the action of its menu.
     var changes: [ScriptedChange] = []
+    /// The first flag of the launch that prints, draws or acts on the chats of a store for a
+    /// script: it needs a store of the test kind (docs/key-storage.md). Nil for none and for
+    /// the mock data (`--demo`, or `--snapshot` without `--data-dir`).
+    var scriptingFlag: String?
+
+    static let scriptingFlags: Set<String> = [
+        "--dump", "--snapshot", "--safety-number", "--send", "--send-file", "--profile", "--read", "--reply", "--edit",
+        "--delete", "--timer", "--reset",
+    ]
 
     static let current = Launch(CommandLine.arguments)
 
@@ -273,6 +283,9 @@ struct Launch {
         relay = value(after: "--relay") ?? Self.defaultRelay
         snapshot = value(after: "--snapshot").map { URL(fileURLWithPath: $0, isDirectory: true) }
         safetyNumberOf = value(after: "--safety-number")
+        if dataDirectory != nil || !(demo || snapshot != nil) {
+            scriptingFlag = arguments.dropFirst().first(where: Self.scriptingFlags.contains)
+        }
     }
 
     var directory: URL {
@@ -366,8 +379,9 @@ final class AppModel {
     /// Why the last unlock of the store failed; nil after a cancel.
     var unlockFailure: String?
     @ObservationIgnored private var unlocking = false
-    /// Set while a lock closes the messenger and drops the key; no unlock starts meanwhile.
-    @ObservationIgnored private var closing = false
+    /// Set while a lock closes the messenger; no unlock starts meanwhile.
+    @ObservationIgnored private var closing: Task<Void, Never>?
+    @ObservationIgnored private var sleepWatcher: SleepWatcher?
     /// Either lock screen covers the window.
     var covered: Bool { locked || storeLocked }
     /// The data folder; nil for the mock data.
@@ -459,7 +473,7 @@ final class AppModel {
     /// asks nothing), unwraps the store key and opens the messenger; the passcode, when set,
     /// is asked after that.
     func unlockStore() {
-        guard storeLocked, !unlocking, !closing, messenger == nil, let directory = dataDirectory else { return }
+        guard storeLocked, !unlocking, closing == nil, messenger == nil, let directory = dataDirectory else { return }
         unlocking = true
         unlockFailure = nil
         Task {
@@ -471,6 +485,7 @@ final class AppModel {
                     try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "open your chats")
                 }
                 try StoreKeys.unlock(directory, protection: protection, context: context)
+                if Launch.current.scriptingFlag != nil { try StoreKeys.requireTestKind(directory) }
                 let messenger = try Self.messenger(directory)
                 settings = messenger.launchSettings ?? Self.launchSettings(directory)
                 locked = settings.passcode != nil
@@ -731,34 +746,38 @@ final class AppModel {
             ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
     }
 
-    /// Closes the store and drops its key, then covers the window until Touch ID or the Mac
-    /// password opens it again; the mock data has only the passcode lock.
-    func lock() {
-        guard welcome == nil, !storeLocked else { return }
+    /// Overwrites the store key at once, closes the store and covers the window until Touch
+    /// ID or the Mac password opens it again; also on the first-launch screen, since the store
+    /// is open once a messenger is attached. The task ends when every connection to the store
+    /// is closed; nil when nothing was open. The mock data has only the passcode lock.
+    @discardableResult
+    func lock() -> Task<Void, Never>? {
+        if let closing { return closing }
         guard let messenger, let directory = dataDirectory else {
-            if settings.passcode != nil { locked = true }
-            return
+            if !storeLocked, welcome == nil, settings.passcode != nil { locked = true }
+            return nil
         }
         storeLocked = true
         locked = false
-        closing = true
-        Task {
+        StoreKeys.lock(directory)
+        let task = Task {
             await saveDraftsNow()
             self.messenger = nil
             await messenger.close()
-            StoreKeys.lock(directory)
             clearContent()
-            closing = false
+            closing = nil
         }
+        closing = task
+        return task
     }
 
-    /// Closes the store and drops its key before the app quits.
+    /// Drops the store key and closes the store before the app quits.
     func closeStore() async {
+        if let dataDirectory { StoreKeys.lock(dataDirectory) }
         await saveDraftsNow()
         let messenger = messenger
         self.messenger = nil
         await messenger?.close()
-        if let dataDirectory { StoreKeys.lock(dataDirectory) }
         clearOpenedFiles()
     }
 
@@ -784,6 +803,7 @@ final class AppModel {
         keptDecoded = []
         Media.forget()
         clearOpenedFiles()
+        ChatPasteboard.clear()
     }
 
     func unlock(_ text: String) -> Bool {
@@ -815,6 +835,16 @@ final class AppModel {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 if self?.settings.lockOnSleep == true { self?.lock() }
+            }
+        }
+        // The same lock, and the sleep waits until the store is closed.
+        sleepWatcher = SleepWatcher { [weak self] done in
+            MainActor.assumeIsolated {
+                guard let self, self.settings.lockOnSleep, let closing = self.lock() else { return done() }
+                Task {
+                    await closing.value
+                    done()
+                }
             }
         }
         Task { [weak self] in
@@ -1245,5 +1275,78 @@ final class AppModel {
         } else if openChatID != nil {
             closeChat()
         }
+    }
+}
+
+/// Holds the sleep of the Mac until `onSleep` calls its completion: IOKit waits for the answer
+/// to a system sleep, up to 30 seconds, while an observer of NSWorkspace delays it only by
+/// blocking the main thread.
+final class SleepWatcher {
+    // iokit_common_msg(0x270) and iokit_common_msg(0x280) of IOMessage.h, which Swift does not
+    // import: kIOMessageCanSystemSleep and kIOMessageSystemWillSleep.
+    private static let canSleep: natural_t = 0xE000_0270
+    private static let willSleep: natural_t = 0xE000_0280
+    private let onSleep: (@escaping @Sendable () -> Void) -> Void
+    private var root: io_connect_t = 0
+    private var port: IONotificationPortRef?
+    private var notifier: io_object_t = 0
+
+    init(onSleep: @escaping (_ done: @escaping @Sendable () -> Void) -> Void) {
+        self.onSleep = onSleep
+        root = IORegisterForSystemPower(
+            Unmanaged.passUnretained(self).toOpaque(), &port,
+            { context, _, message, argument in
+                guard let context else { return }
+                Unmanaged<SleepWatcher>.fromOpaque(context).takeUnretainedValue().handle(message, Int(bitPattern: argument))
+            }, &notifier)
+        if root != 0 { IONotificationPortSetDispatchQueue(port, .main) }
+    }
+
+    private func handle(_ message: natural_t, _ change: Int) {
+        let root = root
+        switch message {
+        case Self.canSleep: IOAllowPowerChange(root, change)
+        case Self.willSleep: onSleep { IOAllowPowerChange(root, change) }
+        default: break
+        }
+    }
+}
+
+/// Chat texts and pictures on the general pasteboard, marked concealed and transient
+/// (nspasteboard.org) so that clipboard managers neither show nor keep them; a lock takes
+/// them off while the pasteboard still holds what Sotto put there (docs/key-storage.md).
+@MainActor
+enum ChatPasteboard {
+    private static let markers = [
+        NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"),
+        NSPasteboard.PasteboardType("org.nspasteboard.TransientType"),
+    ]
+    private static var written: Int?
+
+    static func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        mark()
+    }
+
+    static func copy(_ image: NSImage) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([image])
+        mark()
+    }
+
+    /// Marks what was just written to the general pasteboard as a copy of the chats.
+    static func mark() {
+        let board = NSPasteboard.general
+        board.addTypes(markers, owner: nil)
+        for marker in markers { board.setData(Data(), forType: marker) }
+        written = board.changeCount
+    }
+
+    /// Clears the pasteboard unless something was copied after Sotto's copy.
+    static func clear() {
+        guard let written, NSPasteboard.general.changeCount == written else { return }
+        NSPasteboard.general.clearContents()
+        self.written = nil
     }
 }

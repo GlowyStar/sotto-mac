@@ -244,6 +244,9 @@ public actor Messenger {
     public static let notesFile = "app.json"
     /// Where a version before the notes moved into the store kept pasted pictures.
     public static let pastedFolder = "Pasted"
+    /// Where a file the store keeps is written for another app to open; Spotlight skips a
+    /// `.noindex` folder.
+    public static let openedFolder = "temp.noindex"
     static let pollSeconds = 0.5
     static let expirySeconds = 1.0
 
@@ -279,6 +282,9 @@ public actor Messenger {
     private let receivedFiles: URL?
     /// The progress of each file that is sending or receiving, by message id.
     private var progress: [Data: Progress] = [:]
+    /// The copies written into `openedFolder`, by the position of their message.
+    private var opened: [Int64: [URL]] = [:]
+    private var closed = false
 
     /// Opens the store in `directory`, creating it when it is missing; `relay` is used until
     /// an address is saved with `setRelay`. Received files are downloaded, each by itself
@@ -399,14 +405,18 @@ public actor Messenger {
         await publish()
     }
 
-    /// Stops the transport, closes the store and ends `changes`.
+    /// Stops the transport, closes the store, removes the copies of `openCopy` and ends
+    /// `changes`.
     public func close() async {
+        closed = true
         await disconnect()
         poller?.cancel()
         expirer?.cancel()
         // Once more, should the last write of a change have failed.
         try? notes.save(notesStore)
         notesStore.close()
+        opened = [:]
+        Self.clearOpened(directory: directory)
         sink.finish()
     }
 
@@ -436,6 +446,7 @@ public actor Messenger {
             last = state
             sink.yield(state)
         }
+        dropOpened(notIn: state)
         return state
     }
 
@@ -859,6 +870,54 @@ public actor Messenger {
         }
     }
 
+    /// Writes the file the store keeps for a message into `openedFolder` of the data folder
+    /// (0700, its file 0600, excluded from backups, marked as downloaded), a piece at a time,
+    /// for its app to open; nil when the store keeps none or the messenger closed meanwhile.
+    /// The copy is overwritten and removed as soon as a state lacks its message (a delete, an
+    /// expiry, a deleted contact), and with the others on `close` and by
+    /// `clearOpened` (docs/key-storage.md).
+    public func openCopy(_ position: Int64, named name: String) async throws -> URL? {
+        let folder = directory.appendingPathComponent(Self.openedFolder, isDirectory: true)
+        let (url, descriptor) = try ReceivedFiles.create(named: name, into: folder)
+        var excluded = URLResourceValues()
+        excluded.isExcludedFromBackup = true
+        var marked = folder
+        try? marked.setResourceValues(excluded)
+        guard (try? await writeContents(position, to: descriptor)) == true, !closed else {
+            Darwin.close(descriptor)
+            Self.removeCopy(url)
+            return nil
+        }
+        try ReceivedFiles.finish(url, descriptor)
+        opened[position, default: []].append(url)
+        // The message may have gone while its file was written.
+        if let last { dropOpened(notIn: last) }
+        return opened[position] == nil ? nil : url
+    }
+
+    /// Overwrites and removes every file in `openedFolder` of `directory`, and the folder.
+    public static func clearOpened(directory: URL) {
+        let folder = directory.appendingPathComponent(openedFolder, isDirectory: true)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return }
+        names.forEach { removeCopy(folder.appendingPathComponent($0)) }
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    /// Overwrites and removes the copies of the messages that `state` lacks.
+    private func dropOpened(notIn state: MessengerState) {
+        guard !opened.isEmpty else { return }
+        let present = Set(state.chats.flatMap { $0.messages.map(\.id) })
+        for (position, copies) in opened where !present.contains(position) {
+            copies.forEach(Self.removeCopy)
+            opened[position] = nil
+        }
+    }
+
+    /// A copy that does not open for writing is only removed.
+    private static func removeCopy(_ copy: URL) {
+        if (try? ClientStore.overwriteAndRemove(copy)) == nil { try? FileManager.default.removeItem(at: copy) }
+    }
+
     /// A photo or a file downloads by itself up to the size of its kind; 0 is off.
     static func autoDownload(_ settings: AppSettings) -> Transport.AutoDownload {
         let (photos, files) = (settings.autoDownloadPhotos, settings.autoDownloadFiles)
@@ -1018,7 +1077,10 @@ public actor Messenger {
         flusher?.cancel()
         await flusher?.value
         flusher = nil
+        // Closed here, not when the last task lets go of the transport.
+        await transport?.closeStore()
         transport = nil
+        client?.store.close()
         client = nil
         link = .idle
     }

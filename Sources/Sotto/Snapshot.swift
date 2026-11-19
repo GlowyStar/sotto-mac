@@ -417,6 +417,9 @@ enum Snapshot {
 
     static func runFromArguments() {
         let launch = Launch.current
+        if let flag = launch.scriptingFlag {
+            requireTestKind(flag, launch.directory)
+        }
         if let directory = launch.dataDirectory,
             launch.dump || launch.snapshot != nil || launch.storeInfo || launch.safetyNumberOf != nil
         {
@@ -425,6 +428,9 @@ enum Snapshot {
             } catch {
                 FileHandle.standardError.write(Data("the store does not open: \(error)\n".utf8))
                 exit(1)
+            }
+            if let flag = launch.scriptingFlag {
+                requireTestKind(flag, directory)
             }
         }
         if let name = launch.safetyNumberOf {
@@ -511,6 +517,17 @@ enum Snapshot {
             }
         }
         exit(failed ? 1 : 0)
+    }
+
+    /// The scripting flags serve stores of the test kind only; any other store is refused
+    /// before it is unlocked, so no sheet shows (docs/key-storage.md).
+    private static func requireTestKind(_ flag: String, _ directory: URL) {
+        do {
+            try StoreKeys.requireTestKind(directory)
+        } catch {
+            FileHandle.standardError.write(Data("\(flag): \(error)\n".utf8))
+            exit(1)
+        }
     }
 
     private static func render(_ shot: Shot, model: AppModel, to url: URL) -> Bool {

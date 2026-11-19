@@ -550,8 +550,7 @@ struct MessageRow: View {
         }
         if !message.text.isEmpty {
             Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(message.text, forType: .string)
+                ChatPasteboard.copy(message.text)
             } label: {
                 Label("Copy text", systemImage: "doc.on.doc")
             }

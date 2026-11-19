@@ -134,8 +134,7 @@ final class BubbleTextView: NSTextView {
     override func copy(_ sender: Any?) {
         let range = selectedRange()
         guard range.length > 0 else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString((string as NSString).substring(with: range), forType: .string)
+        ChatPasteboard.copy((string as NSString).substring(with: range))
     }
 
     override func resignFirstResponder() -> Bool {

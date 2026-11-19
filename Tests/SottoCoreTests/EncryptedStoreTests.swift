@@ -158,6 +158,7 @@ private func makePlain(_ directory: URL) throws {
         let path = folder.appendingPathComponent(ClientStore.fileName)
         #expect(try ClientStore.isPlain(path))
         #expect(try Data(contentsOf: path).range(of: Data(marker.utf8)) != nil)
+        #expect(try StoreKeys.storedKey(folder)?.plainStore == true, "the key was made over the plain store")
 
         let migrated = try ClientStore(directory: folder)
         #expect(try everything(migrated) == before)
@@ -165,6 +166,34 @@ private func makePlain(_ directory: URL) throws {
         #expect(try ClientStore.holdsEncryptedPages(path))
         #expect(try Data(contentsOf: path).range(of: Data(marker.utf8)) == nil)
         #expect(try files(folder) == [ClientStore.fileName, StoreKeys.fileName])
+        #expect(try StoreKeys.storedKey(folder)?.plainStore == nil, "the key records that its store is encrypted")
+    }
+}
+
+/// Whoever can write the folder while the app is locked cannot have a plain store of his own
+/// encrypted under the key that is there.
+@Test func aPlainFileInPlaceOfAnEncryptedStoreIsRefused() throws {
+    try withFolder { folder in
+        _ = try fill(folder, marker: "own")
+        try makePlain(folder)
+        let path = folder.appendingPathComponent(ClientStore.fileName)
+        let planted = try Data(contentsOf: path)
+        // The migration runs once: a plain file put there after it is refused.
+        try ClientStore(directory: folder).close()
+        for _ in 0..<2 {
+            try planted.write(to: path)
+            #expect(throws: StoreError.plainStoreRefused(path: path.path)) { try ClientStore(directory: folder) }
+            #expect(try Data(contentsOf: path) == planted, "the planted file is left as it is")
+        }
+
+        // A key that never saw a plain store, as one of a fresh store or of a version before
+        // the record, refuses one too.
+        let fresh = folder.appendingPathComponent("fresh")
+        try ClientStore(directory: fresh).close()
+        #expect(try StoreKeys.storedKey(fresh)?.plainStore == nil)
+        let freshPath = fresh.appendingPathComponent(ClientStore.fileName)
+        try planted.write(to: freshPath)
+        #expect(throws: StoreError.plainStoreRefused(path: freshPath.path)) { try ClientStore(directory: fresh) }
     }
 }
 
@@ -254,6 +283,37 @@ private func makePlain(_ directory: URL) throws {
         ) {
             try StoreKeys.unlock(test, protection: .presence)
         }
+    }
+}
+
+/// The scripting aids read the kind from `store.key` before anything is unlocked: a store of
+/// the presence kind is refused without the Secure Enclave, so without a prompt.
+@Test func scriptingAidsRefuseAStoreOfThePresenceKindBeforeAnyUnlock() throws {
+    try withFolder { folder in
+        let asked = ["SOTTO_STORE_PROTECTION": "test"]
+        let presence = folder.appendingPathComponent("presence")
+        try ClientStore.makePrivateDirectory(presence)
+        // Bytes that no Secure Enclave opens: an unlock would fail otherwise than the refusal.
+        let junk = StoreKeys.WrappedKey(
+            version: 1, protection: .presence, enclaveKey: Data(repeating: 1, count: 8), encapsulatedKey: Data(repeating: 2, count: 65),
+            sealedKey: Data(repeating: 3, count: 48))
+        try JSONEncoder().encode(junk).write(to: presence.appendingPathComponent(StoreKeys.fileName))
+        #expect(try StoreKeys.storedProtection(presence) == .presence)
+        for environment in [asked, [:]] {
+            #expect(throws: StoreError.notATestStore) { try StoreKeys.requireTestKind(presence, environment: environment) }
+        }
+        #expect(!StoreKeys.isUnlocked(presence))
+        #expect(try files(presence) == [StoreKeys.fileName])
+
+        let test = folder.appendingPathComponent("test")
+        try ClientStore(directory: test).close()
+        try StoreKeys.requireTestKind(test, environment: [:])
+        StoreKeys.lock(test)
+        try StoreKeys.requireTestKind(test, environment: [:])
+
+        let empty = folder.appendingPathComponent("empty")
+        try StoreKeys.requireTestKind(empty, environment: asked)
+        #expect(throws: StoreError.notATestStore) { try StoreKeys.requireTestKind(empty, environment: [:]) }
     }
 }
 
