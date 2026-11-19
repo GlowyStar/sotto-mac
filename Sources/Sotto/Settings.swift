@@ -855,13 +855,11 @@ struct PrivacyPage: View {
         let on = model.settings.passcode != nil
         SectionTitle(text: "Local passcode")
         SettingsRow(title: "Passcode", value: on ? "On" : "Off") { model.settingsDialog = .passcode }
-        if on {
-            SettingsRow(title: "Auto-lock", value: AppSettings.autoLockTitle(model.settings.autoLockMinutes)) {
-                model.settingsDialog = .autoLock
-            }
-            SettingsRow(title: "Lock Sotto now", icon: "lock.fill") { model.lock() }
+        SettingsRow(title: "Auto-lock", value: AppSettings.autoLockTitle(model.settings.autoLockMinutes)) {
+            model.settingsDialog = .autoLock
         }
-        Hint(text: "The passcode locks the app on this Mac. It is not sent anywhere and it cannot be recovered.")
+        SettingsRow(title: "Lock Sotto now", icon: "lock.fill") { model.lock() }
+        Hint(text: "A lock closes the chats on this Mac; Touch ID or the Mac password opens them again, then the passcode if one is set. The passcode is not sent anywhere and it cannot be recovered.")
         SectionTitle(text: "Notifications")
         SettingsToggle(title: "Hide contents while locked", isOn: $model.settings.hideContentsWhileLocked, enabled: on)
         Hint(text: "While Sotto is locked, notifications say only that a message arrived.")
@@ -1098,6 +1096,42 @@ struct ResetBox: View {
 }
 
 // MARK: Lock screen (DESIGN.md 11.6)
+
+/// The cover of a closed store: the system sheet of Touch ID or the Mac password opens it
+/// (DESIGN.md 11.6).
+struct StoreLockScreen: View {
+    let model: AppModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Circle()
+                .fill(Color.accent)
+                .frame(width: 96, height: 96)
+                .overlay(Image(systemName: "lock.shield.fill").font(.system(size: 44)).foregroundStyle(.white))
+                .accessibilityHidden(true)
+            Text("Sotto is locked")
+                .font(Fonts.welcomeTitle)
+                .foregroundStyle(Color.windowBoldFg)
+                .padding(.top, 24)
+            Text("Touch ID or your Mac password opens your chats.")
+                .font(Fonts.boxBody)
+                .foregroundStyle(Color.windowSubFg)
+                .multilineTextAlignment(.center)
+                .padding(.top, 8)
+            FilledButton(action: { model.unlockStore() }) { Text("Unlock") }
+                .keyboardShortcut(.defaultAction)
+                .padding(.top, 16)
+            Text(model.unlockFailure ?? " ")
+                .font(Fonts.hint)
+                .foregroundStyle(Color.fieldError)
+                .multilineTextAlignment(.center)
+                .padding(.top, 8)
+        }
+        .frame(width: 256)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.windowBg)
+    }
+}
 
 struct LockScreen: View {
     let model: AppModel

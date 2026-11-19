@@ -25,12 +25,20 @@ interoperate with sotto's command-line client byte for byte.
   sotto's client. Delete for both and the timer are requests that the other side's client
   honours; nothing can make it do so, and nothing protects a message from the person who
   received it.
+- The store is encrypted at rest: SQLCipher over the whole `store.db`, its random 256-bit
+  key wrapped to a Secure Enclave key of this Mac that asks for Touch ID or the Mac
+  password; the app and `sotto-mac` open it only after that, and every lock drops the key
+  (`docs/key-storage.md`). The tests check that no text of the store is readable in its
+  files and that a copy of the folder does not open without its Secure Enclave key.
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
 
 ## Build, test, run
 
-Needs macOS 14 or later and Swift 6 (Command Line Tools are enough, Xcode is not needed).
+Needs macOS 14 or later on a Mac with a Secure Enclave (Apple silicon or a T2 chip) and
+Swift 6 (Command Line Tools are enough, Xcode is not needed). SwiftPM fetches
+SQLCipher 4.20.0, Zetetic's official Swift package, a binary framework that
+`scripts/build-app.sh` copies into the app.
 
 ```sh
 swift build                 # all targets
@@ -41,7 +49,8 @@ swift run sotto-mac         # the command-line tool
 ```
 
 The command-line tool has the commands of sotto's `sotto`; its identity lives in
-`~/.sotto-mac` unless `--data-dir` names another directory:
+`~/.sotto-mac` unless `--data-dir` names another directory, in the same encrypted store as
+the app's, and each command asks for Touch ID or the Mac password once:
 
 ```sh
 sotto-mac init                      # make an identity, print its user id
@@ -96,7 +105,10 @@ RELAY_PORT=8784 RELAY_METRICS_PORT=9784 docker compose up --build -d --wait
 # or: RELAY_DATABASE=relay.db RELAY_PORT=8784 uv run sotto-relay
 ```
 
-Then start the app on its own data directory and that relay:
+Then start the app on its own data directory and that relay (a store of another data
+directory asks for Touch ID or the Mac password as well; only `SOTTO_STORE_PROTECTION=test`
+in the environment, which the tests and the check scripts set, makes one that asks
+nothing, and the default folders refuse it):
 
 ```sh
 scripts/build-app.sh
@@ -137,6 +149,7 @@ Launch arguments of the app:
 | `--relay <url>` | the relay (default `ws://127.0.0.1:8765/ws`); an address saved in Settings wins over it |
 | `--snapshot <folder>` | draws the window into PNG files and exits; with `--data-dir` from that store, without a connection, otherwise from mock data; `--only <prefix>` draws only the shots whose name starts with it |
 | `--dump` | with `--data-dir`: prints the chats of that store as JSON and exits |
+| `--store-info` | with `--data-dir`: prints the SQLCipher version, its crypto provider and the file of the library that serves the store, and exits |
 | `--demo` | mock data and no store, with a "Mock" menu; `--first-launch` adds the first-launch screen |
 | `--send <name> <text>` | a scripting aid, any number of times: once connected, sends the text to the contact of that local name through the same action as the compose bar |
 | `--send-file <name> <path>` | the same for a file, through the action of the send box; a picture goes as a photo |
@@ -153,8 +166,8 @@ saved in Settings, how far each chat was read, when each contact and message was
 first seen by the app, the draft of each chat, the pinned, muted and archived chats, and
 every other setting (theme, text size, chat background, send key, clock, the passcode
 check, auto-lock, notification and download choices). "Reset
-Sotto..." in Settings, Advanced, deletes the store and `app.json` and then the data
-directory only if nothing else is left in it.
+Sotto..." in Settings, Advanced, deletes the store, its wrapped key and `app.json` and then
+the data directory only if nothing else is left in it.
 
 A new message posts a macOS notification (not for the chat open in the front window, not
 for a muted chat; without its text while the passcode lock is shown, unless that is turned
@@ -206,9 +219,11 @@ Disappearing messages are set per chat from the chat header's menu or the contac
 contact that long after it was seen, with its file, also after a restart; the header and
 each such message show the timer, and a change of the timer shows as a line in the chat.
 
-A local passcode locks the window at launch, after the auto-lock time, on Cmd+L and on
-sleep. It only hides the window: the store is not encrypted with it, and it cannot be
-recovered.
+The app starts locked and opens the store after the system sheet of Touch ID or the Mac
+password. After the auto-lock time, on Cmd+L, on sleep (unless turned off) and on quit it
+closes the store and overwrites its key in memory; the next unlock asks again. A local
+passcode, when set, is asked after that: it only covers the window, nothing is encrypted
+with it, and it cannot be recovered. While the store is locked the app has no connection.
 
 The end-to-end check of the app (a relay on a free port; the Python client writing to the
 app while it runs and while it is closed; the app sending with `--send` to the running
@@ -229,9 +244,13 @@ Limits as they are:
 
 - A plain `ws://` address is dialed only to a loopback host; a relay on another machine
   belongs behind TLS and is dialed as `wss://`.
-- The store and `app.json` are not encrypted: whoever can read the data directory holds the
-  identity, the keys and the messages. With message previews on, macOS also keeps the text
-  of each notification in its own notification database, outside the data directory.
+- `app.json` (drafts, read positions, settings) and received files saved into a folder are
+  not encrypted yet. With message previews on, macOS also keeps the text of each
+  notification in its own notification database, outside the data directory. A store of
+  the previous version is encrypted on the first launch and its plain file overwritten,
+  but older Time Machine snapshots and backups keep it (`docs/key-storage.md`).
+- Whoever knows the Mac password, or has malware running as the user while the store is
+  open, gets the chats.
 - One device per identity: when the same identity logs in elsewhere, the relay closes the
   older connection and the app says so instead of reconnecting.
 - One-to-one chats with texts, photos and files. No groups, no albums, no reactions or
@@ -246,4 +265,6 @@ Limits as they are:
 
 ## License
 
-Apache-2.0, see [LICENSE](LICENSE).
+Apache-2.0, see [LICENSE](LICENSE). The app carries SQLCipher, under Zetetic's BSD-style
+Community Edition licence, which `scripts/build-app.sh` copies into the bundle as
+`Contents/Resources/SQLCipher-LICENSE.md`.

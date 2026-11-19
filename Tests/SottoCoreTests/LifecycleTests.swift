@@ -195,8 +195,10 @@ func refillTopsUpToTheCapBelowTheThreshold(count: Int, made: Int) throws {
         let receivingChainKey = try #require(try bob.store.sessions(alice.identityKey)[0].state.ckr)
         let aliceFolder = clients.folder.appendingPathComponent("alice")
         let bobFolder = clients.folder.appendingPathComponent("bob")
-        #expect(try filesHolding(aliceFolder, sendingChainKey) == [ClientStore.fileName])
-        #expect(try filesHolding(bobFolder, receivingChainKey) == [ClientStore.fileName])
+        // The store is encrypted: a live chain key is in no file either.
+        #expect(try filesHolding(aliceFolder, sendingChainKey).isEmpty)
+        #expect(try filesHolding(bobFolder, receivingChainKey).isEmpty)
+        #expect(try alice.store.sessions(bob.identityKey)[0].state.cks == sendingChainKey)
 
         try send(relay, alice, bob, "second")
         try relay.deliver(bob)

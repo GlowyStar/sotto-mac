@@ -3,6 +3,9 @@
 # neither Testing.framework nor lib_TestingInterop.dylib by itself.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Every store of the tests is of the test kind: its Secure Enclave key asks for no Touch ID
+# and no password (docs/key-storage.md).
+export SOTTO_STORE_PROTECTION=test
 
 dev="$(xcode-select -p)/Library/Developer"
 fw="$dev/Frameworks"

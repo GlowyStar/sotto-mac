@@ -71,7 +71,7 @@ private func state(skipped: Int = 0) -> RatchetState {
 
         #expect(try store.query("PRAGMA journal_mode") == [[.text("delete")]])
         #expect(try store.query("PRAGMA secure_delete") == [[.integer(1)]])
-        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == [ClientStore.fileName])
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted() == [ClientStore.fileName, StoreKeys.fileName])
         store.close()
     }
 }

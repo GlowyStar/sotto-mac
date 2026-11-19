@@ -100,6 +100,11 @@ enum Snapshot {
             model.settings.passcode = Passcode("1234")
             model.lock()
         },
+        Shot(name: "store-locked") { $0.storeLocked = true },
+        Shot(name: "store-locked-dark", dark: true) { model in
+            model.storeLocked = true
+            model.unlockFailure = "The Secure Enclave did not open the store key."
+        },
         Shot(name: "main-custom") { model in
             model.settings.textSize = 16
             model.settings.background = .sand
@@ -377,6 +382,31 @@ enum Snapshot {
 
     static func runFromArguments() {
         let launch = Launch.current
+        if let directory = launch.dataDirectory, launch.dump || launch.snapshot != nil || launch.storeInfo {
+            do {
+                try StoreKeys.unlock(directory, protection: StoreProtection.asked(for: directory))
+            } catch {
+                FileHandle.standardError.write(Data("the store does not open: \(error)\n".utf8))
+                exit(1)
+            }
+        }
+        if launch.storeInfo {
+            guard let directory = launch.dataDirectory else { exit(2) }
+            do {
+                let store = try ClientStore(directory: directory)
+                let info = [
+                    "cipherVersion": try store.cipherVersion(), "cipherProvider": try store.cipherProvider(),
+                    "library": ClientStore.servingLibrary,
+                ]
+                store.close()
+                let json = try JSONSerialization.data(withJSONObject: info, options: [.sortedKeys])
+                FileHandle.standardOutput.write(json + Data("\n".utf8))
+                exit(0)
+            } catch {
+                FileHandle.standardError.write(Data("store info failed: \(error)\n".utf8))
+                exit(1)
+            }
+        }
         if launch.dump {
             guard let directory = launch.dataDirectory else { exit(2) }
             do {

@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import SottoCore
 
 // The command line of the client: `sotto-mac`, one data directory per identity, the same
@@ -6,7 +7,9 @@ import SottoCore
 // reaches the terminal only through `printable`. Received files go into the folder
 // `received` of the data directory (section 32.2). `chat` prints every message with its
 // position in the log, which the commands of part 5 take (section 39.8), and counts a
-// message as read once it printed it.
+// message as read once it printed it. The store opens only after Touch ID or the Mac
+// password, unless the run asks for the test kind (docs/key-storage.md); `test-query`, left
+// out of the help, answers the checks of the scripts from a store of that kind only.
 
 let defaultRelay = "ws://127.0.0.1:8765/ws"
 let defaultDataDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".sotto-mac").path
@@ -102,6 +105,7 @@ func parse(_ words: [String]) throws -> Arguments {
     }
     let positionalCounts = [
         "init": 0, "id": 0, "add": 2, "contacts": 0, "chat": 1, "reset": 1, "send-file": 2, "read-receipts": 1,
+        "test-query": 1,
     ]
     guard let wanted = positionalCounts[command] else {
         throw UsageError(message: "argument command: invalid choice: '\(command)'")
@@ -146,8 +150,14 @@ func storeDirectory(_ arguments: Arguments) -> URL {
 }
 
 func openStore(_ arguments: Arguments) throws -> ClientStore {
+    let directory = storeDirectory(arguments)
     do {
-        return try ClientStore(directory: storeDirectory(arguments))
+        if !StoreKeys.isUnlocked(directory) {
+            let context = LAContext()
+            context.localizedReason = "open the chats of \(arguments.dataDirectory)"
+            try StoreKeys.unlock(directory, protection: StoreProtection.asked(for: directory), context: context)
+        }
+        return try ClientStore(directory: directory)
     } catch StoreError.wideMode(let path, let mode) {
         throw CommandError(message: "\(arguments.dataDirectory) or its store is open to others: \(path) has mode \(String(format: "%04o", mode)): the group or others have a right")
     }
@@ -651,6 +661,10 @@ func run(_ arguments: Arguments) async throws -> Int32 {
         say("read receipts: \(try client.readReceipts() ? "on" : "off")")
     case "send-file":
         return try await sendFile(arguments)
+    case "test-query":
+        let store = try openStore(arguments)
+        defer { store.close() }
+        FileHandle.standardOutput.write(try store.testRowsJSON(arguments.positionals[0]) + Data("\n".utf8))
     default:
         return try await reset(arguments)
     }

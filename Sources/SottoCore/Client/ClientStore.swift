@@ -1,5 +1,5 @@
 import Foundation
-import SQLite3
+import SQLCipher
 
 public enum StoreError: Error, Equatable, Sendable {
     /// The directory or the file of the store gives a right to the group or to others.
@@ -8,6 +8,46 @@ public enum StoreError: Error, Equatable, Sendable {
     case noIdentity
     case system(path: String, errno: Int32)
     case sqlite(code: Int32, message: String)
+    /// The key of the store is not held: the store is locked.
+    case locked
+    /// The key opens no page of the store, or the wrapped key does not open.
+    case wrongKey
+    /// The store is encrypted and its wrapped key is gone.
+    case missingKey(path: String)
+    case damagedKey(path: String)
+    case protectionMismatch(path: String, stored: StoreProtection, asked: StoreProtection)
+    case testProtectionRefused(path: String)
+    case noSecureEnclave
+    /// The Secure Enclave refused the key: made by another Mac, damaged, or not authorized.
+    case enclaveRefused(reason: String)
+    /// The library that serves the store is not SQLCipher.
+    case notSQLCipher
+    case migrationLostRows(table: String)
+    case notATestStore
+}
+
+extension StoreError: CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case .wideMode(let path, let mode): "\(path) has mode \(String(format: "%04o", mode)): the group or others have a right"
+        case .writeOutsideTransaction: "a write outside a transaction"
+        case .noIdentity: "the store holds no identity"
+        case .system(let path, let code): "\(path): \(String(cString: strerror(code)))"
+        case .sqlite(let code, let message): "SQLite error \(code): \(message)"
+        case .locked: "the store is locked"
+        case .wrongKey: "the key does not open this store"
+        case .missingKey(let path): "the store is encrypted and its key \(path) is missing"
+        case .damagedKey(let path): "the store key \(path) is damaged"
+        case .protectionMismatch(let path, let stored, let asked):
+            "the store key \(path) is of the \(stored.rawValue) kind, this run asks for \(asked.rawValue)"
+        case .testProtectionRefused(let path): "\(path) is a default data folder: the test protection is refused there"
+        case .noSecureEnclave: "this Mac has no Secure Enclave, which the store key needs"
+        case .enclaveRefused(let reason): "the Secure Enclave did not open the store key: \(reason)"
+        case .notSQLCipher: "the store is not served by SQLCipher"
+        case .migrationLostRows(let table): "the encrypted copy of the store lacks rows of \(table); the plain store is kept"
+        case .notATestStore: "only a store of the test kind answers this"
+        }
+    }
 }
 
 public struct StoredIdentity: Equatable, Sendable {
@@ -227,26 +267,30 @@ public final class ClientStore {
     public static let busyTimeoutMilliseconds: Int32 = 5000
 
     public let path: URL
+    public let directory: URL
     private var connection: OpaquePointer?
 
-    /// Opens the store in `directory`, making the directory and the file when they are
-    /// missing, and refuses either when its mode has one of the bits 077.
+    /// Opens the store in `directory` with the key `StoreKeys` holds for it, making the
+    /// directory and the file when they are missing, and refuses either when its mode has
+    /// one of the bits 077. A plain store of a version before the encryption is encrypted
+    /// first (docs/key-storage.md).
     public init(directory: URL) throws {
+        self.directory = directory
         path = directory.appendingPathComponent(Self.fileName)
         try Self.makePrivateDirectory(directory)
-        try Self.makePrivateFile(path)
-
-        var opened: OpaquePointer?
-        let code = sqlite3_open_v2(path.path, &opened, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil)
-        connection = opened
-        guard code == SQLITE_OK else {
-            let error = Self.sqliteError(opened, code)
-            sqlite3_close_v2(opened)
-            connection = nil
-            throw error
+        try Self.whileHolding(directory) {
+            try Self.finishEncrypting(path)
+            try Self.makePrivateFile(path)
+            try StoreKeys.withKeyLiteral(directory) { literal in
+                if try Self.isPlain(path) {
+                    try Self.encrypt(path, literal)
+                }
+                connection = try Self.connect(path, literal, flags: SQLITE_OPEN_READWRITE)
+            }
         }
-        sqlite3_busy_timeout(connection, Self.busyTimeoutMilliseconds)
+        try Self.check(connection)
         try query("PRAGMA journal_mode=DELETE")
+        try query("PRAGMA temp_store=MEMORY")
         try query("PRAGMA secure_delete=ON")
         try transaction {
             for table in Schema.tables {
@@ -1178,9 +1222,212 @@ public final class ClientStore {
         return String(decoding: try encoder.encode(state), as: UTF8.self)
     }
 
+    // MARK: Encryption
+
+    /// The version of SQLCipher that serves this connection; empty for plain SQLite.
+    public func cipherVersion() throws -> String {
+        try query("PRAGMA cipher_version").first?[0].text ?? ""
+    }
+
+    public func cipherProvider() throws -> String {
+        try query("PRAGMA cipher_provider").first?[0].text ?? ""
+    }
+
+    /// The rows of a read-only statement as JSON, blobs as `{"hex": ...}`, for the scripts
+    /// that check a store of the test kind; any other store refuses.
+    public func testRowsJSON(_ statement: String) throws -> Data {
+        guard StoreKeys.protection(directory) == .test else { throw StoreError.notATestStore }
+        try query("PRAGMA query_only=ON")
+        defer { _ = try? query("PRAGMA query_only=OFF") }
+        let rows: [[Any]] = try query(statement).map { row in
+            row.map { value -> Any in
+                switch value {
+                case .null: NSNull()
+                case .integer(let number): number
+                case .text(let text): text
+                case .blob(let data): ["hex": data.map { String(format: "%02x", $0) }.joined()]
+                }
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: rows)
+    }
+
+    /// The file of the library whose `sqlite3_open_v2` this code calls.
+    public static var servingLibrary: String {
+        var info = Dl_info()
+        let symbol = unsafeBitCast(sqlite3_libversion as @convention(c) () -> UnsafePointer<CChar>?, to: UnsafeRawPointer.self)
+        guard dladdr(symbol, &info) != 0, let name = info.dli_fname else { return "" }
+        return String(cString: name)
+    }
+
+    static let plainHeader = Data("SQLite format 3\0".utf8)
+    static let encryptingSuffix = ".encrypting"
+    static let plainSuffix = ".plain"
+
+    static func header(_ path: URL) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: path) else { return nil }
+        defer { try? handle.close() }
+        return try? handle.read(upToCount: plainHeader.count)
+    }
+
+    static func isPlain(_ path: URL) throws -> Bool {
+        header(path) == plainHeader
+    }
+
+    /// Whether the file holds pages that are not plain SQLite: an encrypted store.
+    static func holdsEncryptedPages(_ path: URL) throws -> Bool {
+        guard let first = header(path), !first.isEmpty else { return false }
+        return first != plainHeader
+    }
+
+    private static func connect(_ path: URL, _ literal: UnsafeRawBufferPointer?, flags: Int32) throws -> OpaquePointer? {
+        var opened: OpaquePointer?
+        var code = sqlite3_open_v2(path.path, &opened, flags | SQLITE_OPEN_FULLMUTEX, nil)
+        if code == SQLITE_OK, let literal {
+            code = sqlite3_key(opened, literal.baseAddress, Int32(literal.count))
+        }
+        guard code == SQLITE_OK else {
+            let error = sqliteError(opened, code)
+            sqlite3_close_v2(opened)
+            throw error
+        }
+        sqlite3_busy_timeout(opened, busyTimeoutMilliseconds)
+        return opened
+    }
+
+    /// Refuses a connection whose key opens no page, and one that SQLCipher does not serve.
+    private static func check(_ connection: OpaquePointer?) throws {
+        let code = sqlite3_exec(connection, "SELECT count(*) FROM sqlite_schema", nil, nil, nil)
+        if code == SQLITE_NOTADB {
+            throw StoreError.wrongKey
+        }
+        guard code == SQLITE_OK else { throw sqliteError(connection, code) }
+        var version: OpaquePointer?
+        defer { sqlite3_finalize(version) }
+        guard sqlite3_prepare_v2(connection, "PRAGMA cipher_version", -1, &version, nil) == SQLITE_OK,
+            sqlite3_step(version) == SQLITE_ROW, sqlite3_column_bytes(version, 0) > 0
+        else { throw StoreError.notSQLCipher }
+    }
+
+    /// Exports the plain store into an encrypted copy, checks that every table kept its rows,
+    /// puts the copy in place by a rename and overwrites the plain file. Until the rename the
+    /// plain store stays whole; after it the encrypted one is the store.
+    private static func encrypt(_ path: URL, _ literal: UnsafeRawBufferPointer) throws {
+        let staging = URL(fileURLWithPath: path.path + encryptingSuffix)
+        let plainLink = URL(fileURLWithPath: path.path + plainSuffix)
+        unlink(staging.path)
+        try makePrivateFile(staging)
+
+        let plain = try connect(path, nil, flags: SQLITE_OPEN_READWRITE)
+        defer { sqlite3_close_v2(plain) }
+        let attach = "ATTACH DATABASE ? AS encrypted KEY ?"
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_prepare_v2(plain, attach, -1, &statement, nil) == SQLITE_OK else { throw sqliteError(plain, sqlite3_errcode(plain)) }
+        sqlite3_bind_text(statement, 1, staging.path, -1, transient)
+        // Bound without a copy: the literal outlives the statement, and SQLite keeps no copy
+        // of the key that is never overwritten.
+        sqlite3_bind_text(statement, 2, literal.baseAddress!.assumingMemoryBound(to: CChar.self), Int32(literal.count), nil)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError(plain, sqlite3_errcode(plain)) }
+        let exported = sqlite3_exec(plain, "SELECT sqlcipher_export('encrypted')", nil, nil, nil)
+        guard exported == SQLITE_OK else { throw sqliteError(plain, exported) }
+        try compareRows(plain)
+        let detached = sqlite3_exec(plain, "DETACH DATABASE encrypted", nil, nil, nil)
+        guard detached == SQLITE_OK else { throw sqliteError(plain, detached) }
+
+        try fullSync(staging)
+        unlink(plainLink.path)
+        guard link(path.path, plainLink.path) == 0 else { throw StoreError.system(path: plainLink.path, errno: errno) }
+        guard rename(staging.path, path.path) == 0 else { throw StoreError.system(path: path.path, errno: errno) }
+        try fullSync(path.deletingLastPathComponent())
+        try overwriteAndRemove(plainLink)
+    }
+
+    /// Every table of the plain store has as many rows in the encrypted copy.
+    private static func compareRows(_ plain: OpaquePointer?) throws {
+        func integers(_ sql: String) throws -> [Int64] {
+            var statement: OpaquePointer?
+            defer { sqlite3_finalize(statement) }
+            guard sqlite3_prepare_v2(plain, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw sqliteError(plain, sqlite3_errcode(plain))
+            }
+            var values: [Int64] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                values.append(sqlite3_column_int64(statement, 0))
+            }
+            return values
+        }
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        sqlite3_prepare_v2(plain, "SELECT name FROM main.sqlite_schema WHERE type = 'table'", -1, &statement, nil)
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let table = String(cString: sqlite3_column_text(statement, 0))
+            let quoted = "\"" + table.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            let before = try integers("SELECT count(*) FROM main.\(quoted)")
+            let after = try? integers("SELECT count(*) FROM encrypted.\(quoted)")
+            if before != after {
+                throw StoreError.migrationLostRows(table: table)
+            }
+        }
+    }
+
+    /// Ends what a stopped `encrypt` left: an unfinished copy is removed (the plain store is
+    /// still the store), a plain file left beside the encrypted store is overwritten.
+    private static func finishEncrypting(_ path: URL) throws {
+        unlink(path.path + encryptingSuffix)
+        let plainLink = URL(fileURLWithPath: path.path + plainSuffix)
+        guard FileManager.default.fileExists(atPath: plainLink.path) else { return }
+        var store = stat()
+        var left = stat()
+        if stat(path.path, &store) == 0, lstat(plainLink.path, &left) == 0, store.st_ino == left.st_ino {
+            unlink(plainLink.path)
+        } else {
+            try overwriteAndRemove(plainLink)
+        }
+    }
+
+    /// Runs `body` under an exclusive `flock` on the directory, which every open of a store
+    /// takes, in this process and in others: the first key and the migration happen once.
+    static func whileHolding<T>(_ directory: URL, _ body: () throws -> T) throws -> T {
+        let descriptor = Darwin.open(directory.path, O_RDONLY)
+        guard descriptor >= 0 else { throw StoreError.system(path: directory.path, errno: errno) }
+        defer { Darwin.close(descriptor) }
+        guard flock(descriptor, LOCK_EX) == 0 else { throw StoreError.system(path: directory.path, errno: errno) }
+        defer { flock(descriptor, LOCK_UN) }
+        return try body()
+    }
+
+    /// Writes zeros over the whole file, syncs it and removes it. On an SSD and under
+    /// snapshots the old blocks may outlive this (docs/key-storage.md).
+    static func overwriteAndRemove(_ file: URL) throws {
+        let descriptor = Darwin.open(file.path, O_WRONLY | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw StoreError.system(path: file.path, errno: errno) }
+        defer { Darwin.close(descriptor) }
+        var status = stat()
+        fstat(descriptor, &status)
+        let zeros = [UInt8](repeating: 0, count: 1 << 16)
+        var left = Int(status.st_size)
+        while left > 0 {
+            let written = write(descriptor, zeros, min(left, zeros.count))
+            guard written > 0 else { throw StoreError.system(path: file.path, errno: errno) }
+            left -= written
+        }
+        _ = fcntl(descriptor, F_FULLFSYNC)
+        guard unlink(file.path) == 0 else { throw StoreError.system(path: file.path, errno: errno) }
+    }
+
+    static func fullSync(_ url: URL) throws {
+        let descriptor = Darwin.open(url.path, O_RDONLY)
+        guard descriptor >= 0 else { throw StoreError.system(path: url.path, errno: errno) }
+        defer { Darwin.close(descriptor) }
+        if fcntl(descriptor, F_FULLFSYNC) != 0, fsync(descriptor) != 0 {
+            throw StoreError.system(path: url.path, errno: errno)
+        }
+    }
+
     // MARK: Modes
 
-    private static func makePrivateDirectory(_ directory: URL) throws {
+    static func makePrivateDirectory(_ directory: URL) throws {
         if mkdir(directory.path, directoryMode) == 0 {
             chmod(directory.path, directoryMode)
         } else if errno == ENOENT {

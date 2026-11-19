@@ -789,8 +789,8 @@ Download folder: the row opens the system folder panel; the value is the folder 
 | Order | Row |
 |---|---|
 | Title | "Privacy and security" |
-| Section "Local passcode" | row "Passcode" with the value "Off" or "On"; when on: row "Auto-lock" with the value, row "Lock Sotto now" with a `lock.fill` icon |
-| Hint | "The passcode locks the app on this Mac. It is not sent anywhere and it cannot be recovered." |
+| Section "Local passcode" | row "Passcode" with the value "Off" or "On", row "Auto-lock" with the value, row "Lock Sotto now" with a `lock.fill` icon |
+| Hint | "A lock closes the chats on this Mac; Touch ID or the Mac password opens them again, then the passcode if one is set. The passcode is not sent anywhere and it cannot be recovered." |
 | Section "Notifications" | toggle "Hide contents while locked" (default on; only enabled with a passcode) |
 | Hint | "While Sotto is locked, notifications say only that a message arrived." |
 
@@ -799,6 +799,8 @@ Passcode box (320, 5.10): title "Set a passcode" (or "Change passcode" / "Turn o
 Auto-lock: a 320 box with radio rows 200 wide (reference `autolockButton`): "1 minute", "5 minutes", "1 hour", "5 hours" (estimate; the reference options were not read), default "1 hour"; plus "Lock when the Mac sleeps" as a checkbox below (own).
 
 Lock screen: over the whole window (list and chat hidden), background `windowBg`. Centered column 256 wide: the lock circle of 7.1 (96, `accent`, `lock.shield.fill` 44), 24 below "Sotto is locked" 20 semibold `windowBoldFg`, 16 below a masked field 256 wide (box field, autofocus, placeholder "Passcode"). Return unlocks. A wrong passcode shakes the field (4 left and right, 300ms) and shows "Wrong passcode." in `fieldError` under it. No hint, no reset link here; "Reset Sotto" lives only in 11.8 and needs the window unlocked. Escape does nothing. The app locks after the idle time of the auto-lock setting, on Cmd+L and, if checked, on sleep.
+
+Store lock screen (own): every lock (above, with or without a passcode) and every launch first close the store and drop its key (docs/key-storage.md); this screen covers the window until the store opens again, and the passcode lock screen follows it when a passcode is set. Same place and column as the lock screen: the lock circle, "Sotto is locked", 8 below "Touch ID or your Mac password opens your chats." 14 regular `windowSubFg` centered, 16 below a filled accent button "Unlock" 256 wide and 42 high (the button of the first launch, 7.1; Return presses it), 8 below one line 13 regular `fieldError` with the reason the last unlock failed, empty after a cancel. The unlocking itself is the system sheet of Touch ID or the Mac password, shown at launch by itself and on each press of "Unlock"; Sotto draws no field of its own for it.
 
 ### 11.7 Connection
 

@@ -18,6 +18,7 @@ end; `--keep DIR` keeps the stores and the relay database in DIR instead.
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import socket
@@ -36,6 +37,10 @@ REPOSITORY = Path(__file__).resolve().parent.parent
 BIN = Path(sys.executable).parent
 SOTTO = BIN / "sotto"
 SOTTO_RELAY = BIN / "sotto-relay"
+SOTTO_MAC = REPOSITORY / ".build/debug/sotto-mac"
+# Every store of a run is of the test kind: its Secure Enclave key asks for no Touch ID and no
+# password, so nothing shows on the screen (docs/key-storage.md).
+PROTECTION = {"SOTTO_STORE_PROTECTION": "test"}
 
 
 class CheckFailed(Exception):
@@ -149,9 +154,27 @@ async def relay(database: Path) -> AsyncIterator[str]:
         process.wait(timeout=PATIENCE_SECONDS)
 
 
+def read_only(store: Path, statement: str) -> list[tuple[object, ...]]:
+    """The rows of a statement: a Swift store is encrypted and answers through `sotto-mac
+    test-query`, any other SQLite file directly. A store that cannot answer now raises
+    sqlite3.OperationalError."""
+    if not (store.parent / "store.key").exists():
+        with sqlite3.connect(f"file:{store}?mode=ro", uri=True) as connection:
+            return connection.execute(statement).fetchall()
+    done = subprocess.run(
+        [SOTTO_MAC, "--data-dir", store.parent, "test-query", statement],
+        capture_output=True, text=True, timeout=PATIENCE_SECONDS,
+    )
+    if done.returncode != 0:
+        raise sqlite3.OperationalError(done.stderr.strip())
+    return [
+        tuple(bytes.fromhex(value["hex"]) if isinstance(value, dict) else value for value in row)
+        for row in json.loads(done.stdout)
+    ]
+
+
 def stored_texts(store: Path) -> list[str]:
-    with sqlite3.connect(f"file:{store}?mode=ro", uri=True) as connection:
-        return [str(row[0]) for row in connection.execute("SELECT text FROM messages")]
+    return [str(row[0]) for row in read_only(store, "SELECT text FROM messages")]
 
 
 async def part_five(swift: Chat, python: Chat, swift_dir: Path, python_dir: Path, sotto_mac: Path) -> None:
@@ -219,6 +242,7 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description="sotto-mac and the Python client through a real relay.")
     parser.add_argument("--keep", type=Path, metavar="DIR", help="keep the data in DIR")
     arguments = parser.parse_args()
+    os.environ.update(PROTECTION)
     subprocess.run(["swift", "build", "--product", "sotto-mac"], cwd=REPOSITORY, check=True)
     binary_path = await command("swift", "build", "--show-bin-path")
     sotto_mac = Path(binary_path) / "sotto-mac"
@@ -260,10 +284,8 @@ async def main() -> int:
                 printed += await command(sotto_mac, "--data-dir", swift_dir, "id")
                 printed += await command(sotto_mac, "--data-dir", swift_dir, "contacts")
                 printed += (await outcome(sotto_mac, "--help"))[1]
-                with sqlite3.connect(swift_dir / "store.db") as store:
-                    seed, dh_key = store.execute(
-                        "SELECT seed, identity_dh_private_key FROM identity"
-                    ).fetchone()
+                seed, dh_key = read_only(swift_dir / "store.db", "SELECT seed, identity_dh_private_key FROM identity")[0]
+                assert isinstance(seed, bytes) and isinstance(dh_key, bytes)
                 if seed.hex() in printed or dh_key.hex() in printed or "seed" in printed.lower():
                     raise CheckFailed("sotto-mac printed a private key")
                 print("ok   sotto-mac prints no private key")

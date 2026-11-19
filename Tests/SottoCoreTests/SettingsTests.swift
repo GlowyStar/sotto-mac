@@ -86,6 +86,9 @@ import Testing
     try Messenger.erase(directory: directory)
     #expect(FileManager.default.fileExists(atPath: foreign.path))
     #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent(ClientStore.fileName).path))
+    #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent(StoreKeys.fileName).path))
+    #expect(throws: StoreError.locked) { try Messenger(directory: directory, relay: deadRelay) }
+    try StoreKeys.unlock(directory, protection: .test)
     let reopened = try Messenger(directory: directory, relay: deadRelay)
     #expect(!reopened.hadIdentity)
     #expect(reopened.launchSettings == nil)

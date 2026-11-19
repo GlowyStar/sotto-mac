@@ -1,4 +1,5 @@
 import AppKit
+import LocalAuthentication
 import Observation
 import SottoCore
 import SwiftUI
@@ -210,6 +211,8 @@ struct Launch {
     var relay = defaultRelay
     var snapshot: URL?
     var dump = false
+    /// `--store-info`: prints which SQLCipher serves the store of `--data-dir`, and exits.
+    var storeInfo = false
     /// `--send NAME TEXT`, any number of times: texts sent to the contacts of those names once
     /// the app is connected, through the action of the compose bar.
     var sends: [(name: String, text: String)] = []
@@ -252,6 +255,7 @@ struct Launch {
         demo = arguments.contains("--demo")
         firstLaunch = arguments.contains("--first-launch")
         dump = arguments.contains("--dump")
+        storeInfo = arguments.contains("--store-info")
         dataDirectory = value(after: "--data-dir").map { URL(fileURLWithPath: $0, isDirectory: true) }
         relay = value(after: "--relay") ?? Self.defaultRelay
         snapshot = value(after: "--snapshot").map { URL(fileURLWithPath: $0, isDirectory: true) }
@@ -341,6 +345,16 @@ final class AppModel {
     var relayDraft: String?
     /// Set while the lock screen covers the window (DESIGN.md 11.6).
     var locked = false
+    /// Set while the store is closed and its key dropped: the unlock screen covers the window
+    /// until Touch ID or the Mac password opens it (DESIGN.md 11.6).
+    var storeLocked = false
+    /// Why the last unlock of the store failed; nil after a cancel.
+    var unlockFailure: String?
+    @ObservationIgnored private var unlocking = false
+    /// Set while a lock closes the messenger and drops the key; no unlock starts meanwhile.
+    @ObservationIgnored private var closing = false
+    /// Either lock screen covers the window.
+    var covered: Bool { locked || storeLocked }
     /// The data folder; nil for the mock data.
     private(set) var dataDirectory: URL?
     /// The size of the data folder, read when the storage page opens.
@@ -403,19 +417,50 @@ final class AppModel {
         if mock { MockData.fill(self) }
     }
 
-    init(messenger: Messenger, directory: URL) {
+    /// The app over the store in `directory`, locked until `unlockStore`.
+    init(directory: URL) {
         myID = ""
         relayAddress = ""
         connection = .idle
         dataDirectory = directory
-        settings = messenger.launchSettings ?? Self.legacySettings()
-        locked = settings.passcode != nil
+        settings = Self.legacySettings()
+        storeLocked = true
         scriptedSends = Launch.current.sends
         scriptedFileSends = Launch.current.fileSends
         scriptedProfile = Launch.current.profile
         scriptedReads = Launch.current.readChats
         scriptedChanges = Launch.current.changes
-        attach(messenger)
+    }
+
+    /// Asks for Touch ID or the Mac password with the system sheet (a store of the test kind
+    /// asks nothing), unwraps the store key and opens the messenger; the passcode, when set,
+    /// is asked after that.
+    func unlockStore() {
+        guard storeLocked, !unlocking, !closing, messenger == nil, let directory = dataDirectory else { return }
+        unlocking = true
+        unlockFailure = nil
+        Task {
+            defer { unlocking = false }
+            do {
+                let protection = try StoreProtection.asked(for: directory)
+                let context = LAContext()
+                if protection == .presence {
+                    try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "open your chats")
+                }
+                try StoreKeys.unlock(directory, protection: protection, context: context)
+                let messenger = try Self.messenger(directory)
+                settings = messenger.launchSettings ?? Self.legacySettings()
+                locked = settings.passcode != nil
+                storeLocked = false
+                lastActivity = Date()
+                attach(messenger)
+                alerts?.refresh(ask: settings.notifications)
+            } catch let error as LAError where [.userCancel, .appCancel, .systemCancel].contains(error.code) {
+            } catch {
+                StoreKeys.lock(directory)
+                unlockFailure = Messenger.describe(error)
+            }
+        }
     }
 
     /// Before the settings moved to `app.json` the theme was kept in the user defaults.
@@ -443,14 +488,7 @@ final class AppModel {
             if launch.firstLaunch { model.welcome = .start }
             return model
         }
-        do {
-            return AppModel(messenger: try Self.messenger(launch.directory), directory: launch.directory)
-        } catch {
-            let model = AppModel(mock: false)
-            model.myID = ""
-            model.connection = .stopped("The store cannot be opened: \(error).")
-            return model
-        }
+        return AppModel(directory: launch.directory)
     }
 
     /// The messenger of a data folder; received files go to the user's Downloads folder unless
@@ -464,6 +502,7 @@ final class AppModel {
     /// Takes over a state of the messenger; the chat open in the key window counts as read.
     /// New incoming messages become notifications and the Dock badge follows the unread count.
     func apply(_ state: MessengerState) {
+        if storeLocked { return }
         if let userID = state.userID { myID = userID }
         relayAddress = state.relay
         connection = ConnectionState(state.link)
@@ -661,10 +700,55 @@ final class AppModel {
             ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
     }
 
-    /// Engages the lock screen when a passcode is set.
+    /// Closes the store and drops its key, then covers the window until Touch ID or the Mac
+    /// password opens it again; the mock data has only the passcode lock.
     func lock() {
-        guard settings.passcode != nil, welcome == nil else { return }
-        locked = true
+        guard welcome == nil, !storeLocked else { return }
+        guard let messenger, let directory = dataDirectory else {
+            if settings.passcode != nil { locked = true }
+            return
+        }
+        storeLocked = true
+        locked = false
+        closing = true
+        Task {
+            await saveDraftsNow()
+            self.messenger = nil
+            await messenger.close()
+            StoreKeys.lock(directory)
+            clearContent()
+            closing = false
+        }
+    }
+
+    /// Closes the store and drops its key before the app quits.
+    func closeStore() async {
+        await saveDraftsNow()
+        let messenger = messenger
+        self.messenger = nil
+        await messenger?.close()
+        if let dataDirectory { StoreKeys.lock(dataDirectory) }
+    }
+
+    /// Forgets what the window shows of the chats.
+    private func clearContent() {
+        settingsDialog = nil
+        settingsPage = nil
+        modal = nil
+        closeChat()
+        panelOpen = false
+        contacts = []
+        messages = [:]
+        drafts = [:]
+        savedDrafts = [:]
+        lastState = nil
+        archiveOpen = false
+        profileDraft = nil
+        viewer = nil
+        avatarViewer = nil
+        replies = [:]
+        edits = [:]
+        picks = []
     }
 
     func unlock(_ text: String) -> Bool {
@@ -703,7 +787,7 @@ final class AppModel {
                 try? await Task.sleep(for: .seconds(10))
                 guard let self else { return }
                 let idle = Date().timeIntervalSince(self.lastActivity)
-                if !self.locked, idle >= Double(self.settings.autoLockMinutes * 60) { self.lock() }
+                if !self.storeLocked, idle >= Double(self.settings.autoLockMinutes * 60) { self.lock() }
             }
         }
     }
@@ -713,17 +797,7 @@ final class AppModel {
     func resetEverything() {
         let messenger = messenger
         self.messenger = nil
-        settingsDialog = nil
-        settingsPage = nil
-        modal = nil
-        closeChat()
-        panelOpen = false
-        contacts = []
-        messages = [:]
-        drafts = [:]
-        savedDrafts = [:]
-        lastState = nil
-        archiveOpen = false
+        clearContent()
         if messenger != nil { notifier.setBadge(0) }
         myID = ""
         profile = UserProfile()
@@ -740,7 +814,8 @@ final class AppModel {
             await messenger.close()
             do {
                 try Messenger.erase(directory: directory)
-                self?.attach(try Self.messenger(directory))
+                self?.storeLocked = true
+                self?.unlockStore()
             } catch {
                 self?.connection = .stopped("The store cannot be opened: \(error).")
                 self?.showToast(Messenger.describe(error))

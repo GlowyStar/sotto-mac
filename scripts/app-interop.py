@@ -47,8 +47,8 @@ import zlib
 from pathlib import Path
 
 from interop import (
-    FILE_PATIENCE_SECONDS, LARGE_FILE_BYTES, PATIENCE_SECONDS, SOTTO, Chat, CheckFailed, command, outcome, relay,
-    work_folder,
+    FILE_PATIENCE_SECONDS, LARGE_FILE_BYTES, PATIENCE_SECONDS, PROTECTION, SOTTO, Chat, CheckFailed, command, outcome,
+    read_only, relay, work_folder,
 )
 
 REPOSITORY = Path(__file__).resolve().parent.parent
@@ -93,10 +93,6 @@ def same(sent: Path, saved: Path | str) -> None:
         raise CheckFailed(f"{saved} is not the file {sent.name}")
     print(f"ok   {saved} holds the {sent.stat().st_size} bytes of {sent.name}")
 
-
-def read_only(store: Path, statement: str) -> list[tuple[object, ...]]:
-    with sqlite3.connect(f"file:{store}?mode=ro", uri=True) as connection:
-        return connection.execute(statement).fetchall()
 
 
 async def until(label: str, condition: object, patience: float = PATIENCE_SECONDS, step: float = 0.2) -> None:
@@ -223,6 +219,18 @@ async def run(run_folder: Path) -> None:
             await files_both_ways(run_folder, url, app_dir, python_dir, downloads, log, apps, start_python)
             await profiles_both_ways(run_folder, url, app_dir, python_dir, app_id, log, apps, start_python)
             await part_five_both_ways(url, app_dir, python_dir, log, apps, start_python)
+
+        info = json.loads(await command(APP, "--data-dir", app_dir, "--store-info"))
+        frameworks = APP.parent.parent / "Frameworks/SQLCipher.framework"
+        if not info["cipherVersion"] or not info["library"].startswith(str(frameworks)):
+            raise CheckFailed(f"the app's store is not served by its SQLCipher: {info}")
+        print(f"ok   the app's store is served by SQLCipher {info['cipherVersion']} over {info['cipherProvider']}")
+        stored = b"".join(path.read_bytes() for path in app_dir.iterdir() if path.name.startswith("store."))
+        if stored.startswith(b"SQLite format 3") or any(
+            text.encode() in stored for text in TEXTS_WHILE_RUNNING + TEXTS_WHILE_CLOSED + [TEXT_TO_RUNNING]
+        ):
+            raise CheckFailed("the files of the app's store hold readable text")
+        print("ok   no text of the chat is readable in the files of the app's store")
 
         code, dumped, errors = await outcome(APP, "--data-dir", app_dir, "--dump")
         if code != 0:
@@ -595,6 +603,7 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description="The app and the Python client through a real relay.")
     parser.add_argument("--keep", type=Path, metavar="DIR", help="keep the data and the pictures in DIR")
     arguments = parser.parse_args()
+    os.environ.update(PROTECTION)
     subprocess.run([REPOSITORY / "scripts/build-app.sh"], cwd=REPOSITORY, check=True)
     subprocess.run(["swift", "build", "--product", "sotto-mac"], cwd=REPOSITORY, check=True)
     with work_folder(arguments.keep, "sotto-app-interop-") as folder:

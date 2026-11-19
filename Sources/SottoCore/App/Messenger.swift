@@ -676,12 +676,19 @@ public actor Messenger {
         }
     }
 
-    /// Deletes the files of a store in `directory` (the database, its journal and
-    /// `app.json`), then the folder itself when nothing else is left in it. Call it only
-    /// after `close`.
+    /// Deletes the files of a store in `directory` (the database, its journal, its wrapped
+    /// key and `app.json`), then the folder itself when nothing else is left in it, and drops
+    /// the key: pages of the old store left on the disk cannot be decrypted after it. Call it
+    /// only after `close`.
     public static func erase(directory: URL) throws {
+        StoreKeys.lock(directory)
+        let store = directory.appendingPathComponent(ClientStore.fileName).path
+        unlink(store + ClientStore.encryptingSuffix)
+        if FileManager.default.fileExists(atPath: store + ClientStore.plainSuffix) {
+            try ClientStore.overwriteAndRemove(URL(fileURLWithPath: store + ClientStore.plainSuffix))
+        }
         let manager = FileManager.default
-        let names = [ClientStore.fileName, ClientStore.fileName + "-journal", notesFile]
+        let names = [ClientStore.fileName, ClientStore.fileName + "-journal", StoreKeys.fileName, notesFile]
         for name in names {
             let url = directory.appendingPathComponent(name)
             if manager.fileExists(atPath: url.path) { try manager.removeItem(at: url) }

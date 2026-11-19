@@ -13,7 +13,9 @@ struct RootView: View {
         VStack(spacing: 0) {
             TitleStrip()
             GeometryReader { geometry in
-                if model.locked {
+                if model.storeLocked {
+                    StoreLockScreen(model: model)
+                } else if model.locked {
                     LockScreen(model: model)
                 } else if model.welcome != nil {
                     WelcomeScreen(model: model)
@@ -24,16 +26,16 @@ struct RootView: View {
         }
         .frame(minWidth: Metrics.windowMin.width, minHeight: Metrics.windowMin.height)
         .background(Color.windowBg)
-        .overlay { if !model.locked { modalLayer } }
-        .overlay(alignment: .bottom) { if !model.locked && model.viewer == nil { toastLayer } }
+        .overlay { if !model.covered { modalLayer } }
+        .overlay(alignment: .bottom) { if !model.covered && model.viewer == nil { toastLayer } }
         .overlay {
-            if !model.locked, let item = model.viewer {
+            if !model.covered, let item = model.viewer {
                 MediaViewer(model: model, item: item)
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.97)))
             }
         }
         .overlay {
-            if !model.locked, let photo = model.avatarViewer {
+            if !model.covered, let photo = model.avatarViewer {
                 AvatarViewer(model: model, photo: photo)
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.97)))
             }

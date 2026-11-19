@@ -25,7 +25,7 @@ struct SottoApp: App {
             CommandGroup(after: .appSettings) {
                 Button("Lock Sotto") { model.lock() }
                     .keyboardShortcut("l")
-                    .disabled(model.settings.passcode == nil)
+                    .disabled(model.covered || (model.messenger == nil && model.settings.passcode == nil))
             }
             CommandGroup(replacing: .newItem) {
                 Button("Add Contact...") { model.modal = .addContact }.keyboardShortcut("n")
@@ -62,14 +62,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppModel.shared.applyTheme()
             AppModel.shared.watchActivity()
             AppModel.shared.alerts?.refresh(ask: AppModel.shared.settings.notifications)
+            AppModel.shared.unlockStore()
         }
     }
 
-    /// The drafts typed in the last moment are written before the app quits.
+    /// The drafts typed in the last moment are written and the store is closed, its key
+    /// overwritten, before the app quits.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
             _ = Task {
-                await AppModel.shared.saveDraftsNow()
+                await AppModel.shared.closeStore()
                 NSApp.reply(toApplicationShouldTerminate: true)
             }
         }
