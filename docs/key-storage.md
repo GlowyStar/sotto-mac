@@ -55,6 +55,22 @@ or column of before changes, so an existing encrypted store opens as it is.
   copies while it derives a key or decapsulates is out of this code's reach, as for the
   other keys.
 
+## The verified mark
+
+Since SOTTO-47 the store holds the mark of section 45 of the protocol in a table of its
+own, as the reference does; a store of an earlier version gains it when it opens, with no
+contact marked, and nothing else changes.
+
+| Table | What it holds |
+| --- | --- |
+| `verified_contacts` | one row per contact that the user marked as verified after comparing the safety number: its identity key. The row goes with the contact |
+
+The mark never leaves the Mac: no frame or message carries it, and setting or clearing it
+changes no other row. The safety number itself is not stored: it is computed from the two
+public identity keys when it is shown and kept in memory only. When a key that a contact's
+identity signed in place of the pinned one is refused, the time goes into the app's notes
+(`app_notes`, by user id) until the user closes the warning or deletes the contact.
+
 ## Unlock and lock
 
 - The app starts locked. At launch it shows the system sheet of Touch ID or the Mac password

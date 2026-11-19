@@ -443,18 +443,7 @@ struct QRCodeBox: View {
     var body: some View {
         ModalBox(title: "QR code", wide: true) {
             VStack(spacing: 16) {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.qrBg)
-                    .frame(width: Metrics.qrPlate, height: Metrics.qrPlate)
-                    .overlay {
-                        if let code = QRCode.modules(model.myID) {
-                            Image(decorative: code, scale: 1)
-                                .resizable()
-                                .interpolation(.none)
-                                .padding(Metrics.qrQuiet)
-                        }
-                    }
-                    .accessibilityLabel("QR code of your id")
+                QRPlate(text: model.myID, label: "QR code of your id")
                 IDBlock(id: model.myID)
             }
             .frame(maxWidth: .infinity)
@@ -473,6 +462,27 @@ struct QRCodeBox: View {
             .buttonStyle(.plain)
             BoxButton(title: "Close") { model.settingsDialog = nil }.keyboardShortcut(.defaultAction)
         }
+    }
+}
+
+/// The white plate of a QR code with its quiet zone (DESIGN.md 12.4).
+struct QRPlate: View {
+    let text: String
+    let label: String
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 8)
+            .fill(Color.qrBg)
+            .frame(width: Metrics.qrPlate, height: Metrics.qrPlate)
+            .overlay {
+                if let code = QRCode.modules(text) {
+                    Image(decorative: code, scale: 1)
+                        .resizable()
+                        .interpolation(.none)
+                        .padding(Metrics.qrQuiet)
+                }
+            }
+            .accessibilityLabel(label)
     }
 }
 

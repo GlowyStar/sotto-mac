@@ -31,7 +31,11 @@ disappears from both stores; a timer change is no message. The store is read bac
 `Sotto --dump` and drawn with `Sotto --snapshot`. The app's own `app.json`, written in the
 format of a version before the notes moved into the store, turns notifications off before
 the first start, so that a run posts nothing on the screen, and names a download folder of
-the run; the first start moves it into the store. At the end no file of the app's data
+the run; the first start moves it into the store. Before the first start, the safety number of the app
+(`Sotto --safety-number python`, the rows of the contact panel and the text of the QR code)
+is the one `sotto verify app` prints, with the halves of the payload swapped, and
+`sotto-mac verify python mark` marks the contact in the app's store; the dump at the end
+still shows it verified, with no warning of a refused key. At the end no file of the app's data
 folder holds a text of the chat or the bytes of a file of the run. Exits 0 only if every
 text and file arrived; stops everything it started.
 
@@ -55,7 +59,7 @@ from pathlib import Path
 
 from interop import (
     FILE_PATIENCE_SECONDS, LARGE_FILE_BYTES, PATIENCE_SECONDS, PROTECTION, SOTTO, Chat, CheckFailed, command,
-    expect_versions, outcome, read_only, relay, session_versions, work_folder,
+    expect_one_safety_number, expect_versions, outcome, read_only, relay, session_versions, work_folder,
 )
 
 REPOSITORY = Path(__file__).resolve().parent.parent
@@ -197,6 +201,12 @@ async def run(run_folder: Path) -> None:
             await command(SOTTO, "--data-dir", python_dir, "add", "app", app_id)
             await command(sotto_mac, "--data-dir", app_dir, "add", "python", python_id)
             print(f"ok   identities made: python {python_id[:8]}..., app {app_id[:8]}...")
+            code, shown, errors = await outcome(APP, "--data-dir", app_dir, "--safety-number", "python")
+            if code != 0:
+                raise CheckFailed(f"Sotto --safety-number exited {code}: {errors}")
+            await expect_one_safety_number("the app", shown.splitlines(), python_dir, "app")
+            if await command(sotto_mac, "--data-dir", app_dir, "verify", "python", "mark") != "python is verified":
+                raise CheckFailed("sotto-mac did not mark python in the app's store")
             notes = app_dir / "app.json"
             downloads = run_folder / "downloads"
             settings = {
@@ -326,6 +336,9 @@ async def run(run_folder: Path) -> None:
         if chat.get("timer") != 0 or changes != [(False, 3), (True, 0)] or not state.get("readReceipts"):
             raise CheckFailed(f"the dump holds the timer {chat.get('timer')} and the changes {changes}")
         print("ok   the dump shows the reply to a deleted message, the timer off and its two changes")
+        if chat.get("verified") is not True or "refusedKey" in chat:
+            raise CheckFailed(f"the dump holds verified {chat.get('verified')} and refusedKey {chat.get('refusedKey')}")
+        print("ok   the dump shows python still verified after the whole run, with no refused key")
 
         pictures = run_folder / "snapshots"
         code, _, errors = await outcome(APP, "--data-dir", app_dir, "--snapshot", pictures)

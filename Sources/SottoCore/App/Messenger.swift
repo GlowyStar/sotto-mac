@@ -173,6 +173,13 @@ public struct Chat: Codable, Equatable, Sendable {
     public var timer = 0
     /// The changes of the timer, oldest first.
     public var timerChanges: [TimerChange] = []
+    /// The user marked the contact as verified after comparing the safety number (protocol
+    /// section 45).
+    public var verified = false
+    /// When a key that the identity of the contact signed in place of the pinned one was
+    /// last refused (IDENTITY_KEY_MISMATCH, protocol sections 5.3 and 45.2); nil when none
+    /// was, or once the user took the warning off the chat.
+    public var refusedKey: Date?
 }
 
 public enum LinkState: Codable, Equatable, Sendable {
@@ -642,7 +649,8 @@ public actor Messenger {
         guard let transport else {
             throw NotConnectedError()
         }
-        try await transport.edit(Identity.decodeUserID(userID), position, text)
+        let contact = try Identity.decodeUserID(userID)
+        try await noting(contact) { try await transport.edit(contact, position, text) }
         await publish()
     }
 
@@ -652,7 +660,8 @@ public actor Messenger {
         guard let transport else {
             throw NotConnectedError()
         }
-        try await transport.delete(Identity.decodeUserID(userID), position)
+        let contact = try Identity.decodeUserID(userID)
+        try await noting(contact) { try await transport.delete(contact, position) }
         notes.times[String(position)] = nil
         try notes.save(notesStore)
         await publish()
@@ -664,7 +673,8 @@ public actor Messenger {
         guard let transport else {
             throw NotConnectedError()
         }
-        try await transport.setTimer(Identity.decodeUserID(userID), seconds: seconds)
+        let contact = try Identity.decodeUserID(userID)
+        try await noting(contact) { try await transport.setTimer(contact, seconds: seconds) }
         notes.timerChanges[userID, default: []].append(TimerNote(at: Self.milliseconds(Date()), seconds: seconds, own: true))
         try notes.save(notesStore)
         await publish()
@@ -709,7 +719,23 @@ public actor Messenger {
         guard let transport else {
             throw NotConnectedError()
         }
-        _ = try await transport.resetSession(Identity.decodeUserID(userID))
+        let contact = try Identity.decodeUserID(userID)
+        _ = try await noting(contact) { try await transport.resetSession(contact) }
+        await publish()
+    }
+
+    /// Sets or clears the verified mark of the contact (protocol section 45). It stays in
+    /// the store of this Mac; the contact does not learn it.
+    public func setVerified(_ on: Bool, for userID: String) async throws {
+        let contact = try Identity.decodeUserID(userID)
+        try await withClient { try $0.setVerified(contact, on) }
+        await publish()
+    }
+
+    /// Takes the warning about a refused key off the chat, until another key is refused.
+    public func dismissRefusedKey(_ userID: String) async throws {
+        notes.refusedKeys[userID] = nil
+        try notes.save(notesStore)
         await publish()
     }
 
@@ -911,6 +937,8 @@ public actor Messenger {
         switch error {
         case let error as ContactError: error.message
         case EnvelopeError.textTooLong: "The message is too long."
+        case CryptoError.identityKeyMismatch:
+            "The identity of the contact signed another key, and it was refused (IDENTITY_KEY_MISMATCH)."
         case let error as RefusedError: "The relay refused the request (\(error.result))."
         case let error as URLRefusedError: "The relay address is refused: \(error.message)."
         case is NotConnectedError: "There is no connection to a relay."
@@ -995,7 +1023,7 @@ public actor Messenger {
         link = .idle
     }
 
-    private func handle(_ event: TransportEvent) async {
+    func handle(_ event: TransportEvent) async {
         switch event {
         case .connected: link = .connected
         case .retrying: link = .connecting
@@ -1005,6 +1033,9 @@ public actor Messenger {
             // not know, is no message (protocol sections 20.3, 36.3 and 39.7): the chat stays
             // where it is.
             guard let userID = try? Identity.encodeUserID(sender) else { break }
+            if received.result == CryptoError.identityKeyMismatch.result {
+                noteRefusedKey(sender)
+            }
             var changed = received.isANewMessage && notes.arrived(userID)
             if let seconds = received.timer {
                 notes.timerChanges[userID, default: []].append(TimerNote(at: Self.milliseconds(Date()), seconds: seconds, own: false))
@@ -1027,6 +1058,9 @@ public actor Messenger {
                 return
             }
         case .file(let update):
+            if update.result == CryptoError.identityKeyMismatch.result {
+                noteRefusedKey(update.contact)
+            }
             let moving = update.state == .sending || update.state == .receiving
             let made = Progress(done: update.done, total: update.total)
             let before = progress[update.messageID]
@@ -1041,6 +1075,26 @@ public actor Messenger {
     private func stopped(_ text: String) async {
         link = .stopped(text)
         await publish()
+    }
+
+    /// A key that the identity of the contact signed in place of the pinned one was refused
+    /// (IDENTITY_KEY_MISMATCH): the chat warns about it until the user takes the warning off.
+    private func noteRefusedKey(_ contact: Data) {
+        guard let userID = try? Identity.encodeUserID(contact) else { return }
+        notes.refusedKeys[userID] = Self.milliseconds(Date())
+        try? notes.save(notesStore)
+    }
+
+    /// Runs an action that may start a session with the contact; a refused key is noted
+    /// before the error goes on.
+    private func noting<T: Sendable>(_ contact: Data, _ action: () async throws -> T) async throws -> T {
+        do {
+            return try await action()
+        } catch CryptoError.identityKeyMismatch {
+            noteRefusedKey(contact)
+            await publish()
+            throw CryptoError.identityKeyMismatch
+        }
     }
 
     /// The expired messages go, through the transport when there is one, which also ends
@@ -1114,6 +1168,9 @@ public actor Messenger {
             } catch is CancellationError {
                 break
             } catch {
+                if error as? CryptoError == .identityKeyMismatch {
+                    noteRefusedKey(row.contact)
+                }
                 let reason = (error as? RefusedError).map { Self.refusal($0.result) } ?? Self.describe(error)
                 try? await transport.withClient { client in
                     try client.store.transaction { try client.store.failPending(row.position, reason: reason) }
@@ -1260,7 +1317,9 @@ public actor Messenger {
                 timer: rows.timers[contact.identityKey] ?? 0,
                 timerChanges: notes.timerChanges[userID, default: []].map {
                     TimerChange(date: date($0.at), seconds: $0.seconds, own: $0.own)
-                }
+                },
+                verified: rows.verified.contains(contact.identityKey),
+                refusedKey: notes.refusedKeys[userID].map(date)
             )
         }
         let own = rows.ownProfile
@@ -1322,6 +1381,7 @@ struct Rows: Sendable {
     var avatarFiles: [Int64: FileRow] = [:]
     var timers: [Data: Int] = [:]
     var readReceipts: Bool
+    var verified: Set<Data>
 
     init(store: ClientStore) throws {
         identityKey = try store.identity().map { try Identity.deriveIdentityKey(seed: $0.seed) }
@@ -1331,6 +1391,7 @@ struct Rows: Sendable {
             timers[contact.identityKey] = try store.timer(contact.identityKey)
         }
         readReceipts = try store.readReceipts()
+        verified = try store.verifiedContacts()
         for row in try store.pending() {
             pending[row.contact, default: []].append(row)
         }
@@ -1366,6 +1427,8 @@ struct Notes: Codable, Equatable {
     var archived: Set<String> = []
     /// The changes of the disappearing timer of each chat, by user id, oldest first.
     var timerChanges: [String: [TimerNote]] = [:]
+    /// When a key of each contact was last refused (IDENTITY_KEY_MISMATCH), by user id.
+    var refusedKeys: [String: Int64] = [:]
 
     init(relay: String? = nil, read: [String: Int64] = [:]) {
         self.relay = relay
@@ -1388,6 +1451,7 @@ struct Notes: Codable, Equatable {
         muted = value(.muted, [])
         archived = value(.archived, [])
         timerChanges = value(.timerChanges, [:])
+        refusedKeys = value(.refusedKeys, [:])
     }
 
     mutating func pin(_ userID: String, _ on: Bool) {
@@ -1420,6 +1484,7 @@ struct Notes: Codable, Equatable {
     mutating func forget(_ userID: String) {
         drafts[userID] = nil
         timerChanges[userID] = nil
+        refusedKeys[userID] = nil
         pin(userID, false)
         muted.remove(userID)
         archived.remove(userID)

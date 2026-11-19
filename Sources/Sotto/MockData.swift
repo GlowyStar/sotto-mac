@@ -158,6 +158,14 @@ enum MockData {
         set("Lena Smirnova") { $0.profile = UserProfile(name: "Лена", avatar: thumbnailOnly(portrait("lena", hue: 0.08), .receiving)) }
         set("Sam Carter") { $0.profile = UserProfile(name: "Sam", avatar: thumbnailOnly(landscape("sam", hue: 0.12), .notAvailable)) }
         set("Olga") { $0.profile = UserProfile(name: "Olga S.") }
+
+        // The safety number: one contact verified, one verified whose identity signed a key
+        // that was refused (DESIGN.md 21).
+        set("Anna Petrova") { $0.verified = true }
+        set("Max Turner") {
+            $0.verified = true
+            $0.refusedKey = ago(45)
+        }
         model.profile = UserProfile(name: "Alex Morgan", avatar: portrait("me", hue: 0.58))
 
         model.contacts = contacts

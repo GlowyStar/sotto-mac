@@ -521,6 +521,11 @@ public final class ClientStore {
         try query("SELECT read_receipts FROM settings").first.map { $0[0].integer == 1 } ?? true
     }
 
+    /// The contacts that the user marked as verified (protocol section 45).
+    public func verifiedContacts() throws -> Set<Data> {
+        Set(try query("SELECT contact FROM verified_contacts").map { $0[0].data! })
+    }
+
     /// The texts that wait for a session, oldest first.
     public func pending() throws -> [PendingText] {
         try query(
@@ -759,6 +764,7 @@ public final class ClientStore {
         try change("DELETE FROM profiles WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM profile_sends WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM timers WHERE contact = ?", [.blob(contact)])
+        try change("DELETE FROM verified_contacts WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM message_states WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM sessions WHERE contact = ?", [.blob(contact)])
         try change("DELETE FROM contacts WHERE identity_key = ?", [.blob(contact)])
@@ -922,6 +928,15 @@ public final class ClientStore {
             offset = end
         }
         try change("UPDATE files SET saved_as = NULL WHERE position = ?", [.integer(position)])
+    }
+
+    /// Sets or clears the verified mark of a contact; no other row changes (section 45.3).
+    public func setVerified(_ contact: Data, _ on: Bool) throws {
+        if on {
+            try change("INSERT INTO verified_contacts VALUES (?) ON CONFLICT DO NOTHING", [.blob(contact)])
+        } else {
+            try change("DELETE FROM verified_contacts WHERE contact = ?", [.blob(contact)])
+        }
     }
 
     public func setReadReceipts(_ on: Bool) throws {
@@ -1852,6 +1867,13 @@ private enum Schema {
             position INTEGER PRIMARY KEY,
             reply_to INTEGER NOT NULL
         ) STRICT
+        """,
+        // The verified mark, one row per marked contact, as the reference keeps it (protocol
+        // section 45.4); a store of an earlier version gains the table with no contact marked.
+        """
+        CREATE TABLE IF NOT EXISTS verified_contacts (
+            contact BLOB PRIMARY KEY
+        ) STRICT, WITHOUT ROWID
         """,
     ]
 

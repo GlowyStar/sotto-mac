@@ -6,7 +6,10 @@ Run with the interpreter of the sotto project's environment, which holds `sotto`
     ../../python/sotto/.venv/bin/python scripts/interop.py [--keep DIR]
 
 Starts the relay on a free port, builds `sotto-mac`, makes one identity with each client and
-drives both `chat` commands through pipes. Python starts the first session and `sotto-mac
+drives both `chat` commands through pipes. First `verify` of both shows one safety number
+with the halves of the QR payload swapped, and `sotto-mac` marks the Python contact as
+verified; the mark stays through every session and file below, Python learns nothing of it,
+and it clears at the end. Python starts the first session and `sotto-mac
 reset` a second one, so each side makes a session by PQXDH once as initiator and once as
 responder; every session of both stores is of end-to-end version 2, and the relay holds the
 post-quantum prekeys that `sotto-mac` uploaded. Then part 5 goes both ways: a reply with its
@@ -176,6 +179,17 @@ def read_only(store: Path, statement: str) -> list[tuple[object, ...]]:
     ]
 
 
+async def expect_one_safety_number(label: str, shown: list[str], python_dir: Path, name: str) -> None:
+    """`shown` is the three rows of groups and the `qr payload:` line of a Swift side; they
+    are what `sotto verify NAME` prints at Python, with the halves of the payload swapped
+    (sections 44.3 to 44.5 of the protocol)."""
+    at_python = (await command(SOTTO, "--data-dir", python_dir, "verify", name)).splitlines()
+    prefix, own, contact = shown[3].removeprefix("qr payload: ").split(" ")
+    if shown[:3] != at_python[1:4] or at_python[4] != f"qr payload: {prefix} {contact} {own}":
+        raise CheckFailed(f"{label} shows {shown}, python {at_python[1:5]}")
+    print(f"ok   {label} and python show one safety number, {' '.join(shown[:3])}, and swapped payloads")
+
+
 def stored_texts(store: Path) -> list[str]:
     return [str(row[0]) for row in read_only(store, "SELECT text FROM messages")]
 
@@ -288,6 +302,16 @@ async def main() -> int:
                 if added != f"python {python_id}":
                     raise CheckFailed(f"sotto-mac add printed {added!r}")
                 print("ok   each client holds the other as a contact")
+
+                at_swift = (await command(sotto_mac, "--data-dir", swift_dir, "verify", "python")).splitlines()
+                if at_swift[0] != "safety number with python:" or at_swift[5:] != ["python is not verified"]:
+                    raise CheckFailed(f"sotto-mac verify printed {at_swift}")
+                await expect_one_safety_number("sotto-mac", at_swift[1:5], python_dir, "swift")
+                marked = await command(sotto_mac, "--data-dir", swift_dir, "verify", "python", "mark")
+                listed = await command(sotto_mac, "--data-dir", swift_dir, "contacts")
+                if marked != "python is verified" or listed != f"python {python_id} verified":
+                    raise CheckFailed(f"sotto-mac verify mark printed {marked!r}, contacts {listed!r}")
+                print("ok   sotto-mac marks python as verified")
 
                 remote = "ws://relay.example.org/ws"
                 code, _, errors = await outcome(
@@ -439,6 +463,15 @@ async def main() -> int:
                 )
                 same(large_in, saved.group(1))
                 await swift.quit()
+
+                listed = await command(sotto_mac, "--data-dir", swift_dir, "contacts")
+                at_python = await command(SOTTO, "--data-dir", python_dir, "contacts")
+                cleared = await command(sotto_mac, "--data-dir", swift_dir, "verify", "python", "clear")
+                if listed != f"python {python_id} verified" or at_python != f"swift {swift_id}":
+                    raise CheckFailed(f"after the run sotto-mac lists {listed!r} and python {at_python!r}")
+                if cleared != "python is not verified":
+                    raise CheckFailed(f"sotto-mac verify clear printed {cleared!r}")
+                print("ok   the mark of sotto-mac stayed through every session and file, python learned none, it clears")
         except CheckFailed as failure:
             print(f"FAIL {failure}")
             return 1

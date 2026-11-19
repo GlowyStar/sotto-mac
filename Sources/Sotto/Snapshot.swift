@@ -328,6 +328,35 @@ enum Snapshot {
             nora(model)
             model.startEdit("nora-8", in: model.openChatID ?? "")
         },
+        // SOTTO-47: the safety number row of the panel, the verify box, the verified mark and
+        // the warning of a refused key.
+        Shot(name: "verify-panel", size: CGSize(width: 1100, height: 900)) { model in
+            openRich(model)
+            model.panelOpen = true
+        },
+        Shot(name: "verify-panel-dark", size: CGSize(width: 1100, height: 900), dark: true) { model in
+            openRich(model)
+            model.panelOpen = true
+        },
+        Shot(name: "verify-box", size: CGSize(width: 900, height: 760)) { model in
+            nora(model)
+            model.modal = .verify(model.openChatID ?? "")
+        },
+        Shot(name: "verify-box-dark", size: CGSize(width: 900, height: 760), dark: true) { model in
+            openRich(model)
+            model.modal = .verify(model.openChatID ?? "")
+        },
+        Shot(name: "verify-box-low", size: CGSize(width: 600, height: 480)) { model in
+            nora(model)
+            model.modal = .verify(model.openChatID ?? "")
+        },
+        Shot(name: "verify-warning") { maxTurner($0) },
+        Shot(name: "verify-warning-dark", dark: true) { maxTurner($0) },
+        Shot(name: "verify-warning-narrow", size: CGSize(width: 380, height: 700)) { maxTurner($0) },
+        Shot(name: "verify-warning-unverified", dark: true) { model in
+            maxTurner(model)
+            model.setVerified(false, model.openChatID ?? "")
+        },
         // SOTTO-25: a selection in an incoming and an outgoing bubble, a link under the pointer.
         Shot(name: "text-selection") { select($0) },
         Shot(name: "text-selection-dark", dark: true) { select($0) },
@@ -350,6 +379,8 @@ enum Snapshot {
     }
 
     private static func nora(_ model: AppModel) { open(model, "Nora Weiss") }
+
+    private static func maxTurner(_ model: AppModel) { open(model, "Max Turner") }
 
     private static func editProfile(_ model: AppModel) {
         model.openSettings()
@@ -386,11 +417,33 @@ enum Snapshot {
 
     static func runFromArguments() {
         let launch = Launch.current
-        if let directory = launch.dataDirectory, launch.dump || launch.snapshot != nil || launch.storeInfo {
+        if let directory = launch.dataDirectory,
+            launch.dump || launch.snapshot != nil || launch.storeInfo || launch.safetyNumberOf != nil
+        {
             do {
                 try StoreKeys.unlock(directory, protection: StoreProtection.asked(for: directory))
             } catch {
                 FileHandle.standardError.write(Data("the store does not open: \(error)\n".utf8))
+                exit(1)
+            }
+        }
+        if let name = launch.safetyNumberOf {
+            guard let directory = launch.dataDirectory else { exit(2) }
+            do {
+                let model = AppModel(mock: false)
+                model.apply(try Messenger.peek(directory: directory, relay: launch.relay))
+                guard let contact = model.contacts.first(where: { $0.name == name }),
+                    let number = model.safetyNumber(contact.id)
+                else {
+                    FileHandle.standardError.write(Data("no contact named \(name)\n".utf8))
+                    exit(1)
+                }
+                // The rows of the contact panel, then the text of the code of the verify box.
+                let rows = IDBlock.lines(number.digits, group: SafetyNumber.groupDigits)
+                FileHandle.standardOutput.write(Data((rows + ["qr payload: \(number.qrPayload)"]).joined(separator: "\n").utf8 + [10]))
+                exit(0)
+            } catch {
+                FileHandle.standardError.write(Data("safety number failed: \(error)\n".utf8))
                 exit(1)
             }
         }

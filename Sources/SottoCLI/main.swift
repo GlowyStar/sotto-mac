@@ -22,8 +22,10 @@ let progressSteps = 10
 let chatCommands = "commands: /reply N text, /edit N text, /delete N, /timer [off|30s|5m|1h|1d|1w], /quit"
 let timerUnits: [(unit: String, seconds: Int)] = [("w", 604_800), ("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
 let quoteShown = 60
+// The safety number in three rows of four groups, as the reference prints it (section 44.3).
+let groupsInARow = 4
 let usage = """
-    usage: sotto-mac [-h] [--data-dir DATA_DIR] {init,id,add,contacts,chat,reset,send-file,read-receipts} ...
+    usage: sotto-mac [-h] [--data-dir DATA_DIR] {init,id,add,contacts,chat,reset,send-file,read-receipts,verify} ...
     """
 let help = """
     \(usage)
@@ -40,6 +42,9 @@ let help = """
       send-file NAME PATH   send a file to a contact and wait until it is sent or not sent
       read-receipts [on|off]
                             show, or turn on or off, the read receipts contacts get
+      verify NAME [mark|clear]
+                            show the safety number of a contact; mark it verified or
+                            clear that
 
     options:
       -h, --help            show this help message and exit
@@ -105,7 +110,7 @@ func parse(_ words: [String]) throws -> Arguments {
     }
     let positionalCounts = [
         "init": 0, "id": 0, "add": 2, "contacts": 0, "chat": 1, "reset": 1, "send-file": 2, "read-receipts": 1,
-        "test-query": 1,
+        "verify": 2, "test-query": 1,
     ]
     guard let wanted = positionalCounts[command] else {
         throw UsageError(message: "argument command: invalid choice: '\(command)'")
@@ -139,8 +144,14 @@ func parse(_ words: [String]) throws -> Arguments {
         }
         return arguments
     }
+    if command == "verify", !arguments.positionals.isEmpty {
+        guard arguments.positionals.dropFirst().allSatisfy({ $0 == "mark" || $0 == "clear" }) else {
+            throw UsageError(message: "argument action: invalid choice: '\(arguments.positionals[1])' (choose from 'mark', 'clear')")
+        }
+        return arguments
+    }
     guard arguments.positionals.count == wanted else {
-        throw UsageError(message: "the following arguments are required: \(["add": "name, user_id", "chat": "name", "reset": "name", "send-file": "name, path"][command]!)")
+        throw UsageError(message: "the following arguments are required: \(["add": "name, user_id", "chat": "name", "reset": "name", "send-file": "name, path", "verify": "name"][command]!)")
     }
     return arguments
 }
@@ -648,8 +659,11 @@ func run(_ arguments: Arguments) async throws -> Int32 {
         }
         say("\(try names(client)[contact] ?? "") \(try Identity.encodeUserID(contact))")
     case "contacts":
-        for contact in try openClient(arguments).store.contacts() {
-            say("\(contact.name ?? "") \(try Identity.encodeUserID(contact.identityKey))")
+        let client = try openClient(arguments)
+        let verified = try client.store.verifiedContacts()
+        for contact in try client.store.contacts() {
+            let mark = verified.contains(contact.identityKey) ? " verified" : ""
+            say("\(contact.name ?? "") \(try Identity.encodeUserID(contact.identityKey))\(mark)")
         }
     case "chat":
         return try await chat(arguments)
@@ -661,6 +675,22 @@ func run(_ arguments: Arguments) async throws -> Int32 {
         say("read receipts: \(try client.readReceipts() ? "on" : "off")")
     case "send-file":
         return try await sendFile(arguments)
+    case "verify":
+        let client = try openClient(arguments)
+        let name = arguments.positionals[0]
+        let contact = try contactNamed(client, name)
+        switch arguments.positionals.dropFirst().first {
+        case "mark": try client.setVerified(contact, true)
+        case "clear": try client.setVerified(contact, false)
+        default:
+            let number = try SafetyNumber(identityKey: client.identityKey, contactIdentityKey: contact)
+            say("safety number with \(name):")
+            for row in stride(from: 0, to: number.groups.count, by: groupsInARow) {
+                say(number.groups[row ..< row + groupsInARow].joined(separator: " "))
+            }
+            say("qr payload: \(number.qrPayload)")
+        }
+        say("\(name) is \(try client.isVerified(contact) ? "verified" : "not verified")")
     case "test-query":
         let store = try openStore(arguments)
         defer { store.close() }

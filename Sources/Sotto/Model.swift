@@ -16,6 +16,11 @@ struct Contact: Identifiable, Hashable {
     var archived = false
     /// The latest profile the contact sent; `name` stays the local name.
     var profile: UserProfile?
+    /// The user marked the safety number as compared (DESIGN.md 21).
+    var verified = false
+    /// When a key that the identity of the contact signed in place of the pinned one was
+    /// refused; the chat shows the warning of DESIGN.md 21.4 while it is set.
+    var refusedKey: Date?
 }
 
 /// A line of the list while it searches (DESIGN.md 5.2 and 19.4): a chat found by its name,
@@ -188,10 +193,12 @@ enum Modal: Hashable {
     case deleteMessage(String, String)
     /// The disappearing timer of a chat (DESIGN.md 20.7).
     case timer(String)
+    /// The safety number of a contact with its QR code (DESIGN.md 21.3).
+    case verify(String)
 
     var isWide: Bool {
         switch self {
-        case .addContact, .myID, .settings, .contactInfo, .sendFiles, .timer: true
+        case .addContact, .myID, .settings, .contactInfo, .sendFiles, .timer, .verify: true
         default: false
         }
     }
@@ -213,6 +220,10 @@ struct Launch {
     var dump = false
     /// `--store-info`: prints which SQLCipher serves the store of `--data-dir`, and exits.
     var storeInfo = false
+    /// `--safety-number NAME`: prints the safety number with the contact of that name as the
+    /// contact panel shows it and the text of its QR code, from the store of `--data-dir`,
+    /// and exits.
+    var safetyNumberOf: String?
     /// `--send NAME TEXT`, any number of times: texts sent to the contacts of those names once
     /// the app is connected, through the action of the compose bar.
     var sends: [(name: String, text: String)] = []
@@ -261,6 +272,7 @@ struct Launch {
         dataDirectory = value(after: "--data-dir").map { URL(fileURLWithPath: $0, isDirectory: true) }
         relay = value(after: "--relay") ?? Self.defaultRelay
         snapshot = value(after: "--snapshot").map { URL(fileURLWithPath: $0, isDirectory: true) }
+        safetyNumberOf = value(after: "--safety-number")
     }
 
     var directory: URL {
@@ -400,6 +412,10 @@ final class AppModel {
     @ObservationIgnored var scriptedReads: [String] = []
     @ObservationIgnored var scriptedChanges: [ScriptedChange] = []
 
+    /// The safety number of each contact, made once and kept in memory: 5200 SHA-512 per
+    /// key (protocol section 44.2).
+    @ObservationIgnored private var safetyNumbers: [String: SafetyNumber] = [:]
+
     private var toastTask: Task<Void, Never>?
     private var scriptedSends: [(name: String, text: String)] = []
     private var scriptedFileSends: [(name: String, path: String)] = []
@@ -526,7 +542,8 @@ final class AppModel {
         contacts = state.chats.map {
             Contact(
                 id: $0.userID, name: $0.name, added: $0.added, unread: $0.userID == quiet ? 0 : $0.unread,
-                pinned: $0.pinned, muted: $0.muted, archived: $0.archived, profile: $0.profile)
+                pinned: $0.pinned, muted: $0.muted, archived: $0.archived, profile: $0.profile,
+                verified: $0.verified, refusedKey: $0.refusedKey)
         }
         timers = Dictionary(uniqueKeysWithValues: state.chats.map { ($0.userID, $0.timer) })
         timerChanges = Dictionary(uniqueKeysWithValues: state.chats.map { ($0.userID, $0.timerChanges) })
@@ -1133,6 +1150,35 @@ final class AppModel {
         for (chat, list) in messages {
             for message in list where message.state == .waiting { store(message.id, in: chat) }
         }
+    }
+
+    // MARK: Safety number and the verified mark (DESIGN.md 21)
+
+    /// The safety number of the user and the contact; nil when either id is not one.
+    func safetyNumber(_ id: String) -> SafetyNumber? {
+        let key = myID + id
+        if let known = safetyNumbers[key] { return known }
+        guard let own = try? Identity.decodeUserID(myID), let contact = try? Identity.decodeUserID(id),
+            let made = try? SafetyNumber(identityKey: own, contactIdentityKey: contact)
+        else { return nil }
+        safetyNumbers[key] = made
+        return made
+    }
+
+    func setVerified(_ on: Bool, _ id: String) {
+        guard messenger != nil else {
+            if let index = contacts.firstIndex(where: { $0.id == id }) { contacts[index].verified = on }
+            return
+        }
+        run { try await $0.setVerified(on, for: id) }
+    }
+
+    func dismissRefusedKey(_ id: String) {
+        guard messenger != nil else {
+            if let index = contacts.firstIndex(where: { $0.id == id }) { contacts[index].refusedKey = nil }
+            return
+        }
+        run { try await $0.dismissRefusedKey(id) }
     }
 
     func copyID(_ id: String) {

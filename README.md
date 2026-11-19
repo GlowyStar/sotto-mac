@@ -35,6 +35,14 @@ interoperate with sotto's command-line client byte for byte.
   sotto's client. Delete for both and the timer are requests that the other side's client
   honours; nothing can make it do so, and nothing protects a message from the person who
   received it.
+- The safety number and the verified mark (part 7 of the protocol): 60 digits and the text
+  of a QR code computed from the two identity keys with CryptoKit's SHA-512, as libsignal's
+  numeric fingerprint; the core replays libsignal's own test vector and every vector of
+  sotto's `vectors/safety-number.json`. The app shows the number in the contact panel and,
+  with its QR code, in the box of "Verify safety number"; "Mark as verified" keeps a mark in
+  the store that never leaves the Mac. Both interop scripts check that each side shows the
+  number of sotto's client. The Mac does not scan a QR code: the numbers are compared by
+  reading them.
 - The store is encrypted at rest: SQLCipher over the whole `store.db`, its random 256-bit
   key wrapped to a Secure Enclave key of this Mac that asks for Touch ID or the Mac
   password; the app and `sotto-mac` open it only after that, and every lock drops the key
@@ -73,6 +81,7 @@ sotto-mac chat bob --relay ws://127.0.0.1:8765/ws   # /quit or end of input ends
 sotto-mac reset bob                 # start a new session with bob
 sotto-mac send-file bob photo.jpg --caption "hi"   # waits until it is sent or not sent
 sotto-mac read-receipts [on|off]    # show or set the read receipts contacts get
+sotto-mac verify bob [mark|clear]   # the safety number with bob; mark bob verified or clear it
 ```
 
 `chat` prints every message with its number in the log (`#12 bob: hi`), the marks of the
@@ -163,6 +172,7 @@ Launch arguments of the app:
 | `--relay <url>` | the relay (default `ws://127.0.0.1:8765/ws`); an address saved in Settings wins over it |
 | `--snapshot <folder>` | draws the window into PNG files and exits; with `--data-dir` from that store, without a connection, otherwise from mock data; `--only <prefix>` draws only the shots whose name starts with it |
 | `--dump` | with `--data-dir`: prints the chats of that store as JSON and exits |
+| `--safety-number <name>` | with `--data-dir`: prints the safety number with the contact of that local name in the rows of the contact panel, then the text of its QR code, and exits |
 | `--store-info` | with `--data-dir`: prints the SQLCipher version, its crypto provider and the file of the library that serves the store, and exits |
 | `--demo` | mock data and no store, with a "Mock" menu; `--first-launch` adds the first-launch screen |
 | `--send <name> <text>` | a scripting aid, any number of times: once connected, sends the text to the contact of that local name through the same action as the compose bar |
@@ -244,6 +254,17 @@ Disappearing messages are set per chat from the chat header's menu or the contac
 contact that long after it was seen, with its file, also after a restart; the header and
 each such message show the timer, and a change of the timer shows as a line in the chat.
 
+The safety number: the contact panel shows the 60 digits of the safety number with the
+contact under its id, and "Verify safety number" opens a box with the digits, their QR
+code and "Mark as verified" or "Clear verification". A verified contact has a small mark
+after its name in the chat header and the panel. The mark is the user's own note: the
+contact does not learn it, and nothing but the user and a deleted contact clears it, since
+the protocol never takes another key for a contact. When the identity of a contact signs a
+second encryption key, which only someone with its secret key can do, Sotto refuses it
+(`IDENTITY_KEY_MISMATCH`) and the chat shows a red warning under the header that says what
+it means and what to do, until it is closed; the safety number stays the same, and so does
+the mark.
+
 The app starts locked and opens the store after the system sheet of Touch ID or the Mac
 password. After the auto-lock time, on Cmd+L, on sleep (unless turned off) and on quit it
 closes the store and overwrites its key in memory; the next unlock asks again. A local
@@ -256,7 +277,8 @@ Python client, right after a restart, and while the Python client is away; a pho
 file each way, compared byte for byte, the received ones as the store keeps them; a large
 upload and a large download of the app, each cut by killing the app in the middle and
 ended whole after its next start; the profiles both ways; a reply, an edit, a delete for
-both, the read marks and a message under a short timer each way; then a check that no file
+both, the read marks and a message under a short timer each way; the safety number of
+both sides and a mark that stays through the run; then a check that no file
 of the app's data folder holds a text or a file of the run in the clear, a dump and a
 snapshot of its store):
 

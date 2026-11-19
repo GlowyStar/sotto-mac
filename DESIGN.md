@@ -213,7 +213,7 @@ Connection bar: while the app is not connected to the relay, a 37pt bar appears 
 | Height | 54, background `topBarBg`, 1pt bottom border `divider` |
 | Back button (single column only) | 40 x 40, `chevron.left` 17pt, left 6 |
 | Avatar | 42 circle, left 16 (after the back button when present), vertically centered |
-| Title (local name) | 14 semibold `windowBoldFg`, x avatar + 12, top 9 (estimate) |
+| Title (local name) | 14 semibold `windowBoldFg`, x avatar + 12, top 9 (estimate); a verified contact has the mark of 21.1 after it, 4 gap |
 | Subtitle | 13 regular `windowSubFg`, top 30 (estimate): `lock.fill` 10pt, 4 gap, "end-to-end encrypted" |
 | Right button (contact panel) | 40 x 40, `sidebar.right` 18pt `composeIconFg`, right 8 |
 
@@ -409,11 +409,12 @@ Buttons: "Cancel", "Add". On success the box closes and the new chat opens.
 
 A right column inside the chat area, toggled by the header button: width 320 (estimate, range 292 to 392), 1pt leading border `divider`, background `windowBg`. When it would leave the chat under 380, it opens as a 364 box instead.
 - Top bar 54: "Contact info" 14 semibold, `xmark` close button at right 8.
-- Avatar 80 centered, 24 below the bar, showing the contact's photo (section 16) or the initials; 12 below: the local name, 16 semibold `windowBoldFg`; when the name the contact sent differs, 2 below the name the line "Name set by the contact: X", 13 regular `windowSubFg`; 4 below: `lock.fill` 10pt and "end-to-end encrypted", 13 regular `windowSubFg`.
-- 24 below: section label "Id" (13 semibold `accentText`, left 24), the id block of 7.2 and a "Copy id" row.
+- Avatar 80 centered, 24 below the bar, showing the contact's photo (section 16) or the initials; 12 below: the local name, 16 semibold `windowBoldFg`, with the mark of 21.1 (16) after it, 4 gap, when the contact is verified; when the name the contact sent differs, 2 below the name the line "Name set by the contact: X", 13 regular `windowSubFg`; 4 below: `lock.fill` 10pt and "end-to-end encrypted", 13 regular `windowSubFg`.
+- 24 below: section label "Id" (13 semibold `accentText`, left 24), the id block of 7.2 and a "Copy id" row; 16 below, the section label "Safety number" and the number block of 21.2.
 - Action rows, height 44, icon 18pt `menuIconFg` at left 24, text 14 regular at left 60, hover `windowBgOver`:
   - `pencil` "Rename": a 320 box with the name field, buttons "Cancel", "Save".
   - `timer` "Disappearing messages", the value at the right ("Off", "1 day"): the box of 20.7.
+  - `checkmark.shield` "Verify safety number", the value "Verified" at the right while the contact is verified: the box of 21.3.
   - `arrow.triangle.2.circlepath` "Reset session": box "Reset session?", body "A new encrypted session will be started with <name>. Messages already received stay.", buttons "Cancel", "Reset"; then the toast "Session reset".
   - `trash` "Delete contact" in `danger`: box "Delete <name>?", body "The contact and the whole chat history will be deleted from this Mac. This cannot be undone.", buttons "Cancel", "Delete" (destructive); then the chat closes and the toast "Contact deleted" shows.
 
@@ -482,6 +483,9 @@ The settings are the panel of section 11. "Relay" is in 11.7, "Theme" in 11.4 an
 | Edit (strip, menu), save the edit | `pencil`, `checkmark` | 18 / 16, 22 |
 | Disappearing timer (panel row, header, message) | `timer` | 18 / 10 / 10 |
 | Chat header menu | `ellipsis` | 18 |
+| Verified mark (header, panel, verify box) | `checkmark.seal.fill`, palette | 14 / 16 / 14 |
+| Verify safety number (panel row) | `checkmark.shield` | 18 |
+| Warning of a refused key | `exclamationmark.shield.fill` | 18 |
 
 Symbols use `.symbolRenderingMode(.monochrome)` in the colour token of their place.
 
@@ -609,6 +613,16 @@ Own departures from the reference, worth a look by the owner:
 - Data and storage has "Save received files automatically", off by default, and a hint under the download folder group (11.5); the reference saves every download into its folder. Off, a received photo or file is kept in the encrypted store and leaves it only by "Save as...".
 - A photo kept in the store shows its blurred thumbnail until it is decoded in memory; "Show in Finder" is offered only for a file that is in a folder (5.9, 13.2, 15).
 - The lock screen takes the theme from `app.json`, the one setting kept outside the store.
+
+### Added with the safety number (SOTTO-47, 2026-11-19)
+
+Built as 21 says; estimates and departures, worth a look by the owner:
+- The verified mark is the seal with a check of Telegram's verified badge, whose meaning there is an account checked by Telegram; here it means only that the user compared the safety number. A shield or a plain check would avoid the likeness.
+- The mark shows in the chat header and the contact panel, not in the list rows.
+- "Mark as verified" needs only the user's word, as the reference's `sotto verify NAME mark`: the Mac has no scanner (a camera would need a permission prompt), so a match is read, not scanned.
+- The warning of a refused key shows for every contact with one, not only for a verified one; the sentence about the mark is added for a verified contact. It stays across restarts until its close button or the deletion of the contact; a later refusal shows it again.
+- The verify box scrolls inside itself when the window is lower than the box (the contact box does the same).
+- With the safety number block the contact panel is taller: in a window of the default height its box form (7.4, a narrow window) scrolls to reach the action rows, and the column form scrolls as before.
 
 ## 10. Additions to tokens and existing sections
 
@@ -1303,3 +1317,75 @@ Only open source was read, at the commits of the earlier sections (tdesktop 9918
 | `Resources/langs/lang.strings` (keys only) | the meaning of the texts, restated; none copied |
 
 Not found: a delivered state, a timer in the chat header or on a message, an animation of the strip, a switch that stops read receipts.
+
+## 21. The safety number and the verified mark
+
+Protocol part 7 as the user sees it: the 60 digits that both clients of a pair compute, the QR code of the payload of section 44.4, the verified mark the user sets after comparing them, and the warning when the identity of a contact signed another key, which is refused (IDENTITY_KEY_MISMATCH, protocol sections 5.3 and 45.2). Facts from Telegram Desktop 7.4.4 and lib_ui (the verified badge, the bar under the chat header) and from Signal Desktop (its safety number screen and its texts, read in `_locales/en/messages.json` of its main branch on 2026-11-19), restated; a value marked `(estimate)` was found in neither. Telegram Desktop has no safety number for a chat: it has no secret chats, and only its calls show emoji made from the key of the call (`lng_call_fingerprint_tooltip`).
+
+### 21.1 The verified mark
+
+| Token | Light | Dark | Used for |
+|---|---|---|---|
+| `verifiedBg` | #40a7e3 | #5288c1 | the seal of the mark: the reference's `profileVerifiedCheckBg`, which is `windowBgActive` |
+| `verifiedFg` | #ffffff | #ffffff | its check: `profileVerifiedCheckFg` |
+
+| Item | Value |
+|---|---|
+| Symbol | `checkmark.seal.fill`, palette rendering: the check `verifiedFg`, the seal `verifiedBg` (the reference draws a star of `windowBgActive` with a check of `windowFgActive`) |
+| Place | after the name, 4 gap (the reference's `infoVerifiedCheckPosition` 4, 0): the chat header title (14, estimate), the contact panel name (16, estimate), the verify box state line (14) |
+| Hover help and accessibility | "Verified: you compared the safety number"; the label "Verified", and the header button reads "<name>, verified, contact info" |
+| Rule | shown while the user's mark is set; nothing but the user and a deleted contact clears it (protocol 45.2). Not in list rows (estimate) |
+
+### 21.2 The number block
+
+The id block of 7.2 with the digits: monospaced 14 `windowFg`, twelve groups of five digits separated by one space, four groups per line, three lines, centered, line height 22, selectable; background `windowBgOver`, radius 8, padding 12. Both clients of a pair show the same 60 digits in the same order (protocol 44.3); the command-line client of the reference prints the same three rows.
+
+### 21.3 Verify box
+
+The box of 5.10, 364 wide, opened by "Verify safety number" in the contact panel (7.4).
+
+| Item | Value |
+|---|---|
+| Title | "Verify safety number" (Signal Desktop names the action so) |
+| Code | the plate of 12.4 (260, `qrBg`, radius 8, quiet zone 16, level M) holding the payload of protocol 44.4: `sotto-safety-number-1`, the own half and the contact's half in hex, 151 characters |
+| Number | 16 below, the block of 21.2 |
+| Hint | 12 below, 13 regular `windowSubFg`, centered: "Compare these numbers with the ones on the device of <name>, in person or over a channel you trust. When they are the same, mark <name> as verified." (Signal Desktop asks to compare the numbers with the contact's device and offers a scan; Sotto has no scanner) |
+| State | while verified, 12 below: the mark (14), 6 gap, "<name> is verified" 13 semibold `accentText` |
+| Buttons | "Mark as verified" or, while verified, "Clear verification" (the labels of Signal Desktop's safety number screen), then "Close", the default |
+| Low window | the body scrolls inside the box, as the contact box does |
+
+The mark is set by the user's word after reading the numbers; no comparison is done for the user. Copying the number is not offered: a number read out in the chat itself proves nothing (threat model, "The id and its channel").
+
+### 21.4 Warning of a refused key
+
+A bar under the chat header (and under the search bar of 19.5), across the chat column, above the message list; the contact panel keeps its own column. Like the reference's bar under the chat header (`historyContactStatusButton`: background `historyComposeButtonBg`, the cancel cross of the reply strip at the right), grown to hold a text.
+
+| Item | Value |
+|---|---|
+| Background | `composeBg`, 1pt bottom border `divider` |
+| Paddings | left 16 (the reference's `historyContactStatusMinSkip`), top 12, right 49, bottom 12 (estimate) |
+| Icon | `exclamationmark.shield.fill` 18 `danger` at left 16, top 12 |
+| Text column | 12 after the icon: the title 14 semibold `danger`; 4 below, the meaning 13 regular `windowFg`; 4 below, what to do 13 regular `windowFg`; line spacing 2; wraps |
+| Title | "Another key of <name> was refused" |
+| Meaning | "Someone with the secret key of the identity of <name> signed a second encryption key, and Sotto refused it. Someone else may have that identity. The safety number does not change, so it cannot show this." and, for a verified contact, "The verified mark stays: it is about the same identity key." |
+| What to do | "Ask <name> in person or over a channel you trust. If they did not do it, their identity is lost: ask for a new id, add it, and delete this contact." |
+| Close | the cross of the reply strip: `xmark` 14 `replyCancelFg`, hover `replyCancelFgOver`, in a 49 square at the top right (the reference's `historyReplyCancel`); it takes the warning off until another key is refused |
+| When | a message of the contact with an initial header that carries another X25519 identity key under a valid signature, or a bundle of the contact with one, fetched to send a text or a file, reset, edit, delete or set the timer; the refused message or the text that was not sent shows as before (7.6) |
+| Rule | the mark stays (protocol 45.2); the warning stays across restarts until it is closed or the contact is deleted |
+
+### 21.5 Motion
+
+None: the mark, the bar and the state line appear and go at once (the reference has no motion for them). The verify box uses the box motion of section 6.
+
+### 21.6 Sources
+
+Only open source and published texts were read; nothing was built or run, and the instruction files for coding tools in the tdesktop clone were neither read nor followed.
+
+| Source | Read for |
+|---|---|
+| tdesktop `SourceFiles/info/info.style` (`infoVerifiedCheck`, `infoVerifiedStar`, `infoVerifiedCheckPosition`), `dialogs/dialogs.style` (`dialogsVerifiedIcon`) | the verified badge: a star with a check, its place after the name |
+| lib_ui `ui/colors.palette`; the night palette inside `Resources/night.tdesktop-theme` | `profileVerifiedCheckBg`, `profileVerifiedCheckFg`, `windowBgActive`, `attentionButtonFg`, `historyComposeButtonBg` in light and dark |
+| tdesktop `SourceFiles/chat_helpers/chat_helpers.style` (`historyContactStatusButton`, `historyContactStatusMinSkip`, `historyReplyCancel`), `history/view/history_view_contact_status.cpp` | the bar under the chat header: height, side skip, background, the cancel cross at its right |
+| Signal Desktop `_locales/en/messages.json` (keys `SafetyNumberViewer__markAsVerified`, `SafetyNumberViewer__clearVerification`, `SafetyNumberViewer__hint-v2`, `safetyNumberChangeDialog__verify-number`, `verified`) | the button labels, the name of the action, what the hint asks for; the hint restated |
+
+Not found: a safety number, a QR code of a key or a key warning in Telegram Desktop; the sizes of Signal Desktop's screen.

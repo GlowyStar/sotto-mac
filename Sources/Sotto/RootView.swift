@@ -165,6 +165,8 @@ struct RootView: View {
             if let message = model.message(messageID, in: chat) { DeleteMessageBox(model: model, chatID: chat, message: message) }
         case .timer(let chat):
             TimerBox(model: model, chatID: chat)
+        case .verify(let id):
+            if let contact = model.contact(id) { VerifyBox(model: model, contact: contact) }
         case .delete(let id):
             if let contact = model.contact(id) {
                 ConfirmBox(

@@ -28,6 +28,9 @@ struct ChatScreen: View {
             HStack(spacing: 0) {
                 GeometryReader { area in
                     VStack(spacing: 0) {
+                        if contact.refusedKey != nil {
+                            RefusedKeyBanner(model: model, contact: contact)
+                        }
                         MessageList(model: model, contact: contact)
                         if model.chatSearch != nil {
                             ChatSearchBottomBar(model: model)
@@ -83,10 +86,15 @@ struct ChatHeader: View {
                 HStack(spacing: Metrics.headerTitleGap) {
                     Avatar(id: contact.id, name: contact.name, size: Metrics.headerAvatar, photo: contact.profile?.avatar)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(contact.name)
-                            .font(Fonts.headerTitle)
-                            .foregroundStyle(Color.windowBoldFg)
-                            .lineLimit(1)
+                        HStack(spacing: Metrics.verifiedGap) {
+                            Text(contact.name)
+                                .font(Fonts.headerTitle)
+                                .foregroundStyle(Color.windowBoldFg)
+                                .lineLimit(1)
+                            if contact.verified {
+                                VerifiedMark(size: 14).fixedSize()
+                            }
+                        }
                         HStack(spacing: 8) {
                             EncryptedLine().lineLimit(1)
                             if let timer = model.timers[contact.id], timer > 0 {
@@ -102,7 +110,7 @@ struct ChatHeader: View {
             }
             .buttonStyle(.plain)
             .padding(.leading, singleColumn ? 0 : Metrics.headerAvatarLeft)
-            .accessibilityLabel("\(contact.name), contact info")
+            .accessibilityLabel("\(contact.name)\(contact.verified ? ", verified" : ""), contact info")
             Spacer(minLength: 8)
             IconButton(symbol: "magnifyingglass", size: 18, label: "Search in chat") { model.openChatSearch() }
             IconButton(symbol: "sidebar.right", size: 18, label: "Contact info", action: togglePanel)

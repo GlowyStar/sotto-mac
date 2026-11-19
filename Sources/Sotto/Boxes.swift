@@ -257,10 +257,16 @@ struct ContactPanel: View {
             .buttonStyle(.plain)
             .disabled(photo.flatMap { AvatarPictures.image($0, side: Metrics.bigAvatar) } == nil)
             .accessibilityLabel("Photo of \(contact.name)")
-            Text(contact.name)
-                .font(Fonts.boxTitle)
-                .foregroundStyle(Color.windowBoldFg)
-                .padding(.top, 12)
+            HStack(spacing: Metrics.verifiedGap) {
+                Text(contact.name)
+                    .font(Fonts.boxTitle)
+                    .foregroundStyle(Color.windowBoldFg)
+                if contact.verified {
+                    VerifiedMark(size: 16)
+                }
+            }
+            .padding(.horizontal, Metrics.boxPad)
+            .padding(.top, 12)
             if let sent = contact.profile?.name, !sent.isEmpty, sent != contact.name {
                 Text("Name set by the contact: \(sent)")
                     .font(Fonts.label)
@@ -275,6 +281,10 @@ struct ContactPanel: View {
                 Text("Id").font(Fonts.sectionLabel).foregroundStyle(Color.accentText)
                 IDBlock(id: contact.id)
                 CopyIDButton { model.copyID(contact.id) }.padding(.leading, -Metrics.buttonPadH)
+                if let number = model.safetyNumber(contact.id) {
+                    Text("Safety number").font(Fonts.sectionLabel).foregroundStyle(Color.accentText).padding(.top, 8)
+                    IDBlock(id: number.digits, group: SafetyNumber.groupDigits)
+                }
             }
             .padding(.horizontal, Metrics.boxPad)
             .padding(.top, 24)
@@ -282,6 +292,9 @@ struct ContactPanel: View {
                 action("pencil", "Rename") { model.modal = .rename(contact.id) }
                 action("timer", "Disappearing messages", value: TimerChoices.title(model.timers[contact.id] ?? 0)) {
                     model.modal = .timer(contact.id)
+                }
+                action("checkmark.shield", "Verify safety number", value: contact.verified ? "Verified" : nil) {
+                    model.modal = .verify(contact.id)
                 }
                 action("arrow.triangle.2.circlepath", "Reset session") { model.modal = .reset(contact.id) }
                 action("trash", "Delete contact", danger: true) { model.modal = .delete(contact.id) }

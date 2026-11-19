@@ -122,7 +122,7 @@ private func state(skipped: Int = 0) -> RatchetState {
             "app_notes", "blob_deletions", "contacts", "downloads", "files", "identity", "kept_files", "message_states",
             "messages", "one_time_prekeys", "outbox", "own_profile", "pending", "pending_replies", "pq_prekey_ids",
             "pq_prekeys", "profile_sends", "profiles", "records", "refusals", "row_numbers", "seen_ids", "sessions",
-            "settings", "signed_prekeys", "timers", "uploads",
+            "settings", "signed_prekeys", "timers", "uploads", "verified_contacts",
         ])
     }
 }

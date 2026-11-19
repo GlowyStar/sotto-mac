@@ -213,14 +213,20 @@ struct FilledButton<Label: View>: View {
 /// The id in 16 groups of 4, 4 groups per line (DESIGN.md 7.2).
 struct IDBlock: View {
     let id: String
+    /// Characters in a group: 4 for an id, 5 for a safety number (DESIGN.md 21.2).
+    var group = 4
+
+    /// The lines of the block: four groups each, one space between two groups.
+    static func lines(_ id: String, group: Int) -> [String] {
+        let groups = stride(from: 0, to: id.count, by: group).map { start -> String in
+            let from = id.index(id.startIndex, offsetBy: start)
+            return String(id[from..<id.index(from, offsetBy: group, limitedBy: id.endIndex)!])
+        }
+        return stride(from: 0, to: groups.count, by: 4).map { groups[$0..<min($0 + 4, groups.count)].joined(separator: " ") }
+    }
 
     var body: some View {
-        let groups = stride(from: 0, to: id.count, by: 4).map { start -> String in
-            let from = id.index(id.startIndex, offsetBy: start)
-            return String(id[from..<id.index(from, offsetBy: 4, limitedBy: id.endIndex)!])
-        }
-        let lines = stride(from: 0, to: groups.count, by: 4).map { groups[$0..<min($0 + 4, groups.count)].joined(separator: " ") }
-        Text(lines.joined(separator: "\n"))
+        Text(Self.lines(id, group: group).joined(separator: "\n"))
             .font(Fonts.id)
             .lineSpacing(5)
             .multilineTextAlignment(.center)

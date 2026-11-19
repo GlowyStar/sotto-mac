@@ -130,6 +130,8 @@ extension Color {
     static let imageBg = token("000000", "000000")
     static let cropFadeBg = token("0000007f", "0000007f")
     static let cropHandleFg = token("ffffff7f", "ffffff7f")
+    static let verifiedBg = token("40a7e3", "5288c1")
+    static let verifiedFg = token("ffffff", "ffffff")
     static let qrBg = token("ffffff", "ffffff")
     static let qrFg = token("000000", "000000")
     /// The dim over the page below a pushed settings page (DESIGN.md 11.1).
@@ -389,6 +391,10 @@ enum Metrics {
     static let qrPlate: CGFloat = 260
     static let qrQuiet: CGFloat = 16
     static let qrSavedQuiet: CGFloat = 32
+    /// The close button of the warning bar of DESIGN.md 21.4, a square at its top right.
+    static let bannerClose: CGFloat = 49
+    /// The gap between a name and the verified mark after it (DESIGN.md 21.1).
+    static let verifiedGap: CGFloat = 4
     static let nameLimit = 64
     static let nameCounterFrom = 54
 

@@ -322,6 +322,21 @@ public final class Client {
         }
     }
 
+    /// Whether the user marked the contact as verified (section 45).
+    public func isVerified(_ contact: Data) throws -> Bool {
+        try store.verifiedContacts().contains(contact)
+    }
+
+    /// Sets or clears the mark that the user compared the safety number of the contact and
+    /// it matched (section 45.1). The mark stays on this device: nothing is queued for the
+    /// relay and no other row changes (section 45.3).
+    public func setVerified(_ contact: Data, _ on: Bool) throws {
+        guard try store.isContact(contact) else {
+            throw SessionError.notAContact
+        }
+        try store.transaction { try store.setVerified(contact, on) }
+    }
+
     public func hasSession(_ contact: Data) throws -> Bool {
         try !store.sessions(contact).isEmpty
     }
