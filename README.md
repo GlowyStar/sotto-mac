@@ -274,7 +274,9 @@ it means and what to do, until it is closed; the safety number stays the same, a
 the mark.
 
 The app starts locked and opens the store after the system sheet of Touch ID or the Mac
-password. After the auto-lock time, on Cmd+L, on sleep (unless turned off) and on quit it
+password. After the auto-lock time (5 minutes by default), on Cmd+L, on sleep, when the
+screen of the Mac locks or it switches to another user (these three unless turned off) and
+on quit it
 overwrites the store key in memory and closes the store, also on the first-launch screen;
 the next unlock asks again. On sleep the Mac waits until the store is closed (30 seconds
 at most). A text or a picture copied from a chat is marked for clipboard managers as

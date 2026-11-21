@@ -43,7 +43,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var saveReceivedFiles = false
     // Privacy and security
     public var passcode: Passcode?
-    public var autoLockMinutes = 60
+    public var autoLockMinutes = 5
     public var lockOnSleep = true
     public var hideContentsWhileLocked = true
 

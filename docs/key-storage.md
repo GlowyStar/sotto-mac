@@ -79,8 +79,9 @@ identity signed in place of the pinned one is refused, the time goes into the ap
   evaluated `LAContext` is handed to the Secure Enclave key, so one sheet unwraps the key.
   Cancel leaves the window on "Sotto is locked" with an Unlock button, which asks again. The passcode, when one is set, is asked
   after the store opens: it still only covers the window.
-- The idle time of Auto-lock, Cmd+L, "Lock Sotto now", sleep (with "Lock when the Mac
-  sleeps", on by default) and quit overwrite the key bytes at once, then stop the messenger
+- The idle time of Auto-lock (5 minutes by default), Cmd+L, "Lock Sotto now", sleep, the
+  lock of the Mac screen and a switch to another user (these three with "Lock when the Mac
+  sleeps or locks", on by default) and quit overwrite the key bytes at once, then stop the messenger
   and close every connection to the store, the transport's included; the next unlock asks
   again. A lock works from the moment the store is open, also on the first-launch screen
   before Continue. On sleep the Mac waits for it: Sotto answers the system's sleep

@@ -1054,7 +1054,7 @@ struct AutoLockBox: View {
                 Button { model.settings.lockOnSleep.toggle() } label: {
                     HStack(spacing: 15) {
                         CheckSquare(checked: model.settings.lockOnSleep)
-                        Text("Lock when the Mac sleeps").font(Fonts.settingsRow).foregroundStyle(Color.windowBoldFg)
+                        Text("Lock when the Mac sleeps or locks").font(Fonts.settingsRow).foregroundStyle(Color.windowBoldFg)
                     }
                     .padding(EdgeInsets(top: 13, leading: 22, bottom: 5, trailing: 10))
                     .contentShape(Rectangle())

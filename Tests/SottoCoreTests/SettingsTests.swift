@@ -28,7 +28,7 @@ import Testing
     changed.askWhereToSave = true
     changed.saveReceivedFiles = true
     changed.passcode = Passcode("1234")
-    changed.autoLockMinutes = 5
+    changed.autoLockMinutes = 60
     changed.lockOnSleep = false
     changed.hideContentsWhileLocked = false
     // Every stored property differs from its default, so a field left out of the coding

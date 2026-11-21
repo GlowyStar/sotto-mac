@@ -830,11 +830,19 @@ final class AppModel {
             [weak self] _ in
             MainActor.assumeIsolated { self?.saveDrafts() }
         }
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                if self?.settings.lockOnSleep == true { self?.lock() }
+        // Sleep, a locked screen and a switch to another user lock alike; loginwindow posts
+        // the distributed com.apple.screenIsLocked when the screen locks.
+        let workspace = NSWorkspace.shared.notificationCenter
+        let lockEvents: [(NotificationCenter, Notification.Name)] = [
+            (workspace, NSWorkspace.willSleepNotification),
+            (workspace, NSWorkspace.sessionDidResignActiveNotification),
+            (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsLocked")),
+        ]
+        for (center, name) in lockEvents {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    if self?.settings.lockOnSleep == true { self?.lock() }
+                }
             }
         }
         // The same lock, and the sleep waits until the store is closed.
