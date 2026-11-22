@@ -1,65 +1,150 @@
-# sotto-mac
+<p align="center">
+  <img src="docs/images/hero.webp" alt="An engraved night sky: two observatories on distant hilltops pass sealed envelopes along an arc of orange light through a closed brass tower that rests on a cloud" width="100%">
+</p>
 
-A native macOS client for sotto (a separate repository), an end-to-end encrypted one-to-one
-messenger with a content-blind relay. It implements the protocol of sotto and has to
-interoperate with sotto's command-line client byte for byte.
+<h1 align="center">sotto-mac</h1>
 
-## Status
+<p align="center">
+  <b>A native macOS client for sotto, an end-to-end encrypted one-to-one messenger.</b><br>
+  The relay in the middle passes sealed messages along and holds no key that opens them.
+</p>
 
-- Early. The core holds the key agreement, the ratchet, the client store, the session
-  rules and the transport to a relay; the command-line tool `sotto-mac` chats with
-  sotto's own command-line client through a sotto relay (`scripts/interop.py` checks it).
-  The app `Sotto` runs on the same core: it chats with sotto's command-line client through
-  a relay in both directions (`scripts/app-interop.py` checks it with the built app).
-- New sessions are agreed by PQXDH (part 6 of the protocol): X25519 with ML-KEM-768 of
-  CryptoKit, end-to-end version 2. The core replays every vector of sotto's
-  `vectors/pqxdh.json`; ML-KEM encapsulation is randomized and CryptoKit takes no fixed
-  randomness, so the vectors of the initiator are replayed with the recorded ciphertext and
-  secret, and the own encapsulation is checked by a round trip. Sessions made by X3DH
-  before keep working with version 1; no new one is made either way: a bundle without a
-  post-quantum prekey ends in `PQ_PREKEY_MISSING`, a new session of version 1 in
-  `X3DH_REFUSED`. Both interop scripts make a PQXDH session in each direction. The ratchet
-  is the classical Double Ratchet, so the post-quantum part protects the key agreement only,
-  and the Ed25519 signatures over the prekeys are classical too.
-- Files (part 3 of the protocol) are in the core and the command-line tool: a file of up to
-  100 MiB goes to a contact encrypted with the blob cipher, uploaded and downloaded in
-  pieces that resume after a cut connection or a restart; `scripts/interop.py` sends files
-  both ways with sotto's client, two of them cut in the middle. The app sends and shows
-  photos and files (`scripts/app-interop.py` checks both ways, also cut in the middle).
-- The profile (part 4 of the protocol): a display name and an avatar sent, encrypted, to
-  every contact with a session, and the latest profile of each contact kept and shown; the
-  app and sotto's command-line client exchange them both ways (`scripts/app-interop.py`).
-- Replies, edits, delete for both, delivery and read receipts and disappearing messages
-  (part 5 of the protocol) are in the core, the command-line tool and the app; both
-  `scripts/interop.py` and `scripts/app-interop.py` exercise each of them both ways with
-  sotto's client. Delete for both and the timer are requests that the other side's client
-  honours; nothing can make it do so, and nothing protects a message from the person who
-  received it.
-- The safety number and the verified mark (part 7 of the protocol): 60 digits and the text
-  of a QR code computed from the two identity keys with CryptoKit's SHA-512, as libsignal's
-  numeric fingerprint; the core replays libsignal's own test vector and every vector of
-  sotto's `vectors/safety-number.json`. The app shows the number in the contact panel and,
-  with its QR code, in the box of "Verify safety number"; "Mark as verified" keeps a mark in
-  the store that never leaves the Mac. Both interop scripts check that each side shows the
-  number of sotto's client. The Mac does not scan a QR code: the numbers are compared by
-  reading them.
-- The store is encrypted at rest: SQLCipher over the whole `store.db`, its random 256-bit
-  key wrapped to a Secure Enclave key of this Mac that asks for Touch ID or the Mac
-  password; the app and `sotto-mac` open it only after that, and every lock, also on the
-  first-launch screen, drops the key (`docs/key-storage.md`). Drafts, settings, pasted pictures and received files are kept
-  inside it too, and notifications name nobody and quote nothing by default. The tests
-  check that no text of the store is readable in its files, that after a run no file of
-  the data folder holds a text, a pasted picture or a received file of it, and that a copy
-  of the folder does not open without its Secure Enclave key.
-- Not audited. Nobody has reviewed this code for security, so do not trust it with
-  anything that matters.
+<p align="center">
+  <img alt="Status: alpha, not audited" src="https://img.shields.io/badge/status-alpha%2C%20not%20audited-a3343b">
+  <img alt="macOS 26 or later" src="https://img.shields.io/badge/macOS-26%2B-1f2a44?logo=apple&logoColor=white">
+  <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-f05138?logo=swift&logoColor=white">
+  <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-d8b46a"></a>
+  <a href="https://github.com/GlowyStar/sotto"><img alt="Protocol: sotto" src="https://img.shields.io/badge/protocol-sotto-5b6b7f"></a>
+</p>
 
-## Build, test, run
+<p align="center">
+  <a href="#screenshots">Screenshots</a> |
+  <a href="#features">Features</a> |
+  <a href="#status-and-security">Security</a> |
+  <a href="#build-and-run">Build and run</a> |
+  <a href="#interop-with-sotto">Interop</a> |
+  <a href="docs/app.md">The app in detail</a> |
+  <a href="docs/key-storage.md">Key storage</a>
+</p>
 
-Needs macOS 26 or later (ML-KEM-768 of CryptoKit) on a Mac with a Secure Enclave (Apple silicon or a T2 chip) and
-Swift 6 (Command Line Tools are enough, Xcode is not needed). SwiftPM fetches
-SQLCipher 4.20.0, Zetetic's official Swift package, a binary framework that
-`scripts/build-app.sh` copies into the app.
+---
+
+sotto-mac is the Mac side of [sotto](https://github.com/GlowyStar/sotto). The sotto repository
+holds the protocol, the relay, the threat model, the shared test vectors and the reference
+command-line client in Python. This repository implements the same protocol in Swift and has to
+interoperate with sotto's command-line client byte for byte. One core, `SottoCore`, serves two
+programs, the SwiftUI app `Sotto` and the command-line tool `sotto-mac`.
+
+```mermaid
+flowchart LR
+    M["Sotto.app or sotto-mac<br/>this repository, Swift"] <-->|sealed envelopes| R["sotto relay<br/>stores and forwards ciphertext"]
+    R <-->|sealed envelopes| P["sotto command-line client<br/>the sotto repository, Python"]
+```
+
+There is no phone number and no account. An identity is a key pair made on the Mac, and a contact
+is added by its user id under a local name.
+
+> [!WARNING]
+> **An alpha, not audited.** Nobody has reviewed this code for security, so do not trust it with
+> anything that matters. [What it protects and what it does not](#status-and-security).
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/images/chat.webp" alt="A chat in the light theme: a reply that quotes a message, an edited message, a reply to a deleted message, a one-day disappearing timer and the delivery and read marks" width="820">
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/files.webp" alt="A chat of files in the dark theme: a file waiting for a click, a download in progress, a failed download to retry, a file not sent to retry and an upload in progress">
+      <br><sub>Files of up to 100 MiB, with transfers that resume after a cut connection or a restart.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/safety-number.webp" alt="The Verify safety number box in the dark theme: a QR code, sixty digits in three rows and the line that the contact is verified">
+      <br><sub>The safety number of a contact, its QR code and the verified mark.</sub>
+    </td>
+  </tr>
+</table>
+
+The app draws these itself from its mock data: `Sotto --snapshot <folder>` renders a fixed set of
+window states into PNG files and exits.
+
+## Features
+
+- **Post-quantum key agreement.** New sessions are agreed by PQXDH: X25519 together with
+  ML-KEM-768 of CryptoKit (part 6 of the protocol, end-to-end version 2).
+- **Double Ratchet** for the messages of a session (part 2 of the protocol).
+- **Photos and files of up to 100 MiB**, encrypted on the Mac with the blob cipher, uploaded and
+  downloaded in pieces that resume after a cut connection or a restart (part 3). Attach, drop or
+  paste them; a photo opens in a viewer with zoom.
+- **Profile.** A display name and an avatar, sent encrypted to every contact with a session (part 4).
+- **Replies, edits and delete for both.** A reply quotes the message; an own message can be edited
+  up to ten times within a day of sending (part 5).
+- **Delivery and read receipts.** A clock while a message waits, one check once the relay stored
+  it, two once the contact's app has it, two in the full colour once the contact has seen it. Read
+  receipts can be turned off.
+- **Disappearing messages**, set per chat, from 30 seconds up to 4 weeks.
+- **Safety numbers.** 60 digits and a QR code computed from the two identity keys, as libsignal's
+  numeric fingerprint, and a verified mark that never leaves the Mac (part 7). A second encryption
+  key signed by a contact's identity is refused, and the chat says so.
+- **Encrypted at rest.** SQLCipher over the whole store, its random 256-bit key wrapped to a Secure
+  Enclave key of the Mac that asks for Touch ID or the Mac password. Drafts, settings, pasted
+  pictures and received files are kept inside it too.
+- **Locks by itself** after the auto-lock time (5 minutes by default), on Cmd+L, on sleep and when
+  the screen of the Mac locks, and overwrites the store key in memory.
+- **Quiet notifications.** By default a notification says only "New message" from "Sotto", with no
+  name and no text.
+- **Search** across chats and inside the open chat, all on the Mac.
+- **A command-line tool**, `sotto-mac`, with the commands of sotto's own `sotto` and the same
+  encrypted store.
+
+How each of these behaves in the app, step by step: [docs/app.md](docs/app.md).
+
+## Status and security
+
+- **An alpha.** The app and `sotto-mac` chat with sotto's command-line client through a sotto
+  relay in both directions, with every feature above, and two scripts check that end to end
+  ([Interop with sotto](#interop-with-sotto)).
+- **Not audited.** Nobody has reviewed this code for security.
+- **What the post-quantum part covers.** The key agreement of new sessions only, so the recorded
+  messages of such a session stay closed to a later quantum computer. The Ed25519 signatures over
+  the prekeys are classical, so an attacker who has such a computer at the time of the session and
+  sits in the middle is not stopped; the ratchet is the classical Double Ratchet, so healing after
+  a compromise is not post-quantum either
+  ([sotto's threat model](https://github.com/GlowyStar/sotto/blob/main/docs/threat-model.md#post-quantum-protection)).
+  Sessions made by X3DH before keep working with version 1 and stay open to it; no new one is made
+  either way: a bundle without a post-quantum prekey ends in `PQ_PREKEY_MISSING`, a new session of
+  version 1 in `X3DH_REFUSED`.
+- **What the relay sees.** It cannot read a message, but it sees who talks to whom, when and how
+  much ([what the relay learns](https://github.com/GlowyStar/sotto/blob/main/docs/threat-model.md#what-the-relay-learns),
+  in sotto's threat model).
+- **Delete for both and the timer are requests** that the other side's client honours. Nothing
+  can make it do so, nothing proves that it did, and nothing protects a message from the person
+  who received it.
+- **The presence check** stops someone at the keyboard who does not know the Mac password, and any
+  copy of the store taken to another Mac or read offline. It does not stop code that runs as the
+  user: such code can ask for the same sheet in Sotto's name, wait for the next normal unlock, or
+  read what the window shows while Sotto is unlocked. Whoever knows the Mac password gets the
+  chats, and a Time Machine backup or a local snapshot of the data folder opens on this Mac with it.
+- **What leaves the store is readable:** a copy made with "Save as...", a file opened in another
+  app, what "Copy" puts on the pasteboard until a lock, and, with the name or the preview turned on,
+  what macOS keeps of each notification.
+- **Safety numbers are compared by reading them.** The Mac does not scan a QR code.
+- **A plain `ws://` address is dialed only to a loopback host**; a relay on another machine belongs
+  behind TLS and is dialed as `wss://`.
+- **One device per identity.** When the same identity logs in elsewhere, the relay closes the older
+  connection and the app says so instead of reconnecting.
+
+Where every key lives and what is written outside the store: [docs/key-storage.md](docs/key-storage.md).
+The full list of limits: [docs/app.md](docs/app.md#limits).
+
+## Build and run
+
+Needs macOS 26 or later (for ML-KEM-768 of CryptoKit) on a Mac with a Secure Enclave (Apple silicon
+or a T2 chip), and Swift 6: Command Line Tools are enough, Xcode is not needed. SwiftPM fetches
+SQLCipher 4.20.0, Zetetic's official Swift package, a binary framework that `scripts/build-app.sh`
+copies into the app.
 
 ```sh
 swift build                 # all targets
@@ -69,9 +154,15 @@ open build/Sotto.app
 swift run sotto-mac         # the command-line tool
 ```
 
-The command-line tool has the commands of sotto's `sotto`; its identity lives in
-`~/.sotto-mac` unless `--data-dir` names another directory, in the same encrypted store as
-the app's, and each command asks for Touch ID or the Mac password once:
+The app starts locked and opens its store after the system sheet of Touch ID or the Mac password.
+The first launch makes the identity and shows its user id; later launches open the chat list. A
+contact is added by its user id under a local name, from the menu at the top of the list.
+
+### The command-line tool
+
+`sotto-mac` has the commands of sotto's `sotto`. Its identity lives in `~/.sotto-mac` unless
+`--data-dir` names another directory, in the same encrypted store as the app's, and each command
+asks for Touch ID or the Mac password once:
 
 ```sh
 sotto-mac init                      # make an identity, print its user id
@@ -81,46 +172,25 @@ sotto-mac chat bob --relay ws://127.0.0.1:8765/ws   # /quit or end of input ends
 sotto-mac reset bob                 # start a new session with bob
 sotto-mac send-file bob photo.jpg --caption "hi"   # waits until it is sent or not sent
 sotto-mac read-receipts [on|off]    # show or set the read receipts contacts get
-sotto-mac verify bob [mark|clear]   # the safety number with bob; mark bob verified or clear it
+sotto-mac verify bob [mark|clear]   # the safety number with bob; mark or clear the mark
 ```
 
-`chat` prints every message with its number in the log (`#12 bob: hi`), the marks of the
-own ones (`#12 sent`, `#12 delivered`, `#12 read`) and one line when the contact edits or
-deletes a message or changes the timer; a printed message counts as read. It takes the
-commands of sotto's `chat`: `/reply N text`, `/edit N text`, `/delete N` (for both sides)
-and `/timer [off|30s|5m|1h|1d|1w]`.
+`chat` prints every message with its number in the log (`#12 bob: hi`), the marks of the own ones
+(`#12 sent`, `#12 delivered`, `#12 read`) and one line when the contact edits or deletes a message
+or changes the timer; a printed message counts as read. It takes the commands of sotto's `chat`:
+`/reply N text`, `/edit N text`, `/delete N` (for both sides) and `/timer [off|30s|5m|1h|1d|1w]`.
 
-Received files are saved, readable, into the folder `received` of the data directory (a
-console has no viewer: the file is its output; the app keeps them inside its store), under
-the name the sender gave when it is a plain file name, never over a file that is there; a
-file whose sending stopped goes on at the next `chat` or `send-file`.
+Received files are saved, readable, into the folder `received` of the data directory (a console
+has no viewer: the file is its output; the app keeps them inside its store), under the name the
+sender gave when it is a plain file name, never over a file that is there. A file whose sending
+stopped goes on at the next `chat` or `send-file`. A `ws://` URL is dialed only to a loopback host
+unless `--insecure` is given.
 
-A `ws://` URL is dialed only to a loopback host unless `--insecure` is given. Part of the
-tests starts the relay of a sotto checkout at `../../python/sotto` (they are skipped when
-it is missing), and so does the interoperability check:
+### Run the app against a relay
 
-```sh
-../../python/sotto/.venv/bin/python scripts/interop.py [--keep DIR]
-```
-
-The protocol files in `Protocol/` come from a sotto checkout and are pinned by
-`Protocol/MANIFEST`:
-
-```sh
-scripts/sync-protocol.sh [path to a sotto checkout]   # copy them again
-scripts/generate-proto.sh                             # regenerate Sources/SottoCore/Proto
-scripts/generate-proto.sh --check                     # fail if the generated code is stale
-```
-
-`generate-proto.sh` uses `protoc` from the sotto checkout's Python environment
-(`grpc_tools`) and builds `protoc-gen-swift` from this package's own swift-protobuf
-dependency.
-
-## Run the app against a relay
-
-The app needs a sotto relay. Start the one of the sotto project (a separate repository,
-checked out at `../../python/sotto` here), either with Docker or with its console script;
-both take the port explicitly, and the app and the clients below dial that port:
+The app needs a sotto relay. Start the one of the sotto project, checked out at
+`../../python/sotto` here, either with Docker or with its console script; both take the port
+explicitly, and the app and the clients below dial that port:
 
 ```sh
 cd ../../python/sotto
@@ -128,20 +198,18 @@ RELAY_PORT=8784 RELAY_METRICS_PORT=9784 docker compose up --build -d --wait
 # or: RELAY_DATABASE=relay.db RELAY_PORT=8784 uv run sotto-relay
 ```
 
-Then start the app on its own data directory and that relay (a store of another data
-directory asks for Touch ID or the Mac password as well; only `SOTTO_STORE_PROTECTION=test`
-in the environment, which the tests and the check scripts set, makes one that asks
-nothing, and the default folders refuse it):
+Then start the app on its own data directory and that relay:
 
 ```sh
 scripts/build-app.sh
-build/Sotto.app/Contents/MacOS/Sotto --data-dir /tmp/sotto-app --relay ws://127.0.0.1:8784/ws
+build/Sotto.app/Contents/MacOS/Sotto \
+    --data-dir /tmp/sotto-app --relay ws://127.0.0.1:8784/ws
 ```
 
-The first launch makes the identity and shows its user id; later launches open the chat
-list. The app adds a contact by its user id under a local name (the menu at the top of the
-list). Dial the relay as `127.0.0.1`, not `localhost`: the relay of `compose.yaml` refuses a
-login signed for another host name.
+A store of another data directory asks for Touch ID or the Mac password as well; only
+`SOTTO_STORE_PROTECTION=test` in the environment, which the tests and the check scripts set, makes
+one that asks nothing, and the default folders refuse it. Dial the relay as `127.0.0.1`, not
+`localhost`: the relay of `compose.yaml` refuses a login signed for another host name.
 
 To talk to the app from sotto's command-line client, give each side the other's id:
 
@@ -160,185 +228,85 @@ swift run sotto-mac --data-dir /tmp/bob add app <the app's id>
 swift run sotto-mac --data-dir /tmp/bob chat app --relay ws://127.0.0.1:8784/ws
 ```
 
-An identity can receive once its client has connected one time, because that is when its
-prekey bundle reaches the relay: start the app before the first message to it. A message
-from someone who is not a contact is dropped.
+An identity can receive once its client has connected one time, because that is when its prekey
+bundle reaches the relay: start the app before the first message to it. A message from someone who
+is not a contact is dropped. Every launch argument of the app is listed in
+[docs/app.md](docs/app.md#launch-arguments).
 
-Launch arguments of the app:
+## Interop with sotto
 
-| Argument | What it does |
-| --- | --- |
-| `--data-dir <dir>` | the directory of the identity (default `~/Library/Application Support/Sotto`, made with mode 0700) |
-| `--relay <url>` | the relay (default `ws://127.0.0.1:8765/ws`); an address saved in Settings wins over it |
-| `--snapshot <folder>` | draws the window into PNG files and exits; with `--data-dir` from that store, without a connection, otherwise from mock data; `--only <prefix>` draws only the shots whose name starts with it |
-| `--dump` | with `--data-dir`: prints the chats of that store as JSON and exits |
-| `--safety-number <name>` | with `--data-dir`: prints the safety number with the contact of that local name in the rows of the contact panel, then the text of its QR code, and exits |
-| `--store-info` | with `--data-dir`: prints the SQLCipher version, its crypto provider and the file of the library that serves the store, and exits |
-| `--demo` | mock data and no store, with a "Mock" menu; `--first-launch` adds the first-launch screen |
-| `--send <name> <text>` | a scripting aid, any number of times: once connected, sends the text to the contact of that local name through the same action as the compose bar |
-| `--send-file <name> <path>` | the same for a file, through the action of the send box; a picture goes as a photo |
-| `--profile <name> <path>` | a scripting aid: once connected, sets the own profile through the action of "Save" on the Edit profile page, the picture cut to its centered square; an empty path is no picture |
-| `--read <name>` | a scripting aid: the chat of that contact counts as open on the screen for the whole run, so its messages are seen as they arrive (their read receipts and timers start) |
-| `--reply <name> <text>`, `--edit <name> <text>`, `--delete <name>`, `--timer <name> <seconds>`, `--reset <name>` | scripting aids: once connected, a reply to the newest message of the contact, an edit of the newest own message that can still be edited, a delete for both of the newest own message, the timer of the chat, and a new session with the contact, each through the action of the screen |
-
-The flags that print, draw or act on the chats serve the check scripts and answer for a
-store of the test kind only, the kind that `SOTTO_STORE_PROTECTION=test` makes: `--dump`,
-`--snapshot` and `--safety-number` with `--data-dir`, and `--send`, `--send-file`,
-`--profile`, `--read`, `--reply`, `--edit`, `--delete`, `--timer` and `--reset`. Any other
-store, the owner's included, is refused before it is unlocked, with no sheet ("--dump:
-only a store of the test kind answers this"). `--store-info` works on any store, and
-`--demo` or `--snapshot` without `--data-dir` draw mock data.
-
-A text sent to a contact without a session (nobody has written yet) waits in the store
-with a clock until a connection fetches the contact's keys, also across a restart. A
-message that the relay refuses ends as not sent, with a red mark and the reason on hover.
-
-The encrypted store also keeps the app's own notes: the relay address saved in Settings,
-how far each chat was read, when each contact and message was first seen by the app, the
-draft of each chat, the pinned, muted and archived chats, and every setting (theme, text
-size, chat background, send key, clock, the passcode check, auto-lock, notification and
-download choices). Next to the store, `app.json` keeps only the theme, which the lock
-screen shows before the store opens. The first launch of this version moves an older
-`app.json` into the store and leaves it with the theme only. `docs/key-storage.md` lists
-every place the app writes anything outside the store. "Reset Sotto..." in Settings,
-Advanced, deletes the store, its wrapped key and `app.json` and then the data directory
-only if nothing else is left in it.
-
-A new message posts a macOS notification (not for the chat open in the front window, not
-for a muted chat) and the Dock icon shows the number of unread messages. By default a
-notification says only "New message" from "Sotto": the name of the contact and the text
-come back with "Show sender name" and "Show message preview" in Settings, Notifications,
-and stay out while the passcode lock is shown, unless that is turned off. Notifications need the bundled
-app: under `swift run` none are posted. Search finds chats by name and messages by text,
-across chats from the list and inside the open chat (Cmd+F); the emoji button opens the
-macOS character palette. All of this stays on the Mac: nothing new is sent to the relay.
-
-Photos and files: the paperclip of the compose bar (or Cmd+Shift+A) offers Photo or File,
-files can be dropped on the chat, and a picture or files can be pasted into the compose
-field; a send box shows them with a caption field before they go, each as its own message.
-A picture goes as a photo with its size and a small JPEG preview made on the Mac, unless
-"Send as file" is checked, which sends it with an empty media type so that it shows as a
-file. A transfer shows a ring with its progress: a click on the ring cancels a sending
-(the message is deleted, which ends its upload) or pauses a download (the bytes stay). A
-received photo or file within the auto-download size of Settings, Data and storage,
-downloads by itself and a larger one waits for a click; either way it is kept inside the
-encrypted store, and "Save as..." writes a readable copy where the user says. With "Save
-received files automatically" (off by default) each received file is written into the
-download folder of the settings (Downloads by default) instead, as earlier versions did;
-files they saved there stay where they are. Transfers go on after a reconnect and after a restart without a
-click. A file that was not sent is sent again from the file it was read from with a
-click on its circle: a new upload, as the protocol says. A photo opens in a viewer (zoom,
-the other photos of the chat with the arrow keys, "Save as..."), decoded in memory; a file
-opens with the system only on a click, from a copy in the folder `temp.noindex` of the data
-directory (Spotlight skips it) that is overwritten and removed at launch, on lock and on
-quit. Every received
-file written to disk is marked as downloaded (quarantine), so macOS asks before it runs
-anything a contact sent. A picture pasted into the field stays in memory until it is sent;
-then the store keeps it with its message, so that the photo can be shown and sent again.
-
-The profile: Settings shows the own photo, name and short id at the top; a click on the
-photo opens the file panel and then the crop box, a click on the name the Edit profile page
-(photo, display name, the id and its QR code drawn with Core Image). "Save" keeps the profile
-in the store and sends it to every contact with a session: the name at once, the photo as a
-512 x 512 JPEG uploaded to each contact as its own blob, with a 128 x 128 JPEG thumbnail
-inside the message. A contact without a session gets it with its first session, and both
-sides send theirs again after a reset. The profile a contact sends is kept, its photo
-downloaded by itself into the store (no file is written), and shown in the chat list, the
-chat header and the contact panel; the local name stays the name of the contact everywhere,
-and the contact panel shows the name the contact set under it. A profile is never a message:
-no row, no unread count, no notification, and an archived chat stays archived. A lost photo
-comes back only with the contact's next change or the next new session.
-
-Replies, edits and receipts: a right click on a message offers Reply, Edit (an own message,
-up to ten times within a day of sending; also the Up arrow in an empty field) and Delete,
-whose box asks whether to delete an own message for the contact too. A reply shows the
-quoted message in its bubble, and a click on the quote scrolls to it. An own message shows
-a clock while it waits, one check once the relay stored it, two checks once the contact's
-app has it and two in the full colour once the contact has seen it; a message counts as
-seen when it is on the screen in the open chat of the front window. Read receipts can be
-turned off in Settings, Privacy and security; the contact then sees "delivered" only.
-Disappearing messages are set per chat from the chat header's menu or the contact panel
-(off, 30 seconds up to 4 weeks): an own message goes that long after it was sent, one of the
-contact that long after it was seen, with its file, also after a restart; the header and
-each such message show the timer, and a change of the timer shows as a line in the chat.
-
-The safety number: the contact panel shows the 60 digits of the safety number with the
-contact under its id, and "Verify safety number" opens a box with the digits, their QR
-code and "Mark as verified" or "Clear verification". A verified contact has a small mark
-after its name in the chat header and the panel. The mark is the user's own note: the
-contact does not learn it, and nothing but the user and a deleted contact clears it, since
-the protocol never takes another key for a contact. When the identity of a contact signs a
-second encryption key, which only someone with its secret key can do, Sotto refuses it
-(`IDENTITY_KEY_MISMATCH`) and the chat shows a red warning under the header that says what
-it means and what to do, until it is closed; the safety number stays the same, and so does
-the mark.
-
-The app starts locked and opens the store after the system sheet of Touch ID or the Mac
-password. After the auto-lock time (5 minutes by default), on Cmd+L, on sleep, when the
-screen of the Mac locks or it switches to another user (these three unless turned off) and
-on quit it
-overwrites the store key in memory and closes the store, also on the first-launch screen;
-the next unlock asks again. On sleep the Mac waits until the store is closed (30 seconds
-at most). A text or a picture copied from a chat is marked for clipboard managers as
-concealed and transient, and a lock clears the pasteboard while it still holds it. A local
-passcode, when set, is asked after that: it only covers the window, nothing is encrypted
-with it, and it cannot be recovered. While the store is locked the app has no connection.
-
-The end-to-end check of the app (a relay on a free port; the Python client writing to the
-app while it runs and while it is closed; the app sending with `--send` to the running
-Python client, right after a restart, and while the Python client is away; a photo and a
-file each way, compared byte for byte, the received ones as the store keeps them; a large
-upload and a large download of the app, each cut by killing the app in the middle and
-ended whole after its next start; the profiles both ways; a reply, an edit, a delete for
-both, the read marks and a message under a short timer each way; the safety number of
-both sides and a mark that stays through the run; then a check that no file
-of the app's data folder holds a text or a file of the run in the clear, a dump and a
-snapshot of its store; last the app itself: the hardened runtime of its signature, a
-`DYLD_INSERT_LIBRARIES` that it ignores, the scripting flags refused on a store of the
-presence kind, and a lock on the first-launch screen that closes the store):
+Two scripts run this repository against sotto's own command-line client through a real sotto relay
+from a checkout at `../../python/sotto`. Both keep their data in a temporary directory that they
+remove at the end; `--keep DIR` leaves the stores, the relay database and the pictures in DIR.
 
 ```sh
+# sotto-mac and sotto's client
+../../python/sotto/.venv/bin/python scripts/interop.py [--keep DIR]
+# the built app and sotto's client
 ../../python/sotto/.venv/bin/python scripts/app-interop.py [--keep DIR]
 ```
 
-Both checks keep their data in a temporary directory that they remove at the end;
-`--keep DIR` leaves the stores, the relay database and the pictures in DIR.
+- `scripts/interop.py`: `sotto-mac` and sotto's client chat both ways, also after restarts of
+  either side; files go both ways, two of them cut in the middle.
+- `scripts/app-interop.py`: the built app and sotto's client, through the real app process and a
+  relay on a free port. sotto's client writes to the app while it runs and while it is closed; the app sends with `--send` to the
+  running client, right after a restart and while the client is away; a photo and a file go each
+  way and are compared byte for byte, the received ones as the store keeps them; a large upload and
+  a large download of the app are each cut by killing the app in the middle and end whole after its
+  next start; the profiles go both ways.
+- Both scripts make a PQXDH session in each direction, exercise a reply, an edit, a delete for
+  both, the read marks and a message under a short timer each way, and check that each side shows
+  the safety number of sotto's client; the app keeps its verified mark through the run.
+- After the run, `scripts/app-interop.py` checks that no file of the app's data folder holds a text
+  or a file of the run in the clear, then a dump and a snapshot of its store; last the app itself:
+  the hardened runtime of its signature, a `DYLD_INSERT_LIBRARIES` that it ignores, the scripting
+  flags refused on a store of the presence kind, and a lock on the first-launch screen that closes
+  the store.
 
-Limits as they are:
+### Tests
 
-- A plain `ws://` address is dialed only to a loopback host; a relay on another machine
-  belongs behind TLS and is dialed as `wss://`.
-- The private keys of the post-quantum prekeys, the 64-byte ML-KEM seeds, live in the
-  encrypted store with the other private keys (`docs/key-storage.md`); the last-resort one
-  goes with its signed prekey, a one-time one when the session it started is accepted.
-- What leaves the store is readable: a copy made with "Save as..." or "Save received
-  files automatically", a file opened in another app until its message goes or the store
-  locks, what "Copy" puts on the pasteboard until a lock, and, with the name or the preview
-  turned on, what macOS keeps of each notification in its own notification database. A store, an `app.json` or
-  pasted pictures of a previous version are encrypted or moved on the first launch and
-  their plain files overwritten, but older Time Machine snapshots and backups keep them
-  (`docs/key-storage.md`).
-- The presence check stops someone at the keyboard who does not know the Mac password, and
-  any copy of the store taken to another Mac or read offline. It does not stop code that
-  runs as the user: such code can ask for the same sheet in Sotto's name, and an approval
-  given as usual opens the chats to it; it can wait for the next normal unlock; and while
-  Sotto is unlocked it reads what the window shows. Whoever knows the Mac password gets the
-  chats, and a Time Machine backup or a local snapshot of the data folder opens on this Mac
-  with it, also one from before a Reset (`docs/key-storage.md`).
-- One device per identity: when the same identity logs in elsewhere, the relay closes the
-  older connection and the app says so instead of reconnecting.
-- One-to-one chats with texts, photos and files. No groups, no albums, no reactions or
-  forwards. Nothing proves that the contact's app deleted a message. The command-line
-  tool prints a profile that arrives but cannot set its own. "Ask where to save
-  each file" and the storage figures and "Clear cache" of Data and storage are shown but do
-  nothing yet. A new auto-download size or download folder holds for the files that arrive
-  after the change.
-- A chat is muted until it is unmuted: there are no timed mutes. Pinned chats keep the
-  order in which they were pinned; they are not reordered by dragging.
-- No security audit.
+`scripts/test.sh` runs the Swift Testing suite under Command Line Tools: crypto against the vectors,
+wire fixtures of the reference, the store, the session, the transport against a scripted and a
+hostile relay, and the app layer. Part of it starts the relay of the sotto checkout and is skipped
+when that checkout is missing.
+
+- The core replays every vector of sotto's `vectors/pqxdh.json`. ML-KEM encapsulation is randomized
+  and CryptoKit takes no fixed randomness, so the vectors of the initiator are replayed with the
+  recorded ciphertext and secret, and the own encapsulation is checked by a round trip.
+- The safety number replays libsignal's own test vector and every vector of sotto's
+  `vectors/safety-number.json`.
+- The tests check that no text of the store is readable in its files, that after a run no file of
+  the data folder holds a text, a pasted picture or a received file of it, and that a copy of the
+  folder does not open without its Secure Enclave key.
+
+### Protocol files
+
+The protocol files in `Protocol/` come from a sotto checkout and are pinned by `Protocol/MANIFEST`:
+
+```sh
+scripts/sync-protocol.sh [path to a sotto checkout]  # copy them again
+scripts/generate-proto.sh          # rebuild Sources/SottoCore/Proto
+scripts/generate-proto.sh --check  # fail if Sources/SottoCore/Proto is out of date
+```
+
+`generate-proto.sh` uses `protoc` from the sotto checkout's Python environment (`grpc_tools`) and
+builds `protoc-gen-swift` from this package's own swift-protobuf dependency.
+
+## Project layout
+
+| Path | What is in it |
+| :--- | :--- |
+| `Sources/SottoCore` | The protocol: identity, X3DH and PQXDH, the Double Ratchet, the blob cipher, the safety number, frames, the encrypted store, the session and the transport to a relay, and `Messenger`, the layer the app talks to |
+| `Sources/Sotto` | The SwiftUI app: the chat list, the chat, the boxes, settings, the profile, the media viewer, notifications and `--snapshot` |
+| `Sources/SottoCLI` | The command-line tool `sotto-mac` |
+| `Tests/SottoCoreTests` | The tests of the core, with wire fixtures of the reference client |
+| `Protocol/` | `sotto.proto` and the shared test vectors, pinned to a sotto commit by `MANIFEST` |
+| `scripts/` | Build, tests, the interop checks and the protocol sync |
+| `docs/` | [The app in detail](docs/app.md), [key storage](docs/key-storage.md), the images of this page |
+| `DESIGN.md` | The interface design spec: sizes, colours and layout of every screen |
 
 ## License
 
-Apache-2.0, see [LICENSE](LICENSE). The app carries SQLCipher, under Zetetic's BSD-style
-Community Edition licence, which `scripts/build-app.sh` copies into the bundle as
+Apache-2.0, see [LICENSE](LICENSE). The app carries SQLCipher, under Zetetic's BSD-style Community
+Edition licence, which `scripts/build-app.sh` copies into the bundle as
 `Contents/Resources/SQLCipher-LICENSE.md`.
