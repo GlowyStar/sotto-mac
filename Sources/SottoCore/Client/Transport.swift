@@ -110,6 +110,10 @@ public actor Transport {
     public nonisolated let events: AsyncStream<TransportEvent>
     private let eventSink: AsyncStream<TransportEvent>.Continuation
     private let client: Client
+    /// The vault while it is open (`Vault`): its store from `openVault` on, its client from
+    /// `startVault` on, which takes the Delivers of the vault's contacts.
+    private var vaultStore: ClientStore?
+    private var vault: Client?
     private let dialer: any RelayDialer
     private let jitter: Jitter
     private let sleep: Sleep
@@ -333,6 +337,48 @@ public actor Transport {
         try body(client)
     }
 
+    /// `withClient` with the client whose store has the contact: the vault's for a hidden one.
+    public func withClient<T: Sendable>(for contact: Data, _ body: @Sendable (Client) throws -> T) throws -> T {
+        try body(client(for: contact))
+    }
+
+    /// `withClient` with the client whose store has the message at the position, or the
+    /// pending text at its negation: the vault's for a hidden chat.
+    public func withClient<T: Sendable>(holding position: Int64, _ body: @Sendable (Client) throws -> T) throws -> T {
+        if let vault, try vault.store.holds(position) {
+            return try body(vault)
+        }
+        return try body(client)
+    }
+
+    /// Runs `body` with the main store and the store of the vault while it is open.
+    public func withStores<T: Sendable>(_ body: @Sendable (ClientStore, ClientStore?) throws -> T) rethrows -> T {
+        try body(client.store, vaultStore)
+    }
+
+    /// The clients that run: the main one, and the vault's while it is open.
+    private var clients: [Client] {
+        vault.map { [client, $0] } ?? [client]
+    }
+
+    /// The client whose store has the contact: the vault's for a hidden one, else the main one.
+    private func client(for contact: Data) throws -> Client {
+        if let vault, try !client.store.isContact(contact), try vault.store.isContact(contact) {
+            return vault
+        }
+        return client
+    }
+
+    /// The file at a position and the client whose store has it.
+    private func holder(ofFile position: Int64) throws -> (client: Client, file: FileRow)? {
+        for each in clients {
+            if let file = try each.store.file(position) {
+                return (each, file)
+            }
+        }
+        return nil
+    }
+
     /// Serves connections until an action Stop, reported as `.stopped`, or until `stop`.
     /// A Retry waits by the schedule of section 23.4. `events` ends when this returns.
     public func run() async throws {
@@ -386,7 +432,7 @@ public actor Transport {
     /// live connection (section 39.6). Returns their positions.
     @discardableResult
     public func expireNow() async throws -> [Int64] {
-        let positions = try client.expireMessages()
+        let positions = try clients.flatMap { try $0.expireMessages() }
         guard !positions.isEmpty else {
             return []
         }
@@ -409,6 +455,7 @@ public actor Transport {
     /// Closes the connection of the client to the store, once `run` has ended: a later call
     /// that reads or writes the store fails as a locked store.
     public func closeStore() {
+        closeVault()
         client.store.close()
     }
 
@@ -426,10 +473,11 @@ public actor Transport {
     public func sendText(_ contact: Data, _ text: String, pending: Int64? = nil, replyTo: Int64? = nil) async throws -> Data {
         _ = try Envelope.encodeText(text)
         let bundle = try await bundleUnlessInSession(contact)
-        let outgoing = try client.sendText(contact, text, bundle: bundle, pending: pending, replyTo: replyTo)
+        let sender = try client(for: contact)
+        let outgoing = try sender.sendText(contact, text, bundle: bundle, pending: pending, replyTo: replyTo)
         if let position = outgoing.position {
             eventSink.yield(.written(
-                contact: contact, position: position, text: text, replyTo: replyTo, expiresAfter: try client.timer(contact)
+                contact: contact, position: position, text: text, replyTo: replyTo, expiresAfter: try sender.timer(contact)
             ))
         }
         await send(outgoing)
@@ -442,7 +490,7 @@ public actor Transport {
     ///   FetchBundle with a Stop.
     public func edit(_ contact: Data, _ position: Int64, _ text: String) async throws {
         let bundle = try await bundleUnlessInSession(contact)
-        await send(try client.edit(contact, position, text, bundle: bundle))
+        await send(try client(for: contact).edit(contact, position, text, bundle: bundle))
     }
 
     /// Deletes an own message for both (section 39.4).
@@ -450,7 +498,7 @@ public actor Transport {
     /// - Throws: what `Client.delete` throws; `RefusedError` as `edit`.
     public func delete(_ contact: Data, _ position: Int64) async throws {
         let bundle = try await bundleUnlessInSession(contact)
-        let outgoing = try client.delete(contact, position, bundle: bundle)
+        let outgoing = try client(for: contact).delete(contact, position, bundle: bundle)
         // Before the first await: a task of a file of the message must not go on.
         cancelEndedDownloads()
         await send(outgoing)
@@ -462,25 +510,27 @@ public actor Transport {
     public func setTimer(_ contact: Data, seconds: Int) async throws {
         _ = try Envelope.encodeTimer(seconds: seconds)
         let bundle = try await bundleUnlessInSession(contact)
-        await send(try client.setTimer(contact, seconds: seconds, bundle: bundle))
+        await send(try client(for: contact).setTimer(contact, seconds: seconds, bundle: bundle))
     }
 
     /// The user has seen these messages: their timer starts, and their read receipt goes out
     /// once logged in unless read receipts are off (section 39.5).
     public func markRead(_ contact: Data, _ positions: [Int64]) throws {
-        if try client.markRead(contact, positions) {
+        if try client(for: contact).markRead(contact, positions) {
             sendOwedLater()
         }
     }
 
     /// Turns read receipts on or off (section 39.5).
     public func setReadReceipts(_ on: Bool) throws {
-        try client.setReadReceipts(on)
+        for each in clients {
+            try each.setReadReceipts(on)
+        }
         sendOwedLater()
     }
 
     private func bundleUnlessInSession(_ contact: Data) async throws -> PrekeyBundle? {
-        if try client.hasSession(contact) {
+        if try client(for: contact).hasSession(contact) {
             return nil
         }
         return try await fetchBundle(contact)
@@ -527,7 +577,7 @@ public actor Transport {
         // A sending cancelled while it waited for the login makes nothing.
         try Task.checkCancellation()
         let size = try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int ?? 0
-        try client.checkFile(contact, size: size, blobMaxBytes: blobMaxBytes)
+        try client(for: contact).checkFile(contact, size: size, blobMaxBytes: blobMaxBytes)
         let data = try Data(contentsOf: file, options: .mappedIfSafe)
         return try startFile(
             contact, data, name: file.lastPathComponent, localPath: file.path, caption: caption, mediaType: mediaType,
@@ -555,7 +605,7 @@ public actor Transport {
         width: Int, height: Int, thumbnail: Data, replyTo: Int64?
     ) throws -> Data {
         let mediaType = mediaType ?? UTType(filenameExtension: (name as NSString).pathExtension)?.preferredMIMEType ?? ""
-        let upload = try client.startUpload(
+        let upload = try client(for: contact).startUpload(
             contact,
             file: data,
             blobMaxBytes: blobMaxBytes,
@@ -577,12 +627,12 @@ public actor Transport {
     /// Downloads a received file that is offered, paused or could not be received, from the
     /// bytes it holds; without a connection it starts after the next login.
     public func download(_ position: Int64) throws {
-        guard downloads != .off, let file = try client.store.file(position), file.incoming,
+        guard downloads != .off, let (owner, file) = try holder(ofFile: position), file.incoming,
             [.offered, .receiving, .notReceived].contains(file.state)
         else {
             return
         }
-        try client.beginDownload(position)
+        try owner.beginDownload(position)
         eventSink.yield(.file(Self.update(file, .receiving, done: file.held, total: Blob.blobLength(Int(file.attachment.size)))))
         startTransfers()
     }
@@ -590,10 +640,10 @@ public actor Transport {
     /// Stops a download until `download` is asked again; the bytes it holds stay. A piece on
     /// its way is still saved, so the answers of the relay keep their order (section 7.4).
     public func pauseDownload(_ position: Int64) throws {
-        guard let file = try client.store.file(position), file.state == .receiving else {
+        guard let (owner, file) = try holder(ofFile: position), file.state == .receiving else {
             return
         }
-        try client.pauseDownload(position)
+        try owner.pauseDownload(position)
         eventSink.yield(.file(Self.update(file, .offered, done: file.held)))
     }
 
@@ -606,7 +656,7 @@ public actor Transport {
     /// L2 of section 20.6 with a fresh bundle; returns the GAP of the session that left.
     public func resetSession(_ contact: Data) async throws -> Int {
         let bundle = try await fetchBundle(contact)
-        let missing = try client.startSession(contact, bundle: bundle)
+        let missing = try client(for: contact).startSession(contact, bundle: bundle)
         await sendOwed()
         return missing
     }
@@ -617,10 +667,12 @@ public actor Transport {
     /// - Throws: what `Client.checked` throws, before anything changes.
     public func setProfile(_ profile: OwnProfile) async throws {
         let profile = try Client.checked(profile)
-        for upload in try client.uploads() where upload.profile {
+        for upload in try clients.flatMap({ try $0.uploads() }) where upload.profile {
             transfers.removeValue(forKey: .upload(upload.blobID))?.task.cancel()
         }
-        try client.setProfile(profile)
+        for each in clients {
+            try each.setProfile(profile)
+        }
         await sendOwed()
     }
 
@@ -649,6 +701,146 @@ public actor Transport {
             } catch is ConnectionLost {
                 continue
             }
+        }
+    }
+
+    // MARK: The vault
+
+    /// Opens the vault of the data directory with the phrase (`Vault`): false when the phrase
+    /// does not open it, after the same work whether the directory has a vault or only its
+    /// decoy; with a vault open, true for its phrase only. The vault takes no Deliver until
+    /// `startVault`.
+    public func openVault(_ phrase: String) throws -> Bool {
+        let store: ClientStore
+        do {
+            store = try Vault.open(client.store.directory, phrase: phrase)
+        } catch StoreError.wrongKey {
+            return false
+        }
+        if vaultStore == nil {
+            store.counter = client.store
+            vaultStore = store
+        } else {
+            store.close()
+        }
+        return true
+    }
+
+    /// The moves of contacts into or out of the open vault that a stop cut short.
+    public func vaultMoves() throws -> [(contact: Data, hiding: Bool)] {
+        try vaultStore?.vaultMoves() ?? []
+    }
+
+    /// Starts the client of the open vault: the identity and the prekeys of the main store
+    /// are copied into the vault, the inbox key of the main store is the vault's, and the
+    /// envelopes of the sealed inbox from the vault's contacts go through its client in order,
+    /// as if they arrived now, before what the vault owes and holds is sent.
+    public func startVault() async throws {
+        guard let store = vaultStore, vault == nil else {
+            return
+        }
+        try Vault.syncPrekeys(main: client.store, vault: store)
+        if let inbox = try store.inboxKey(), try client.store.inboxKey()?.publicKey != inbox.publicKey {
+            try client.store.transaction { try client.store.setInboxPublicKey(inbox.publicKey) }
+        }
+        let started = try client.sibling(over: store)
+        if try started.ownProfile() != client.ownProfile() {
+            try started.setProfile(client.ownProfile())
+        }
+        if try started.readReceipts() != client.readReceipts() {
+            try started.setReadReceipts(client.readReceipts())
+        }
+        vault = started
+        try openSealedInbox(started)
+        if ready {
+            for outgoing in try started.outbox() {
+                await request(Request(frame: Self.sendFrame(outgoing)))
+            }
+        }
+        sendOwedLater()
+    }
+
+    /// Every envelope of the sealed inbox that opens with the vault's key and comes from a
+    /// contact of the vault is received by its client, in order; each is deleted after it,
+    /// and so is every other one. A stop in between receives it again as a duplicate.
+    private func openSealedInbox(_ vault: Client) throws {
+        guard let privateKey = try vault.store.inboxKey()?.privateKey else {
+            return
+        }
+        for (position, sealed) in try client.store.sealedInbox() {
+            if let delivered = Vault.open(sealed, privateKey: privateKey), try client(for: delivered.sender) === vault {
+                let received = try vault.receive(delivered)
+                try syncVaultPrekeys()
+                try accepted(vault, delivered.sender, delivered.messageID, received)
+            }
+            try client.store.transaction { try client.store.deleteSealed(position) }
+        }
+    }
+
+    /// Closes the vault with the transfers of its files; what it owes and holds waits in its
+    /// store for the next open.
+    public func closeVault() {
+        guard let store = vaultStore else {
+            return
+        }
+        for (key, transfer) in transfers where Self.belongs(key, to: store) {
+            transfer.task.cancel()
+            transfers[key] = nil
+        }
+        vault = nil
+        vaultStore = nil
+        store.close()
+    }
+
+    private static func belongs(_ key: TransferKey, to store: ClientStore) -> Bool {
+        switch key {
+        case .upload(let blobID): (try? store.hasUpload(blobID)) == true
+        case .download(let contactAndBlob): (try? store.isContact(contactAndBlob.prefix(Identity.keyLength))) == true
+        }
+    }
+
+    /// Makes a new vault under the phrase in place of the decoy or of the vault there, which
+    /// is erased; the open vault is closed first, and the inbox key of the main store becomes
+    /// the new vault's.
+    public func makeVault(_ phrase: String) throws {
+        closeVault()
+        let publicKey = try Vault.make(client.store.directory, phrase: phrase)
+        try client.store.transaction { try client.store.setInboxPublicKey(publicKey) }
+    }
+
+    /// Moves every row of the contact into the open vault (`Vault.hide`); `mainNotes` and
+    /// `vaultNotes` are the app's notes of each store after the move. Its transfers go on
+    /// with the vault's client.
+    public func hide(_ contact: Data, mainNotes: Data, vaultNotes: Data) throws {
+        guard let vaultStore else {
+            throw VaultClosedError()
+        }
+        try Vault.hide(contact, main: client.store, vault: vaultStore, notes: (mainNotes, vaultNotes))
+        startTransfers()
+        sendOwedLater()
+    }
+
+    /// Moves every row of a hidden contact back into the main store (`Vault.unhide`).
+    public func unhide(_ contact: Data, mainNotes: Data, vaultNotes: Data) throws {
+        guard let vaultStore else {
+            throw VaultClosedError()
+        }
+        try Vault.unhide(contact, main: client.store, vault: vaultStore, notes: (mainNotes, vaultNotes))
+        startTransfers()
+        sendOwedLater()
+    }
+
+    /// Runs `body` with the store of the open vault.
+    public func withVault<T: Sendable>(_ body: @Sendable (ClientStore) throws -> T) throws -> T {
+        guard let vaultStore else {
+            throw VaultClosedError()
+        }
+        return try body(vaultStore)
+    }
+
+    private func syncVaultPrekeys() throws {
+        if let vault {
+            try Vault.syncPrekeys(main: client.store, vault: vault.store)
         }
     }
 
@@ -728,16 +920,19 @@ public actor Transport {
             request.upload = upload
             await self.request(request)
         }
+        try syncVaultPrekeys()
         var sent: Set<Data> = []
         // Again until no row is new: a text committed while a Send was on its way is sent
         // here, and one committed after the last look finds the transport ready.
-        while case let rows = try client.outbox().filter({ !sent.contains($0.messageID) }), !rows.isEmpty {
+        while case let rows = try clients.flatMap({ try $0.outbox() }).filter({ !sent.contains($0.messageID) }), !rows.isEmpty {
             for outgoing in rows {
                 sent.insert(outgoing.messageID)
                 await request(Request(frame: Self.sendFrame(outgoing)))
             }
         }
-        try client.forgetSeenIDs()
+        for each in clients {
+            try each.forgetSeenIDs()
+        }
         ready = true
         let waiters = readyWaiters
         readyWaiters = []
@@ -753,9 +948,10 @@ public actor Transport {
             case .deliver(let deliver):
                 try await self.deliver(socket, deliver)
             case .stored(let stored):
-                if take(.send, stored.messageID) != nil {
-                    let position = try client.sentPosition(stored.messageID)
-                    let file = try client.confirmStored(stored.messageID)
+                if let request = take(.send, stored.messageID) {
+                    let owner = try client(for: request.frame.send.recipient)
+                    let position = try owner.sentPosition(stored.messageID)
+                    let file = try owner.confirmStored(stored.messageID)
                     if let position {
                         eventSink.yield(.sent(position: position))
                     }
@@ -766,6 +962,7 @@ public actor Transport {
             case .bundleStored:
                 if let upload = take(.upload, Data())?.upload {
                     try client.confirmUpload(upload)
+                    try syncVaultPrekeys()
                 }
             case .bundle(let bundle):
                 take(.fetch, bundle.identity)?.settle(.success(Self.bundle(of: bundle)))
@@ -784,10 +981,14 @@ public actor Transport {
         }
     }
 
+    /// A Deliver goes to the client whose store has its sender; one of a sender in neither
+    /// store is sealed by the main client (`Client.receive`).
     private func deliver(_ socket: any RelaySocket, _ deliver: Sotto_Deliver) async throws {
-        let received = try client.receive(
+        let receiver = try client(for: deliver.sender)
+        let received = try receiver.receive(
             Delivered(sender: deliver.sender, messageID: deliver.messageID, payload: deliver.payload)
         )
+        try syncVaultPrekeys()
         if received.profile != nil || received.deleted {
             // Before the first await: the task of a replaced avatar or of a deleted file must
             // not go on.
@@ -801,22 +1002,25 @@ public actor Transport {
             ack.ack.messages = [reference]
             try await socket.send(ack.serializedBytes())
         }
-        eventSink.yield(.incoming(sender: deliver.sender, received: received))
+        try accepted(receiver, deliver.sender, deliver.messageID, received)
+    }
+
+    /// What follows an accepted message: its file downloads by itself when its size allows,
+    /// an avatar always; a new session owes the own profile, a message of the chat a delivery
+    /// receipt, a deletion maybe a DeleteBlob, sent in a task, so that a held request never
+    /// stops the reading of frames.
+    private func accepted(_ receiver: Client, _ sender: Data, _ messageID: Data, _ received: Received) throws {
+        eventSink.yield(.incoming(sender: sender, received: received))
         if let attachment = received.attachment, downloads != .off, autoDownload(attachment),
-            let file = try client.store.files().last(where: {
-                $0.incoming && $0.contact == deliver.sender && $0.messageID == deliver.messageID
-            })
+            let file = try receiver.store.files().last(where: { $0.incoming && $0.contact == sender && $0.messageID == messageID })
         {
-            try client.beginDownload(file.position)
+            try receiver.beginDownload(file.position)
             startTransfers()
         }
         if received.profile?.hasAvatar == true {
             startTransfers()
         }
-        // A new session owes the own profile, a message of the chat a delivery receipt, a
-        // deletion maybe a DeleteBlob; in a task, so that a held request never stops the
-        // reading of frames.
-        if try !client.store.owedProfiles().isEmpty || client.owesReceipts() || received.deleted {
+        if try clients.contains(where: { try !$0.store.owedProfiles().isEmpty || $0.owesReceipts() }) || received.deleted {
             sendOwedLater()
         }
     }
@@ -849,7 +1053,7 @@ public actor Transport {
         } else if request.upload != nil {
             eventSink.yield(.refused(result: result, contact: nil))
         } else {
-            let file = try client.dropRefusedSend(reference, result: result)
+            let file = try client(for: request.frame.send.recipient).dropRefusedSend(reference, result: result)
             eventSink.yield(.refused(result: result, contact: request.frame.send.recipient))
             if let file {
                 eventSink.yield(.file(Self.update(file, .notSent, result: result)))
@@ -876,7 +1080,7 @@ public actor Transport {
             return
         }
         request.waiting = false
-        if request.kind == .blobWrite, (try? client.hasUpload(request.key)) != true {
+        if request.kind == .blobWrite, !clients.contains(where: { (try? $0.hasUpload(request.key)) == true }) {
             // The upload was given up while its frame waited: sent again, it would make the
             // blob anew after its DeleteBlob.
             requests.removeAll { $0 === request }
@@ -970,7 +1174,9 @@ public actor Transport {
     private func answered(_ request: Request) {
         for (deletion, sentAfter) in deletionsSent where request.sequence > sentAfter {
             deletionsSent[deletion] = nil
-            try? client.confirmBlobDeletion(uploader: deletion.uploader, blobID: deletion.blobID)
+            for each in clients {
+                try? each.confirmBlobDeletion(uploader: deletion.uploader, blobID: deletion.blobID)
+            }
         }
     }
 
@@ -1018,6 +1224,7 @@ public actor Transport {
                 try client.dropRefusedUpload(upload)
             }
         }
+        try syncVaultPrekeys()
     }
 
     // MARK: Files (part 3)
@@ -1025,7 +1232,7 @@ public actor Transport {
     /// Sends the saved DeleteBlob frames that this connection has not sent; none to a relay
     /// without blob frames (section 30.1).
     private func sendBlobDeletions() async {
-        guard let socket, blobMaxBytes > 0, let deletions = try? client.blobDeletions() else {
+        guard let socket, blobMaxBytes > 0, let deletions = try? clients.flatMap({ try $0.blobDeletions() }) else {
             return
         }
         let sentOn = generation
@@ -1046,23 +1253,25 @@ public actor Transport {
 
     /// The last row of the table of section 33.4, after a LoggedIn.
     private func endTransfersBeyondTheRelay() throws {
-        for upload in try client.uploads() {
-            let result: FileError? = blobMaxBytes == 0 ? .filesUnsupported : upload.length > blobMaxBytes ? .fileTooLarge : nil
-            guard let result else {
-                continue
+        for each in clients {
+            for upload in try each.uploads() {
+                let result: FileError? = blobMaxBytes == 0 ? .filesUnsupported : upload.length > blobMaxBytes ? .fileTooLarge : nil
+                guard let result else {
+                    continue
+                }
+                if upload.profile {
+                    // Owed again, the profile goes without its avatar (section 36.2).
+                    try each.oweProfileWithoutUpload(upload)
+                } else {
+                    try each.giveUpUpload(upload, result: result.result)
+                    report(upload, .notSent, result: result.result)
+                }
             }
-            if upload.profile {
-                // Owed again, the profile goes without its avatar (section 36.2).
-                try client.oweProfileWithoutUpload(upload)
-            } else {
-                try client.giveUpUpload(upload, result: result.result)
-                report(upload, .notSent, result: result.result)
-            }
-        }
-        if blobMaxBytes == 0, downloads != .off {
-            let result = FileError.filesUnsupported.result
-            for file in try client.downloads() where file.state == .receiving && !file.avatar {
-                eventSink.yield(.file(Self.update(file, try client.failDownload(file.position, result: result), result: result)))
+            if blobMaxBytes == 0, downloads != .off {
+                let result = FileError.filesUnsupported.result
+                for file in try each.downloads() where file.state == .receiving && !file.avatar {
+                    eventSink.yield(.file(Self.update(file, try each.failDownload(file.position, result: result), result: result)))
+                }
             }
         }
     }
@@ -1073,18 +1282,20 @@ public actor Transport {
         guard ready, blobMaxBytes > 0 else {
             return
         }
-        for upload in (try? client.uploads()) ?? [] {
+        for upload in clients.flatMap({ (try? $0.uploads()) ?? [] }) {
             track(.upload(upload.blobID)) { try await $0.upload(upload) }
         }
-        for file in (try? client.downloads()) ?? [] {
-            let key = TransferKey.download(file.contact + file.attachment.blobID)
-            if file.avatar {
-                guard transfers[key] == nil, (try? client.beginDownload(file.position)) != nil else {
-                    continue
+        for each in clients {
+            for file in (try? each.downloads()) ?? [] {
+                let key = TransferKey.download(file.contact + file.attachment.blobID)
+                if file.avatar {
+                    guard transfers[key] == nil, (try? each.beginDownload(file.position)) != nil else {
+                        continue
+                    }
+                    track(key) { try await $0.download(file) }
+                } else if downloads != .off, file.state == .receiving {
+                    track(key) { try await $0.download(file) }
                 }
-                track(key) { try await $0.download(file) }
-            } else if downloads != .off, file.state == .receiving {
-                track(key) { try await $0.download(file) }
             }
         }
     }
@@ -1092,7 +1303,7 @@ public actor Transport {
     /// Cancels the download tasks of files that the store does not offer: a position of a
     /// deleted file can be taken by a new one.
     private func cancelEndedDownloads() {
-        let offered = Set(((try? client.downloads()) ?? []).map { TransferKey.download($0.contact + $0.attachment.blobID) })
+        let offered = Set(clients.flatMap { (try? $0.downloads()) ?? [] }.map { TransferKey.download($0.contact + $0.attachment.blobID) })
         for (key, transfer) in transfers where !offered.contains(key) {
             if case .download = key {
                 transfer.task.cancel()
@@ -1108,19 +1319,21 @@ public actor Transport {
         guard ready else {
             return
         }
-        do {
-            for outgoing in try client.sendOwedProfiles(blobMaxBytes: blobMaxBytes) {
-                await request(Request(frame: Self.sendFrame(outgoing)))
+        for each in clients {
+            do {
+                for outgoing in try each.sendOwedProfiles(blobMaxBytes: blobMaxBytes) {
+                    await request(Request(frame: Self.sendFrame(outgoing)))
+                }
+            } catch {
+                eventSink.yield(.transferFailed(reason: "the profile was not sent: \(error)"))
             }
-        } catch {
-            eventSink.yield(.transferFailed(reason: "the profile was not sent: \(error)"))
-        }
-        do {
-            for outgoing in try client.sendOwedReceipts() {
-                await request(Request(frame: Self.sendFrame(outgoing)))
+            do {
+                for outgoing in try each.sendOwedReceipts() {
+                    await request(Request(frame: Self.sendFrame(outgoing)))
+                }
+            } catch {
+                eventSink.yield(.transferFailed(reason: "the receipts were not sent: \(error)"))
             }
-        } catch {
-            eventSink.yield(.transferFailed(reason: "the receipts were not sent: \(error)"))
         }
         startTransfers()
         await sendBlobDeletions()
@@ -1172,7 +1385,7 @@ public actor Transport {
                     try await notSent(upload, CryptoError.badBlob.result)
                     return
                 }
-                guard try client.hasUpload(upload.blobID) else {
+                guard try client(for: upload.contact).hasUpload(upload.blobID) else {
                     return
                 }
                 report(upload, .sending, done: length)
@@ -1183,7 +1396,7 @@ public actor Transport {
                 var put = Sotto_ClientFrame()
                 put.putBlob.blobID = upload.blobID
                 put.putBlob.offset = UInt32(length)
-                put.putBlob.data = try client.readUpload(upload.blobID, offset: length, length: Frames.blobChunkBytes)
+                put.putBlob.data = try client(for: upload.contact).readUpload(upload.blobID, offset: length, length: Frames.blobChunkBytes)
                 reply = try await askBlob(put)
                 sentAPiece = true
             case .data:
@@ -1197,11 +1410,11 @@ public actor Transport {
         let outgoing: Outgoing
         var bundle: PrekeyBundle?
         do {
-            if try !client.hasSession(upload.contact) {
+            if try !client(for: upload.contact).hasSession(upload.contact) {
                 bundle = try await fetchBundle(upload.contact)
                 try Task.checkCancellation()
             }
-            outgoing = try client.sendAttachment(upload, bundle: bundle)
+            outgoing = try client(for: upload.contact).sendAttachment(upload, bundle: bundle)
         } catch let error as RefusedError {
             return try await notSent(upload, error.result)
         } catch let error as CryptoError {
@@ -1216,7 +1429,7 @@ public actor Transport {
     }
 
     private func notSent(_ upload: UploadRow, _ result: String) async throws {
-        try client.giveUpUpload(upload, result: result)
+        try client(for: upload.contact).giveUpUpload(upload, result: result)
         report(upload, .notSent, result: result)
         await sendBlobDeletions()
     }
@@ -1230,7 +1443,7 @@ public actor Transport {
         guard try current(file)?.state == .receiving else {
             return
         }
-        try client.beginDownload(file.position)
+        try client(for: file.contact).beginDownload(file.position)
         while held < length {
             guard try current(file)?.state == .receiving else {
                 return
@@ -1253,7 +1466,7 @@ public actor Transport {
                 guard !isAnotherRange, data.data.count == asked else {
                     return try await notReceived(file, CryptoError.badBlob.result)
                 }
-                try client.saveDownloadPiece(file.position, data.data)
+                try client(for: file.contact).saveDownloadPiece(file.position, data.data)
                 held += asked
                 eventSink.yield(.file(Self.update(file, .receiving, done: held, total: length)))
             case .stored:
@@ -1262,11 +1475,13 @@ public actor Transport {
         }
 
         var path: URL?
+        let owner = try client(for: file.contact)
         do {
             if file.avatar {
-                try client.finishAvatarDownload(file.position)
+                try owner.finishAvatarDownload(file.position)
             } else {
-                path = try client.finishDownload(file.position, folder: downloads.folder)
+                // A file of a hidden chat stays in the vault, never in a folder.
+                path = try owner.finishDownload(file.position, folder: owner === client ? downloads.folder : nil)
             }
         } catch CryptoError.badBlob {
             return try await notReceived(file, CryptoError.badBlob.result)
@@ -1283,7 +1498,7 @@ public actor Transport {
     /// The row at the position of a file while it is still that file: the position of a
     /// deleted file can be taken by another one.
     private func current(_ file: FileRow) throws -> FileRow? {
-        guard let row = try client.store.file(file.position), row.contact == file.contact,
+        guard let row = try client(for: file.contact).store.file(file.position), row.contact == file.contact,
             row.attachment.blobID == file.attachment.blobID
         else {
             return nil
@@ -1292,7 +1507,7 @@ public actor Transport {
     }
 
     private func notReceived(_ file: FileRow, _ result: String) async throws {
-        let state = try client.failDownload(file.position, result: result)
+        let state = try client(for: file.contact).failDownload(file.position, result: result)
         eventSink.yield(.file(Self.update(file, state, result: result)))
         await sendBlobDeletions()
     }

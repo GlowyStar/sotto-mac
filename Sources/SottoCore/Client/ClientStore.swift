@@ -299,11 +299,15 @@ public final class ClientStore {
     public let path: URL
     public let directory: URL
     private var connection: OpaquePointer?
+    /// The store whose counters give the positions of new rows of `messages`, `pending` and
+    /// `files`: the main store, for a vault, so that no position is given twice (Vault).
+    var counter: ClientStore?
 
     /// Opens the store in `directory` with the key `StoreKeys` holds for it, making the
     /// directory and the file when they are missing, and refuses either when its mode has
     /// one of the bits 077. A plain store of a version before the encryption is encrypted
-    /// first, once: a plain file found after that is refused (docs/key-storage.md).
+    /// first, once: a plain file found after that is refused (docs/key-storage.md). The
+    /// vault file is made beside it as a decoy when there is none (Vault).
     public init(directory: URL) throws {
         self.directory = directory
         path = directory.appendingPathComponent(Self.fileName)
@@ -321,7 +325,34 @@ public final class ClientStore {
                 connection = try Self.connect(path, literal, flags: SQLITE_OPEN_READWRITE)
             }
             try StoreKeys.recordEncrypted(directory)
+            try Vault.finishReplacing(directory)
+            try Vault.makeDecoy(directory)
         }
+        try prepare()
+        try transaction {
+            if try query("SELECT 1 FROM inbox_key").isEmpty {
+                try change("INSERT INTO inbox_key VALUES (1, ?, NULL)", [.blob(Vault.decoyInboxKey())])
+            }
+        }
+    }
+
+    /// Opens the file of a vault with the phrase, or with a raw key literal for the decoy;
+    /// `StoreError.wrongKey` when it does not open the pages.
+    init(vaultAt path: URL, in directory: URL, key: Data, phrase: Bool) throws {
+        self.directory = directory
+        self.path = path
+        try Self.makePrivateFile(path)
+        try key.withUnsafeBytes { key in
+            connection = try Self.connect(path, key, flags: SQLITE_OPEN_READWRITE)
+        }
+        if phrase {
+            try query("PRAGMA kdf_iter = \(Vault.kdfIterations)")
+        }
+        try prepare()
+    }
+
+    /// The checks, the settings and the tables that every connection starts with.
+    private func prepare() throws {
         try Self.check(connection)
         try query("PRAGMA journal_mode=DELETE")
         try query("PRAGMA temp_store=MEMORY")
@@ -1173,24 +1204,44 @@ public final class ClientStore {
     /// Inserts a row at a position above every position the table ever had, so that a
     /// position of a row that is gone is never given to another one (section 39.8). SQLite
     /// gives the highest `INTEGER PRIMARY KEY` again once its row is deleted.
+    /// A vault takes its positions from the counter of the main store too.
     private func insertNumbered(_ table: String, columns: String, _ values: [SQLValue]) throws -> Int64 {
+        var position = try nextNumber(table)
+        if let counter {
+            position = try counter.reserveNumber(table, atLeast: position)
+        }
         let marks = Array(repeating: "?", count: values.count).joined(separator: ", ")
-        let position = try change(
+        try change("INSERT INTO \(table) (position, \(columns)) VALUES (?, \(marks))", [.integer(position)] + values)
+        try setNumber(table, position)
+        return position
+    }
+
+    private func nextNumber(_ table: String) throws -> Int64 {
+        try query(
             """
-            INSERT INTO \(table) (position, \(columns)) VALUES (
-                max(
-                    coalesce((SELECT max(position) FROM \(table)), 0),
-                    coalesce((SELECT last_number FROM row_numbers WHERE name = '\(table)'), 0)
-                ) + 1, \(marks)
-            ) RETURNING position
-            """,
-            values
+            SELECT max(
+                coalesce((SELECT max(position) FROM \(table)), 0),
+                coalesce((SELECT last_number FROM row_numbers WHERE name = '\(table)'), 0)
+            ) + 1
+            """
         )[0][0].integer!
+    }
+
+    private func setNumber(_ table: String, _ position: Int64) throws {
         try change(
-            "INSERT INTO row_numbers VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET last_number = excluded.last_number",
+            "INSERT INTO row_numbers VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET last_number = max(last_number, excluded.last_number)",
             [.text(table), .integer(position)]
         )
-        return position
+    }
+
+    /// Takes the next position of `table` here, at least `floor`, and counts it as given.
+    func reserveNumber(_ table: String, atLeast floor: Int64) throws -> Int64 {
+        let reserve = {
+            let position = max(floor, try self.nextNumber(table))
+            try self.setNumber(table, position)
+            return position
+        }
+        return isInTransaction ? try reserve() : try transaction(reserve)
     }
 
     // MARK: SQLite
@@ -1235,7 +1286,7 @@ public final class ClientStore {
     }
 
     @discardableResult
-    private func change(_ statement: String, _ parameters: [SQLValue] = []) throws -> [[SQLValue]] {
+    func change(_ statement: String, _ parameters: [SQLValue] = []) throws -> [[SQLValue]] {
         guard isInTransaction else {
             throw StoreError.writeOutsideTransaction
         }
@@ -1884,6 +1935,28 @@ private enum Schema {
         """
         CREATE TABLE IF NOT EXISTS verified_contacts (
             contact BLOB PRIMARY KEY
+        ) STRICT, WITHOUT ROWID
+        """,
+        // The hidden chats (docs/key-storage.md): the key that envelopes of senders who are
+        // not contacts are sealed to, with its private half only in a vault; those envelopes,
+        // oldest first; and in a vault the moves of a contact that a stop may have cut short.
+        """
+        CREATE TABLE IF NOT EXISTS inbox_key (
+            only_row INTEGER PRIMARY KEY CHECK (only_row = 1),
+            public_key BLOB NOT NULL,
+            private_key BLOB
+        ) STRICT
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS sealed_inbox (
+            position INTEGER PRIMARY KEY,
+            sealed BLOB NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS vault_moves (
+            contact BLOB PRIMARY KEY,
+            hiding INTEGER NOT NULL
         ) STRICT, WITHOUT ROWID
         """,
     ]

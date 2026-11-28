@@ -95,6 +95,8 @@ window states into PNG files and exits.
   the screen of the Mac locks, and overwrites the store key in memory.
 - **Quiet notifications.** By default a notification says only "New message" from "Sotto", with no
   name and no text.
+- **Hidden chats.** A chat can be moved behind a phrase into a second encrypted file; only the
+  phrase typed into the search brings it back, and every Mac has that file, used or not.
 - **Search** across chats and inside the open chat, all on the Mac.
 - **A command-line tool**, `sotto-mac`, with the commands of sotto's own `sotto` and the same
   encrypted store.
@@ -119,6 +121,9 @@ How each of these behaves in the app, step by step: [docs/app.md](docs/app.md).
 - **What the relay sees.** It cannot read a message, but it sees who talks to whom, when and how
   much ([what the relay learns](https://github.com/GlowyStar/sotto/blob/main/docs/threat-model.md#what-the-relay-learns),
   in sotto's threat model).
+- **Hidden chats are hidden on this Mac only.** The relay still sees who writes to whom, the contact
+  sees no delivered mark while the hidden chats are closed, and the size of their file can hint
+  that it is used ([key storage](docs/key-storage.md#hidden-chats)).
 - **Delete for both and the timer are requests** that the other side's client honours. Nothing
   can make it do so, nothing proves that it did, and nothing protects a message from the person
   who received it.

@@ -165,11 +165,7 @@ struct ListTopBar: View {
                     model.searchSelection = max(model.searchSelection - 1, 0)
                     return .handled
                 }
-                .onSubmit {
-                    let rows = model.searchRows
-                    guard rows.indices.contains(model.searchSelection) else { return }
-                    model.open(rows[model.searchSelection])
-                }
+                .onSubmit { model.submitSearch() }
             if !model.search.isEmpty {
                 HStack {
                     Spacer()
@@ -228,6 +224,9 @@ struct ChatRow: View {
                             .truncationMode(.tail)
                         if contact.muted {
                             RowMark(symbol: "speaker.slash.fill", active: active, label: "Muted")
+                        }
+                        if contact.hidden {
+                            RowMark(symbol: "eye.slash", active: active, label: "Hidden")
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -294,6 +293,19 @@ struct ChatRow: View {
                 model.setArchived(contact.id, !contact.archived)
             } label: {
                 Label(contact.archived ? "Unarchive" : "Archive", systemImage: contact.archived ? "tray.and.arrow.up" : "archivebox")
+            }
+            if contact.hidden {
+                Button {
+                    model.unhideChat(contact.id)
+                } label: {
+                    Label("Unhide chat", systemImage: "eye")
+                }
+            } else {
+                Button {
+                    model.modal = .hide(contact.id)
+                } label: {
+                    Label("Hide chat...", systemImage: "eye.slash")
+                }
             }
             Divider()
             Button {

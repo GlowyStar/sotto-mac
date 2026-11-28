@@ -8,7 +8,7 @@ The layout, sizes, colours and conventions follow Telegram Desktop 7.x (the open
 
 Not taken, and never to be added: any code or style-file text, any icon or image asset, the wallpaper patterns, sounds, the logo, the name or the brand. Icons are SF Symbols (section 8). The chat background is a flat colour or a simple two-stop gradient made for Sotto. Avatars are coloured circles with initials. The look will be adjusted later; build every value from the tokens below so a later change is a token edit.
 
-Product scope (do not design anything else): one-to-one chats with text, photos and files, all end-to-end encrypted; contacts added by a 64-hex-character id under a local name; an identity is a key pair made on the device (no phone, no username) with an optional display name and avatar sent to contacts encrypted; an outgoing message is waiting, stored by the relay, delivered, read, or not sent (section 20; no typing, no online status); replies with a quote, edits of an own message, delete for both and a disappearing timer per chat (section 20); the app is connected to a relay or reconnecting; a session with a contact can be reset. No groups, channels, stickers, calls, folders, stories, reactions or forwards.
+Product scope (do not design anything else): one-to-one chats with text, photos and files, all end-to-end encrypted; contacts added by a 64-hex-character id under a local name; an identity is a key pair made on the device (no phone, no username) with an optional display name and avatar sent to contacts encrypted; an outgoing message is waiting, stored by the relay, delivered, read, or not sent (section 20; no typing, no online status); replies with a quote, edits of an own message, delete for both and a disappearing timer per chat (section 20); the app is connected to a relay or reconnecting; a session with a contact can be reset; a chat can be hidden behind a phrase (section 22). No groups, channels, stickers, calls, folders, stories, reactions or forwards.
 
 ## 2. Window and layout
 
@@ -202,7 +202,7 @@ The draft line, the pin and mute marks and the muted badge are in 19.2.
 | Search focused | fill `searchBgActive`, 2pt border `searchBorderActive`, placeholder `placeholderFgActive` |
 | Clear button | `xmark.circle.fill` 14pt `placeholderFg` in the 30pt right margin, shown when text is not empty |
 
-Search filters the list by local name (case-insensitive substring) as the user types, and below the chats found it lists the messages whose text holds the query (19.4); no match shows "Nothing found", centered, 13 regular `windowSubFg`, 20 below the bar.
+Search filters the list by local name (case-insensitive substring) as the user types, and below the chats found it lists the messages whose text holds the query (19.4); no match shows "Nothing found", centered, 13 regular `windowSubFg`, 20 below the bar. Return tries a text of 8 characters or more as the phrase of the hidden chats first (22.3).
 
 Connection bar: while the app is not connected to the relay, a 37pt bar appears under the search row, full column width, background `windowBgOver`: a small `ProgressView` at left 16, then "Connecting..." 13 regular `accentText`, 8 after the spinner. It slides in when the connection drops and out when connected. Nothing is shown while connected.
 
@@ -297,7 +297,7 @@ The system `.contextMenu` is acceptable for the first build; the custom look bel
 | Shadow | `shadow`, blur 12, y 2 (estimate) |
 | Minimum width | 200 (estimate) |
 
-Message menu: Reply and Edit (20.8); for a photo, Save as... and Copy image; for a file, Save as... and, when it was saved into a folder, Show in Finder; then Copy text; Delete (danger), which opens the box of 20.6. Copy image and Copy text mark the pasteboard as concealed and transient for clipboard managers (docs/key-storage.md). Chat row menu: Pin or Unpin (disabled for an archived chat); Mute notifications or Unmute; Archive or Unarchive; a separator; Contact info; Delete contact (danger).
+Message menu: Reply and Edit (20.8); for a photo, Save as... and Copy image; for a file, Save as... and, when it was saved into a folder, Show in Finder; then Copy text; Delete (danger), which opens the box of 20.6. Copy image and Copy text mark the pasteboard as concealed and transient for clipboard managers (docs/key-storage.md). Chat row menu: Pin or Unpin (disabled for an archived chat); Mute notifications or Unmute; Archive or Unarchive; Hide chat... or, for a hidden chat, Unhide chat (22.1); a separator; Contact info; Delete contact (danger).
 
 ### 5.10 Modal box
 
@@ -426,7 +426,7 @@ The settings are the panel of section 11. "Relay" is in 11.7, "Theme" in 11.4 an
 
 - Connection: shown only in the connection bar under the list search (5.2). The chat area does not change; a message sent while disconnected waits in the outbox.
 - Outbox state, on every outgoing bubble after the time: `clock` 12pt `msgSendingIconFg` while waiting in the outbox; `checkmark` 12pt `msgStoredIconFg` once the relay stored it; `exclamationmark.circle.fill` 12pt `danger` when it is not sent (the relay refused it, or the contact's keys could not be had), with "Not sent." and the reason as the hover help and in the accessibility label. A text to a contact without a session waits with the clock from the moment it is sent, also across a restart, until a connection gives the session. A message that is not sent stays not sent; it can be deleted. The receipts of part 5 add two marks after the check: delivered and read (20.5). The same marks stand before the time in a list row whose last message is the user's own (checks `rowSentIconFg`, clock `windowSubFg`, both `rowFgActive` in the active row).
-- A message from a sender who is not in the contacts is not shown anywhere: no row, no badge, no notification.
+- A message from a sender who is not in the contacts is not shown anywhere: no row, no badge, no notification. It waits sealed for the hidden chats, whose senders look the same (22).
 - "End-to-end encrypted" is stated, not decorated: the header subtitle with a small lock (5.3), the contact panel under the name (7.4) and the first-launch text. No green titles, no locks in list rows, no special bubble colours, no "secret chat" banner: the normal chat look is the encrypted look.
 
 ## 8. SF Symbols
@@ -486,6 +486,7 @@ The settings are the panel of section 11. "Relay" is in 11.7, "Theme" in 11.4 an
 | Verified mark (header, panel, verify box) | `checkmark.seal.fill`, palette | 14 / 16 / 14 |
 | Verify safety number (panel row) | `checkmark.shield` | 18 |
 | Warning of a refused key | `exclamationmark.shield.fill` | 18 |
+| Hidden mark (row), Hide chat (row menu) / Unhide chat | `eye.slash` / `eye.slash`, `eye` | 12 / 16 |
 
 Symbols use `.symbolRenderingMode(.monochrome)` in the colour token of their place.
 
@@ -613,6 +614,14 @@ Own departures from the reference, worth a look by the owner:
 - Data and storage has "Save received files automatically", off by default, and a hint under the download folder group (11.5); the reference saves every download into its folder. Off, a received photo or file is kept in the encrypted store and leaves it only by "Save as...".
 - A photo kept in the store shows its blurred thumbnail until it is decoded in memory; "Show in Finder" is offered only for a file that is in a folder (5.9, 13.2, 15).
 - The lock screen takes the theme from `app.json`, the one setting kept outside the store.
+
+### Added with the hidden chats (SOTTO-50, 2026-11-28)
+
+Built as 22 says; Sotto's own, since Telegram Desktop has no hidden chats (its local passcode locks the whole app). Worth a look by the owner:
+- The phrase is typed into the plain search field, so it shows while it is typed; it is cleared once it opens the vault. A wrong phrase leaves it there with the search results.
+- Return in the search waits about half a second for the key derivation before it opens the selected row, for every text of 8 characters or more, so that a wrong phrase and a folder without hidden chats look the same.
+- Hiding a chat while the vault is closed opens it out of sight and closes it again: the hidden chats do not show.
+- A lock and a change of the relay address close the vault; there is no "Close hidden chats" item.
 
 ### Added with the safety number (SOTTO-47, 2026-11-19)
 
@@ -1389,3 +1398,48 @@ Only open source and published texts were read; nothing was built or run, and th
 | Signal Desktop `_locales/en/messages.json` (keys `SafetyNumberViewer__markAsVerified`, `SafetyNumberViewer__clearVerification`, `SafetyNumberViewer__hint-v2`, `safetyNumberChangeDialog__verify-number`, `verified`) | the button labels, the name of the action, what the hint asks for; the hint restated |
 
 Not found: a safety number, a QR code of a key or a key warning in Telegram Desktop; the sizes of Signal Desktop's screen.
+
+## 22. Hidden chats
+
+A chat can be hidden behind a phrase (docs/key-storage.md, "Hidden chats"): it leaves the list and the store, and only its phrase, typed into the list search, brings it back until the next lock. A forgotten phrase cannot be recovered. Telegram Desktop has no such feature; the boxes are those of 5.10 laid out as the passcode box of 11.6, and the mark is the mute mark of 19.2.
+
+### 22.1 Menu items
+
+| Item | Value |
+|---|---|
+| Chat row menu (5.9), a chat of the list | "Hide chat..." with `eye.slash` 16, after Archive; opens the box of 22.2 |
+| Chat row menu, a hidden chat | "Unhide chat" with `eye` 16 in its place; the chat goes back to the list without its mark and the toast "Chat unhidden" shows |
+
+### 22.2 Hide box and its question
+
+| Item | Value |
+|---|---|
+| Box | 320 (5.10), title "Hide chat" |
+| Fields | "Phrase" and "Repeat phrase", masked, each 256 wide and centered, labels above as in 7.3, 23 between them, the first focused |
+| Hint | 7 below the fields, 13 regular `windowSubFg`, 256 wide: "The chat with <name> leaves the list. To see it again, type the phrase into the search and press Return. A forgotten phrase cannot be recovered, and the chat is lost with it." |
+| Errors | in the place of the hint, `fieldError`: "The phrase needs at least 8 characters." (the spaces around it do not count), "The phrases do not match." |
+| Buttons | "Cancel"; "Hide", the default, disabled while the phrase is worked on (about half a second for each try of it) |
+| After | the chat leaves the list (an open chat closes) and the toast "Chat hidden" shows; while the hidden chats are shown (22.3) the chat stays in the list with its mark |
+| Question | when the phrase opens no hidden chats, a box of 5.10 follows: title "Make a new hidden space?", text "No hidden chats open with this phrase. A new hidden space is made with it, and any chats hidden under another phrase are erased for good.", buttons "Cancel" and "Hide" (`danger`, the default). It reads the same whether hidden chats exist under another phrase or not |
+
+### 22.3 Opening from the search
+
+| Item | Value |
+|---|---|
+| Return in the list search (5.2) | a text of 8 characters or more, without the spaces around it, is tried as the phrase first; never on each key, and no spinner either way |
+| A phrase that opens | the search text is cleared, so that the phrase is not left on the screen; the hidden chats join the list among the others by their pins and their last activity, each with the mark of 22.4 |
+| A wrong phrase | nothing tells it from a folder without hidden chats: the search shows its results, and Return opens the selected row as in 19.4 |
+| Closing | every lock (11.6) and a change of the relay address (11.7); the hidden chats leave the list at once, with their notifications |
+
+### 22.4 The mark and the rules of a hidden chat
+
+| Item | Value |
+|---|---|
+| Mark | `eye.slash` 12pt, 4 after the end of the name (after the mute mark when both), vertically centered on the name, the colours of the mute mark of 19.2; accessibility label "Hidden" |
+| Counting | while the hidden chats are shown, a hidden chat counts in its row badge, the archive row and the Dock badge like any other; while they are not, it counts nowhere and nothing of it shows: no row, no badge, no notification |
+| Notifications (19.6) | always the title "Sotto" and the body "New message", whatever the settings; one group for every hidden chat and no id of the chat; a click brings the window to the front without opening a chat; they go when the hidden chats close |
+| Files | a received file of a hidden chat is never saved into the download folder (11.5) |
+
+### 22.5 Motion
+
+None of its own: the rows come and go with the reorder of section 6, the boxes with the box motion.
