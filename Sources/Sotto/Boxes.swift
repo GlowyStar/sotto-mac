@@ -191,6 +191,48 @@ struct RenameBox: View {
     }
 }
 
+/// The phrase of a chat to hide, typed twice (DESIGN.md 22.2).
+struct HideChatBox: View {
+    let model: AppModel
+    let contact: Contact
+    @State private var first = ""
+    @State private var second = ""
+    @State private var error: String?
+
+    var body: some View {
+        ModalBox(title: "Hide chat") {
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 23) {
+                    BoxField(label: "Phrase", placeholder: "", text: $first, focusOnAppear: true, secure: true)
+                    BoxField(label: "Repeat phrase", placeholder: "", text: $second, secure: true)
+                }
+                .frame(width: 256)
+                Text(error ?? "The chat with \(contact.name) leaves the list. To see it again, type the phrase into the search and press Return. A forgotten phrase cannot be recovered, and the chat is lost with it.")
+                    .font(Fonts.hint)
+                    .foregroundStyle(error == nil ? Color.windowSubFg : Color.fieldError)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: 256, alignment: .leading)
+                    .padding(.top, 7)
+            }
+            .frame(maxWidth: .infinity)
+        } buttons: {
+            BoxButton(title: "Cancel") { model.modal = nil }
+            BoxButton(title: "Hide", action: hide).keyboardShortcut(.defaultAction).disabled(model.hiding)
+        }
+    }
+
+    private func hide() {
+        let phrase = Vault.normalized(first)
+        guard phrase.count >= Vault.minimumPhraseLength else {
+            return error = "The phrase needs at least \(Vault.minimumPhraseLength) characters."
+        }
+        guard phrase == Vault.normalized(second) else {
+            return error = "The phrases do not match."
+        }
+        model.hideChat(contact.id, phrase: phrase)
+    }
+}
+
 /// A question with a cancel and a confirming button.
 struct ConfirmBox: View {
     let model: AppModel

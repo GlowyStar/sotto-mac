@@ -148,6 +148,15 @@ func rows(_ store: ClientStore) throws -> [String: [[SQLValue]]] {
     return tables
 }
 
+/// Whether every table but the sealed inbox holds what `before` held, and how many envelopes
+/// the sealed inbox gained.
+func outsideTheSealedInbox(_ store: ClientStore, before: [String: [[SQLValue]]]) throws -> (Bool, Int) {
+    var after = try rows(store)
+    var before = before
+    let gained = (after.removeValue(forKey: "sealed_inbox")?.count ?? 0) - (before.removeValue(forKey: "sealed_inbox")?.count ?? 0)
+    return (after == before, gained)
+}
+
 /// The forms in which the store can hold a value: its bytes, hex text, and the base64 of
 /// the JSON of a ratchet state with and without escaped slashes.
 func storedForms(_ value: Data) -> [Data] {

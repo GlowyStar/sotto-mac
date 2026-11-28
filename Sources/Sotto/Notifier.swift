@@ -37,10 +37,10 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         let content = UNMutableNotificationContent()
         content.title = alert.title
         content.body = alert.body
-        content.threadIdentifier = alert.chatID
-        content.userInfo = ["chat": alert.chatID]
+        content.threadIdentifier = alert.thread
+        if !alert.hidden { content.userInfo = ["chat": alert.chatID] }
         if alert.sound { content.sound = .default }
-        let request = UNNotificationRequest(identifier: Alerts.identifier(alert.chatID, alert.messageID), content: content, trigger: nil)
+        let request = UNNotificationRequest(identifier: alert.identifier, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
 
@@ -58,7 +58,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
     }
 
-    /// Takes away the notifications of a chat that was read.
+    /// Takes away the notifications of a chat that was read, or of every hidden one.
     func clear(_ chatID: String) {
         guard Self.available else { return }
         Task {

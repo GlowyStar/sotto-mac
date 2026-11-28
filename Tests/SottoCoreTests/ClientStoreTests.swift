@@ -71,7 +71,9 @@ private func state(skipped: Int = 0) -> RatchetState {
 
         #expect(try store.query("PRAGMA journal_mode") == [[.text("delete")]])
         #expect(try store.query("PRAGMA secure_delete") == [[.integer(1)]])
-        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted() == [ClientStore.fileName, StoreKeys.fileName])
+        #expect(
+            try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+                == [ClientStore.fileName, StoreKeys.fileName, Vault.fileName])
         store.close()
     }
 }
@@ -119,10 +121,11 @@ private func state(skipped: Int = 0) -> RatchetState {
         )
 
         #expect(tables.map { $0[0].text! } == [
-            "app_notes", "blob_deletions", "contacts", "downloads", "files", "identity", "kept_files", "message_states",
-            "messages", "one_time_prekeys", "outbox", "own_profile", "pending", "pending_replies", "pq_prekey_ids",
-            "pq_prekeys", "profile_sends", "profiles", "records", "refusals", "row_numbers", "seen_ids", "sessions",
-            "settings", "signed_prekeys", "timers", "uploads", "verified_contacts",
+            "app_notes", "blob_deletions", "contacts", "downloads", "files", "identity", "inbox_key", "kept_files",
+            "message_states", "messages", "one_time_prekeys", "outbox", "own_profile", "pending", "pending_replies",
+            "pq_prekey_ids", "pq_prekeys", "profile_sends", "profiles", "records", "refusals", "row_numbers",
+            "sealed_inbox", "seen_ids", "sessions", "settings", "signed_prekeys", "timers", "uploads", "vault_moves",
+            "verified_contacts",
         ])
     }
 }

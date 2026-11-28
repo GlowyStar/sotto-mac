@@ -242,7 +242,9 @@ func lyingRelayGivesNoTextAndLeavesTheStoreUnchanged(name: String) throws {
             #expect(received.ack)
             #expect(received.text == nil)
             #expect(received.result != nil)
-            #expect(try rows(world.bob.store) == storeBefore)
+            let (unchanged, sealed) = try outsideTheSealedInbox(world.bob.store, before: storeBefore)
+            #expect(unchanged)
+            #expect(sealed == (try world.bob.store.isContact(sender) ? 0 : 1))
         }
     }
 }

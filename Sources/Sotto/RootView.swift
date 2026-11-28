@@ -167,6 +167,14 @@ struct RootView: View {
             TimerBox(model: model, chatID: chat)
         case .verify(let id):
             if let contact = model.contact(id) { VerifyBox(model: model, contact: contact) }
+        case .hide(let id):
+            if let contact = model.contact(id) { HideChatBox(model: model, contact: contact) }
+        case .hideConfirm(let id):
+            ConfirmBox(
+                model: model, title: "Make a new hidden space?",
+                text: "No hidden chats open with this phrase. A new hidden space is made with it, and any chats hidden under another phrase are erased for good.",
+                confirm: "Hide", danger: true
+            ) { model.confirmHide(id) }
         case .delete(let id):
             if let contact = model.contact(id) {
                 ConfirmBox(

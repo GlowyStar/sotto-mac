@@ -157,8 +157,12 @@ class App:
 
     def __init__(self, directory: Path, url: str, log: Path, *arguments: str) -> None:
         self.log = log.open("a")
+        # The runs stop the app on purpose; without this flag macOS starts asking whether to
+        # reopen its windows, and the question holds the window back.
         self.process = subprocess.Popen(
-            [APP, "--data-dir", directory, "--relay", url, *arguments], stdout=self.log, stderr=self.log
+            [APP, "--data-dir", directory, "--relay", url, *arguments, "-ApplePersistenceIgnoreState", "YES"],
+            stdout=self.log,
+            stderr=self.log,
         )
 
     def stop(self) -> None:

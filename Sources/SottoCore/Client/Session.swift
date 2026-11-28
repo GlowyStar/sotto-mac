@@ -203,6 +203,15 @@ public final class Client {
         try expireMessages()
     }
 
+    /// A client of the same identity over the store of a vault, which holds a copy of it
+    /// (`Vault.syncPrekeys`), with the random bytes and the clock of this one.
+    public func sibling(over store: ClientStore) throws -> Client {
+        guard try store.identity() == identity else {
+            throw StoreError.noIdentity
+        }
+        return try Client(store: store, randomBytes: randomBytes, clock: clock)
+    }
+
     public static func systemRandomBytes(_ count: Int) -> Data {
         var generator = SystemRandomNumberGenerator()
         return Data((0..<count).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
@@ -1155,8 +1164,11 @@ public final class Client {
         }
     }
 
+    /// An envelope of a sender who is no contact is sealed to the inbox key and kept for a
+    /// vault that may know the sender (`Vault`), then refused.
     private func receiveOrThrow(_ delivered: Delivered) throws -> Received {
         guard try store.isContact(delivered.sender) else {
+            try store.transaction { try store.keepSealed(delivered) }
             throw SessionError.notAContact
         }
         if try store.isSeen(sender: delivered.sender, messageID: delivered.messageID) {

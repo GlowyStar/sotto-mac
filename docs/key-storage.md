@@ -72,6 +72,68 @@ public identity keys when it is shown and kept in memory only. When a key that a
 identity signed in place of the pinned one is refused, the time goes into the app's notes
 (`app_notes`, by user id) until the user closes the warning or deletes the contact.
 
+## Hidden chats
+
+Since SOTTO-50 a chat can be hidden behind a phrase. Every row of it leaves `store.db` for a
+second SQLCipher file of the data folder, `vault.db`, and the chat shows again only when the
+phrase is typed into the search of the chat list. A forgotten phrase cannot be recovered: nothing
+else opens the vault, and its chats are lost with it.
+
+| Part | What it is |
+| --- | --- |
+| `vault.db` | A store with the schema of `store.db` and the same SQLCipher defaults (pages of 4096 bytes, AES-256-CBC, HMAC-SHA512, the first 16 bytes its salt, no plaintext header), keyed by the phrase through SQLCipher's own key derivation: PBKDF2-HMAC-SHA512 with 1,600,000 rounds (`Vault.kdfIterations`) in place of the default 256,000. One open took 0.50 to 0.51 s on an Apple M4 Pro under macOS 26.6, for the right phrase, a wrong one and the decoy alike. The phrase is the text without the spaces around it, in Unicode form C, of at least 8 characters. |
+| The decoy | Every data folder has `vault.db` from the first open of its store, a store of an earlier version included: an empty vault under a random raw key that is never kept, so random bytes of the size an empty vault has. A folder without hidden chats looks like one with them. Making a vault replaces it. |
+| One vault | One phrase opens it, and it holds any number of chats. Hiding a chat with a phrase that does not open it asks first, the same way whether a vault exists or not; a yes makes a new vault under the phrase, and the file it replaces, the decoy or a vault under another phrase, is overwritten with zeros and removed. |
+| `inbox_key` | In `store.db` one P-256 public key, in `vault.db` the same key with its private half. A store gets one at its first open whose private half is dropped at once; making a vault puts the vault's public key in its place. |
+| `sealed_inbox` | In `store.db`, the envelopes of senders who are no contacts: the Deliver (sender, message id, payload) sealed with HPKE of RFC 9180 in base mode, `P256_SHA256_AES_GCM_256`, info `sotto-mac sealed inbox 1`, to the inbox key, oldest first. It holds at most 1000 envelopes and 16 MiB, the bounds of a queue of the relay; the oldest go first. |
+| `vault_moves` | In `vault.db`, a contact whose move into the vault or out of it a stop may have cut short. |
+
+- `store.db` never records whether a vault exists or whom it holds. An envelope of a sender who is
+  not a contact of `store.db` is sealed there and acked, and its result stays `NOT_A_CONTACT` as
+  before: the relay does not keep it, so the messages of a hidden chat never fill its queue, which
+  would stop every other chat. A hidden contact and a stranger look the same in `store.db`.
+- Opening the vault opens the sealed inbox: every envelope that opens with the vault's private key
+  and comes from a contact of the vault goes through the vault's client in order, as if it arrived
+  now, and owes its delivery receipt then; every other one is deleted.
+- The vault is a full store with a client of its own: contacts, sessions, records, seen ids,
+  outbox, messages, files and notes. It also holds a copy of the identity and the prekeys of
+  `store.db`, copied when it opens and after every change of them while it is open; making,
+  uploading and rotating prekeys stays the work of `store.db`. A one-time prekey (X25519 or
+  ML-KEM) that a session through the vault used is deleted in `store.db` too.
+- While the vault is open a Deliver goes to the client whose store has its sender, and the
+  outboxes of both are sent; the window shows the chats of both, the hidden ones with a mark.
+- Hiding moves every row of the contact and what the app's notes keep of the chat (read position,
+  times, draft, pin, mute, archive, timer changes, refused key) in three commits: into the vault
+  with the move noted there, out of `store.db` with its notes, the note cleared. A stop after the
+  first leaves the chat in both files until the next open of the vault, which takes the rows of
+  `store.db`, the newer ones, in place of its copy and deletes them from `store.db`: nothing is
+  doubled or lost. Unhiding is the same the other way. The rows of a hidden chat are never written
+  to `store.db`, also not after a crash or a power cut.
+- Positions of messages, pending texts and files of the vault are taken from the counters of
+  `store.db`, so that no position is given twice.
+- A received file of a hidden chat stays in the vault: "Save received files automatically" does not
+  apply to it.
+- Every lock (below) closes the vault with `store.db`: its connection ends, and SQLCipher wipes the
+  key it derived. The phrase passes through memory as a Swift string (the search field, the box),
+  which is released, not overwritten. Texts of a hidden chat not sent yet wait in the vault's
+  outbox for its next open. A change of the relay address reconnects and closes the vault too.
+
+What hiding does not do:
+- The relay still sees who writes to whom and when; hiding is local.
+- The contact sees no delivered mark until the vault is opened.
+- A new session that the contact starts while the vault stays closed longer than the grace of a
+  replaced signed prekey (37 days, `Client.signedPrekeyGraceSeconds`) is lost when the vault
+  opens; messages on a session that exists keep.
+- A flood of senders who are not contacts can push the waiting envelopes of a hidden chat out of
+  the sealed inbox.
+- The size and the modification time of `vault.db` can hint that it is used: an empty vault has
+  the size of the decoy, a used one grows. The inbox key of `store.db` changes when a vault is
+  made, and its counters of positions move on with the messages of the vault.
+- Copies the owner saved outside Sotto ("Save as...", a file opened in another app, the pasteboard)
+  are his own.
+- A contact of the vault added again to `store.db` while the vault is closed is a chat of
+  `store.db`; its hidden copy stays in the vault, out of sight, until the other one is deleted.
+
 ## Unlock and lock
 
 - The app starts locked. At launch it shows the system sheet of Touch ID or the Mac password
@@ -82,8 +144,8 @@ identity signed in place of the pinned one is refused, the time goes into the ap
 - The idle time of Auto-lock (5 minutes by default), Cmd+L, "Lock Sotto now", sleep, the
   lock of the Mac screen and a switch to another user (these three with "Lock when the Mac
   sleeps or locks", on by default) and quit overwrite the key bytes at once, then stop the messenger
-  and close every connection to the store, the transport's included; the next unlock asks
-  again. A lock works from the moment the store is open, also on the first-launch screen
+  and close every connection to the store, the transport's and the open vault's included; the next
+  unlock asks again, and the vault waits for its phrase. A lock works from the moment the store is open, also on the first-launch screen
   before Continue. On sleep the Mac waits for it: Sotto answers the system's sleep
   notification of IOKit (`IOAllowPowerChange`) once the store is closed, and macOS sleeps
   anyway after 30 seconds. A lock also clears the pasteboard while it still holds a text or
@@ -200,8 +262,8 @@ SSD and older snapshots and backups keep the old blocks.
 
 ## Reset
 
-"Reset Sotto..." deletes `store.db`, its journal, `store.key` and `app.json`, overwrites
-and removes the folder `temp.noindex`, and drops the key. The next store gets a new key
+"Reset Sotto..." deletes `store.db`, its journal, `vault.db` with its journal, `store.key` and
+`app.json`, overwrites and removes the folder `temp.noindex`, and drops the key. The next store gets a new key
 after one more sheet.
 
 Deleting `store.key` does not erase the Secure Enclave key it wrapped: that key stays in
@@ -294,13 +356,14 @@ print or draw on request, for a store of the test kind only; they are left out.
 | --- | --- | --- |
 | `store.db`, `store.db-journal` | the store, encrypted | the same, now also holding the app's notes (`app_notes`) and the files it keeps (`kept_files`) |
 | `store.key` | the wrapped store key; nothing of the chats | unchanged |
+| `vault.db` (SOTTO-50) | none | the hidden chats under their phrase, or the decoy (above) |
 | `app.json` in the data folder | in the clear: the relay address, the last read position and the first-seen time of each contact by its id, the time of every message, the drafts, pinned, muted and archived chats, timer changes, every setting with the passcode check (salt and HMAC) and the download folder | the theme only, which the lock screen shows before the store opens; the rest is in `app_notes`. An older file is moved once and overwritten (above) |
 | `Pasted` in the data folder | every pasted picture as a readable PNG, for the bubble and a retry | not written: a pasted picture is in memory until it is sent, then in `kept_files`. An older folder is moved into the store and overwritten |
 | `temp.noindex` in the data folder (new) | none | a file the store keeps, written when the user clicks it so that its app can open it (a photo never is): 0600 in a 0700 folder that Spotlight skips, marked as downloaded, excluded from backups (which keeps it out of Time Machine, not out of a local APFS snapshot taken while it is there); overwritten and removed as soon as its message goes (a delete by either side, an expiry, a deleted contact), at launch, on lock, on quit and by Reset. Readable while it is there; the app that opened it keeps what it read, and macOS may list its name among that app's recent items |
 | The download folder (Downloads by default) | every received file of the app, readable | nothing by default; with "Save received files automatically" each received file, as before. What is already there stays; after a delete for both or an expiry a file saved there is still removed |
 | Where "Save as..." points | a copy of the file | the same, from the store when it keeps the file: the user's own copy, readable, marked as downloaded when it was received |
 | `received` in the data directory of `sotto-mac` | every received file, readable | unchanged: the file is what the console command delivers, with no viewer to show it from the store |
-| Notifications (macOS keeps them in its own database, outside the data folder) | the contact's local name and the text of the message | "Sotto" and "New message" by default; name and text only with "Show sender name" and "Show message preview" on. The identifiers of a notification still carry the chat's id (the contact's public id) and the message position, for the grouping and the click; how long macOS keeps them is its own |
+| Notifications (macOS keeps them in its own database, outside the data folder) | the contact's local name and the text of the message | "Sotto" and "New message" by default; name and text only with "Show sender name" and "Show message preview" on. The identifiers of a notification still carry the chat's id (the contact's public id) and the message position, for the grouping and the click; how long macOS keeps them is its own. A hidden chat's notification is always "Sotto" and "New message" and carries the group `hidden` and the position only, and a closing vault takes it away |
 | Dock badge | the unread count | unchanged; no text |
 | Pasteboard | what the user copies: a text, a picture, an id | a text or a picture copied from the chats (Copy text, Copy image, Cmd+C in a bubble, in the viewer or in the field) is marked `org.nspasteboard.ConcealedType` and `org.nspasteboard.TransientType`, which clipboard managers that follow nspasteboard.org neither show nor keep, and a lock clears the pasteboard while it still holds that copy. Until then every app may read it, and Universal Clipboard may carry it to the user's other devices. An id copied with "Copy id" is public and left as it is |
 | Logs | none through the unified log; the app writes a line to stderr when a scripting flag names no contact, `sotto-mac` prints the chats to its terminal | unchanged |

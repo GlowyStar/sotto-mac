@@ -11,6 +11,7 @@ the build steps, is the [README](../README.md); where the keys live is [key stor
 - [The profile](#the-profile)
 - [Replies, edits and receipts](#replies-edits-and-receipts)
 - [The safety number](#the-safety-number)
+- [Hidden chats](#hidden-chats)
 - [Locking](#locking)
 - [Limits](#limits)
 
@@ -139,13 +140,29 @@ key can do, Sotto refuses it (`IDENTITY_KEY_MISMATCH`) and the chat shows a red 
 header that says what it means and what to do, until it is closed; the safety number stays the
 same, and so does the mark.
 
+## Hidden chats
+
+"Hide chat..." in the menu of a chat row asks for a phrase twice (8 characters at least) and moves
+the whole chat, its messages, files, draft and read position included, out of the store into a
+second encrypted file, the vault, which only the phrase opens. The chat leaves the list. Typed into
+the search of the chat list, the phrase opens the vault on Return: the search field is cleared and
+the hidden chats show among the others with a small crossed-out eye, until the next lock. "Unhide
+chat" in the menu of a hidden chat moves it back. A phrase that opens no vault asks first and then
+makes a new one, erasing whatever was hidden under another phrase; a wrong phrase and a Mac without
+hidden chats look the same. A forgotten phrase cannot be recovered.
+
+Messages of a hidden chat that arrive while the vault is closed wait sealed in the store and reach
+the chat when it opens; the contact sees them as delivered only then. A hidden chat never names
+itself in a notification and never saves a received file into the download folder.
+[Key storage](key-storage.md#hidden-chats) says how the vault is made and what hiding does not do.
+
 ## Locking
 
 The app starts locked and opens the store after the system sheet of Touch ID or the Mac password.
 After the auto-lock time (5 minutes by default), on Cmd+L, on sleep, when the screen of the Mac
 locks or it switches to another user (these three unless turned off) and on quit it overwrites the
-store key in memory and closes the store, also on the first-launch screen; the next unlock asks
-again. On sleep the Mac waits until the store is closed (30 seconds at most).
+store key in memory and closes the store and the hidden chats, also on the first-launch screen;
+the next unlock asks again, and the hidden chats wait for their phrase. On sleep the Mac waits until the store is closed (30 seconds at most).
 
 A text or a picture copied from a chat is marked for clipboard managers as concealed and
 transient, and a lock clears the pasteboard while it still holds it. A local passcode, when set, is
@@ -183,4 +200,8 @@ recovered. While the store is locked the app has no connection.
 - A chat is muted until it is unmuted: there are no timed mutes. Pinned chats keep the order in
   which they were pinned; they are not reordered by dragging.
 - The Mac does not scan a QR code: safety numbers are compared by reading them.
+- Hiding a chat is local: the relay still sees who writes to whom, the contact sees no delivered
+  mark while the vault is closed, a session the contact starts after more than 37 days with the
+  vault closed is lost, and the size of the vault file can hint that it is used
+  ([key storage](key-storage.md#hidden-chats)).
 - No security audit.

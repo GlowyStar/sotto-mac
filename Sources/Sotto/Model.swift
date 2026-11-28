@@ -22,6 +22,8 @@ struct Contact: Identifiable, Hashable {
     /// When a key that the identity of the contact signed in place of the pinned one was
     /// refused; the chat shows the warning of DESIGN.md 21.4 while it is set.
     var refusedKey: Date?
+    /// The chat is in the open vault (DESIGN.md 22).
+    var hidden = false
 }
 
 /// A line of the list while it searches (DESIGN.md 5.2 and 19.4): a chat found by its name,
@@ -196,6 +198,10 @@ enum Modal: Hashable {
     case timer(String)
     /// The safety number of a contact with its QR code (DESIGN.md 21.3).
     case verify(String)
+    /// The phrase box of a chat to hide, and the question when the phrase opens no vault
+    /// (DESIGN.md 22.2).
+    case hide(String)
+    case hideConfirm(String)
 
     var isWide: Bool {
         switch self {
@@ -346,6 +352,10 @@ final class AppModel {
     var focusMessage: FocusRequest?
     /// Set when macOS refused notifications to Sotto (DESIGN.md 11.3).
     var notificationsDenied = false
+    /// Set while a chat is being hidden: the key derivation of the phrase takes a moment.
+    var hiding = false
+    /// The phrase of the hide box while its question waits for an answer.
+    @ObservationIgnored private var hidePhrase: String?
     /// The first unread message of the open chat, kept until the chat is closed.
     var unreadAnchor: String?
     var panelOpen = false
@@ -558,7 +568,7 @@ final class AppModel {
             Contact(
                 id: $0.userID, name: $0.name, added: $0.added, unread: $0.userID == quiet ? 0 : $0.unread,
                 pinned: $0.pinned, muted: $0.muted, archived: $0.archived, profile: $0.profile,
-                verified: $0.verified, refusedKey: $0.refusedKey)
+                verified: $0.verified, refusedKey: $0.refusedKey, hidden: $0.hidden)
         }
         timers = Dictionary(uniqueKeysWithValues: state.chats.map { ($0.userID, $0.timer) })
         timerChanges = Dictionary(uniqueKeysWithValues: state.chats.map { ($0.userID, $0.timerChanges) })
@@ -760,6 +770,8 @@ final class AppModel {
         storeLocked = true
         locked = false
         StoreKeys.lock(directory)
+        // The vault closes with the store, and the notifications of its chats go with it.
+        alerts?.clear(Alerts.hiddenThread)
         let task = Task {
             await saveDraftsNow()
             self.messenger = nil
@@ -774,6 +786,7 @@ final class AppModel {
     /// Drops the store key and closes the store before the app quits.
     func closeStore() async {
         if let dataDirectory { StoreKeys.lock(dataDirectory) }
+        alerts?.clear(Alerts.hiddenThread)
         await saveDraftsNow()
         let messenger = messenger
         self.messenger = nil
@@ -800,6 +813,7 @@ final class AppModel {
         replies = [:]
         edits = [:]
         picks = []
+        hidePhrase = nil
         keptDecoded = []
         Media.forget()
         clearOpenedFiles()
@@ -925,7 +939,7 @@ final class AppModel {
         guard id == quietChat || messenger == nil else { return }
         if contacts[index].unread > 0 { run { try await $0.markRead(id) } }
         contacts[index].unread = 0
-        alerts?.clear(id)
+        alerts?.clear(contacts[index].hidden ? Alerts.hiddenThread : id)
     }
 
     /// The window came to the front or was unlocked: the open chat is read now.
@@ -1018,6 +1032,90 @@ final class AppModel {
         }
         run { try await $0.setArchived(id, on) }
         if on { showToast("Chat archived") }
+    }
+
+    // MARK: Hidden chats (DESIGN.md 22)
+
+    /// Hides a chat behind the phrase; a phrase that opens no vault asks first. The mock data
+    /// only takes the row away.
+    func hideChat(_ id: String, phrase: String) {
+        guard let messenger else {
+            modal = nil
+            contacts.removeAll { $0.id == id }
+            return
+        }
+        hiding = true
+        Task { [weak self] in
+            defer { self?.hiding = false }
+            do {
+                if try await messenger.hideChat(id, phrase: phrase) {
+                    self?.hidden(id)
+                } else {
+                    self?.hidePhrase = phrase
+                    self?.modal = .hideConfirm(id)
+                }
+            } catch {
+                self?.showToast(Messenger.describe(error))
+            }
+        }
+    }
+
+    /// The answer to the question of a phrase that opened no vault: a new vault under it.
+    func confirmHide(_ id: String) {
+        guard let messenger, let phrase = hidePhrase else { return }
+        hidePhrase = nil
+        hiding = true
+        Task { [weak self] in
+            defer { self?.hiding = false }
+            do {
+                _ = try await messenger.hideChat(id, phrase: phrase, makeNew: true)
+                self?.hidden(id)
+            } catch {
+                self?.showToast(Messenger.describe(error))
+            }
+        }
+    }
+
+    private func hidden(_ id: String) {
+        modal = nil
+        if openChatID == id {
+            closeChat()
+            panelOpen = false
+        }
+        showToast("Chat hidden")
+    }
+
+    func unhideChat(_ id: String) {
+        run { try await $0.unhideChat(id) }
+        showToast("Chat unhidden")
+    }
+
+    /// Return in the list search: a text as long as a phrase is tried on the vault first, and
+    /// one that opens it leaves the field; otherwise, and for a shorter text, Return opens the
+    /// selected row. Nothing tells a wrong phrase from a folder without a vault.
+    func submitSearch() {
+        let text = search
+        guard let messenger, Vault.normalized(text).count >= Vault.minimumPhraseLength else {
+            return openSelectedSearchRow()
+        }
+        Task { [weak self] in
+            do {
+                if try await messenger.openVault(text) {
+                    if self?.search == text { self?.search = "" }
+                    return
+                }
+            } catch {
+                self?.showToast(Messenger.describe(error))
+                return
+            }
+            self?.openSelectedSearchRow()
+        }
+    }
+
+    private func openSelectedSearchRow() {
+        let rows = searchRows
+        guard rows.indices.contains(searchSelection) else { return }
+        open(rows[searchSelection])
     }
 
     // MARK: Search

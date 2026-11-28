@@ -165,7 +165,7 @@ private func makePlain(_ directory: URL) throws {
         migrated.close()
         #expect(try ClientStore.holdsEncryptedPages(path))
         #expect(try Data(contentsOf: path).range(of: Data(marker.utf8)) == nil)
-        #expect(try files(folder) == [ClientStore.fileName, StoreKeys.fileName])
+        #expect(try files(folder) == [ClientStore.fileName, StoreKeys.fileName, Vault.fileName])
         #expect(try StoreKeys.storedKey(folder)?.plainStore == nil, "the key records that its store is encrypted")
     }
 }
@@ -211,12 +211,12 @@ private func makePlain(_ directory: URL) throws {
         let store = try ClientStore(directory: folder)
         #expect(try store.contacts().map(\.name) == ["stopped"])
         store.close()
-        #expect(try files(folder) == [ClientStore.fileName, StoreKeys.fileName])
+        #expect(try files(folder) == [ClientStore.fileName, StoreKeys.fileName, Vault.fileName])
 
         // Stopped after the rename: the plain file is left beside the encrypted store.
         FileManager.default.createFile(atPath: plainLink, contents: Data("SQLite format 3\0 plain rows".utf8))
         try ClientStore(directory: folder).close()
-        #expect(try files(folder) == [ClientStore.fileName, StoreKeys.fileName])
+        #expect(try files(folder) == [ClientStore.fileName, StoreKeys.fileName, Vault.fileName])
     }
 }
 

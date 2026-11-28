@@ -180,6 +180,8 @@ public struct Chat: Codable, Equatable, Sendable {
     /// last refused (IDENTITY_KEY_MISMATCH, protocol sections 5.3 and 45.2); nil when none
     /// was, or once the user took the warning off the chat.
     public var refusedKey: Date?
+    /// The chat is in the open vault (`Vault`): it shows until the vault closes.
+    public var hidden = false
 }
 
 public enum LinkState: Codable, Equatable, Sendable {
@@ -285,6 +287,16 @@ public actor Messenger {
     /// The copies written into `openedFolder`, by the position of their message.
     private var opened: [Int64: [URL]] = [:]
     private var closed = false
+    /// The notes of the open vault, nil while it is closed; its chats are in the state only
+    /// once `openVault` showed them.
+    private var vaultNotes: Notes?
+    private var vaultShown = false
+    /// Set while a chat moves into the vault or out of it: the move writes the notes of both
+    /// stores, and every other write of them waits for its end.
+    private var moving = false
+    private var notesWaiting = false
+    /// Counts the starts and ends of moves: a state read across one is read again.
+    private var moves = 0
 
     /// Opens the store in `directory`, creating it when it is missing; `relay` is used until
     /// an address is saved with `setRelay`. Received files are downloaded, each by itself
@@ -435,12 +447,30 @@ public actor Messenger {
     /// The current state; message times and contacts seen for the first time are saved.
     @discardableResult
     public func state() async throws -> MessengerState {
-        let rows = try await read()
+        let started = moves
+        let (rows, hiddenRows) = try await read()
+        guard started == moves else {
+            return try await state()
+        }
         var updated = notes
-        let state = try Self.build(rows, notes: &updated, relay: relay, link: link, now: Date(), progress: progress)
+        var state = try Self.build(rows, notes: &updated, relay: relay, link: link, now: Date(), progress: progress)
         if updated != notes {
             notes = updated
-            try notes.save(notesStore)
+            try saveNotes()
+        }
+        if vaultShown, let hiddenRows, var updatedVault = vaultNotes {
+            let shown = Set(state.chats.map(\.userID))
+            let built = try Self.build(hiddenRows, notes: &updatedVault, relay: relay, link: link, now: Date(), progress: progress)
+            // A contact in both stores, added again while it was hidden, is the main store's.
+            for var chat in built.chats where !shown.contains(chat.userID) {
+                chat.hidden = true
+                chat.pinned = chat.pinned.map { $0 + notes.pins.count }
+                state.chats.append(chat)
+            }
+            if updatedVault != vaultNotes {
+                vaultNotes = updatedVault
+                try await saveVaultNotes()
+            }
         }
         if state != last {
             last = state
@@ -468,14 +498,12 @@ public actor Messenger {
         _ = try Envelope.encodeText(text)
         let contact = try Identity.decodeUserID(userID)
         let madeAt = Self.milliseconds(Date())
-        try await withClient { client in
+        try await withClient(for: contact) { client in
             try client.store.transaction {
                 _ = try client.store.addPending(contact, text: text, madeAt: madeAt, replyTo: replyTo)
             }
         }
-        if notes.drafts.removeValue(forKey: userID) != nil {
-            try notes.save(notesStore)
-        }
+        try await changeNotes(of: userID) { $0.drafts[userID] = nil }
         await publish()
         flush()
     }
@@ -526,7 +554,7 @@ public actor Messenger {
             throw NotConnectedError()
         }
         let contact = try Identity.decodeUserID(userID)
-        let replyTo = try await transport.withClient { client in
+        let replyTo = try await transport.withClient(for: contact) { client in
             try replyTo.flatMap { try client.store.message($0)?.contact == contact ? $0 : nil }
         }
         func start(_ replyTo: Int64?) async throws -> Data {
@@ -550,7 +578,7 @@ public actor Messenger {
             // The quoted message went while the login was awaited: the file goes alone.
             blobID = try await start(nil)
         }
-        let position = try await transport.withClient { client -> Int64 in
+        let position = try await transport.withClient(for: contact) { client -> Int64 in
             guard let sent = try client.store.files().last(where: { !$0.incoming && $0.attachment.blobID == blobID }) else {
                 return 0
             }
@@ -568,7 +596,7 @@ public actor Messenger {
     ///   throws.
     @discardableResult
     public func resendFile(_ position: Int64) async throws -> Int64 {
-        guard let file = try await withClient({ try $0.store.files(ofMessageAt: position).first }), !file.incoming,
+        guard let file = try await withClient(holding: position, { try $0.store.files(ofMessageAt: position).first }), !file.incoming,
             file.state == .notSent
         else {
             return position
@@ -596,7 +624,7 @@ public actor Messenger {
         guard let transport else {
             throw NotConnectedError()
         }
-        if let file = try await transport.withClient({ try $0.store.files(ofMessageAt: position).first }) {
+        if let file = try await transport.withClient(holding: position, { try $0.store.files(ofMessageAt: position).first }) {
             try await transport.download(file.position)
         }
         await publish()
@@ -607,7 +635,7 @@ public actor Messenger {
         guard let transport else {
             throw NotConnectedError()
         }
-        if let file = try await transport.withClient({ try $0.store.files(ofMessageAt: position).first }) {
+        if let file = try await transport.withClient(holding: position, { try $0.store.files(ofMessageAt: position).first }) {
             try await transport.pauseDownload(file.position)
         }
         await publish()
@@ -647,7 +675,7 @@ public actor Messenger {
             throw problem
         }
         let contact = try Identity.decodeUserID(userID)
-        try await withClient { client in try client.store.transaction { try client.store.renameContact(contact, name: name) } }
+        try await withClient(for: contact) { client in try client.store.transaction { try client.store.renameContact(contact, name: name) } }
         await publish()
     }
 
@@ -673,8 +701,7 @@ public actor Messenger {
         }
         let contact = try Identity.decodeUserID(userID)
         try await noting(contact) { try await transport.delete(contact, position) }
-        notes.times[String(position)] = nil
-        try notes.save(notesStore)
+        try await forgetTimes([position])
         await publish()
     }
 
@@ -686,8 +713,8 @@ public actor Messenger {
         }
         let contact = try Identity.decodeUserID(userID)
         try await noting(contact) { try await transport.setTimer(contact, seconds: seconds) }
-        notes.timerChanges[userID, default: []].append(TimerNote(at: Self.milliseconds(Date()), seconds: seconds, own: true))
-        try notes.save(notesStore)
+        let change = TimerNote(at: Self.milliseconds(Date()), seconds: seconds, own: true)
+        try await changeNotes(of: userID) { $0.timerChanges[userID, default: []].append(change) }
         await publish()
     }
 
@@ -708,7 +735,7 @@ public actor Messenger {
         if let transport {
             try await transport.markRead(contact, positions)
         } else {
-            try await withClient { _ = try $0.markRead(contact, positions) }
+            try await withClient(for: contact) { _ = try $0.markRead(contact, positions) }
         }
         await publish()
     }
@@ -716,12 +743,10 @@ public actor Messenger {
     /// Counts every message of the chat as read.
     public func markRead(_ userID: String) async throws {
         let contact = try Identity.decodeUserID(userID)
-        let newest = try await withClient { try $0.store.messages(contact).last?.position } ?? 0
-        guard notes.read[userID] != newest else {
+        let newest = try await withClient(for: contact) { try $0.store.messages(contact).last?.position } ?? 0
+        guard try await changeNotes(of: userID, { $0.read[userID] = newest }) else {
             return
         }
-        notes.read[userID] = newest
-        try notes.save(notesStore)
         await publish()
     }
 
@@ -739,21 +764,21 @@ public actor Messenger {
     /// the store of this Mac; the contact does not learn it.
     public func setVerified(_ on: Bool, for userID: String) async throws {
         let contact = try Identity.decodeUserID(userID)
-        try await withClient { try $0.setVerified(contact, on) }
+        try await withClient(for: contact) { try $0.setVerified(contact, on) }
         await publish()
     }
 
     /// Takes the warning about a refused key off the chat, until another key is refused.
     public func dismissRefusedKey(_ userID: String) async throws {
-        notes.refusedKeys[userID] = nil
-        try notes.save(notesStore)
+        try await changeNotes(of: userID) { $0.refusedKeys[userID] = nil }
         await publish()
     }
 
     /// Deletes the contact, its sessions and its messages.
     public func deleteContact(_ userID: String) async throws {
         let contact = try Identity.decodeUserID(userID)
-        let positions = try await withClient { client in
+        let hidden = await inVault(userID)
+        let positions = try await withClient(for: contact) { client in
             try client.store.transaction {
                 let positions = try client.store.messages(contact).map(\.position)
                 try client.deleteMessages(contact)
@@ -761,17 +786,18 @@ public actor Messenger {
                 return positions
             }
         }
-        notes.read[userID] = nil
-        notes.added[userID] = nil
-        notes.forget(userID)
-        positions.forEach { notes.times[String($0)] = nil }
-        try notes.save(notesStore)
+        try await changeNotes(inVault: hidden) { notes in
+            notes.read[userID] = nil
+            notes.added[userID] = nil
+            notes.forget(userID)
+            positions.forEach { notes.times[String($0)] = nil }
+        }
         await publish()
     }
 
     /// Deletes a logged message, or a pending text when `position` is negative.
     public func deleteMessage(_ position: Int64) async throws {
-        try await withClient { client in
+        try await withClient(holding: position) { client in
             try client.store.transaction {
                 if position < 0 {
                     try client.store.removePending(-position)
@@ -780,8 +806,7 @@ public actor Messenger {
                 }
             }
         }
-        notes.times[String(position)] = nil
-        try notes.save(notesStore)
+        try await forgetTimes([position])
         await publish()
     }
 
@@ -791,37 +816,30 @@ public actor Messenger {
     public func setRelay(_ address: String) async throws {
         _ = try Transport.serverName(of: address, insecure: false)
         notes.relay = address
-        try notes.save(notesStore)
+        try saveNotes()
         await reconnect()
     }
 
     /// Keeps the unsent text of a chat; an empty or blank text removes the draft.
-    public func setDraft(_ text: String, for userID: String) throws {
+    public func setDraft(_ text: String, for userID: String) async throws {
         let draft = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
-        guard notes.drafts[userID] != draft else {
-            return
-        }
-        notes.drafts[userID] = draft
-        try notes.save(notesStore)
+        try await changeNotes(of: userID) { $0.drafts[userID] = draft }
     }
 
     /// Pins a chat on top of the pinned ones, or unpins it.
     public func setPinned(_ userID: String, _ pinned: Bool) async throws {
-        notes.pin(userID, pinned)
-        try notes.save(notesStore)
+        try await changeNotes(of: userID) { $0.pin(userID, pinned) }
         await publish()
     }
 
     public func setMuted(_ userID: String, _ muted: Bool) async throws {
-        notes.mute(userID, muted)
-        try notes.save(notesStore)
+        try await changeNotes(of: userID) { $0.mute(userID, muted) }
         await publish()
     }
 
     /// Moves a chat to the archive, which unpins it, or back to the list.
     public func setArchived(_ userID: String, _ archived: Bool) async throws {
-        notes.archive(userID, archived)
-        try notes.save(notesStore)
+        try await changeNotes(of: userID) { $0.archive(userID, archived) }
         await publish()
     }
 
@@ -829,7 +847,7 @@ public actor Messenger {
     /// files go and their auto-download sizes hold for the files that arrive from now on.
     public func saveSettings(_ settings: AppSettings) async throws {
         notes.settings = settings
-        try notes.save(notesStore)
+        try saveNotes()
         try Self.keepLaunchNotes(directory, theme: settings.theme)
         await transport?.setDownloads(downloads, autoDownload: Self.autoDownload(settings))
     }
@@ -848,7 +866,7 @@ public actor Messenger {
 
     /// The bytes of the file of a message that the store keeps; nil when it keeps none.
     public func contents(_ position: Int64) async throws -> Data? {
-        try await withStore { store in
+        try await withStore(holding: position) { store in
             try store.files(ofMessageAt: position).first.flatMap { $0.kept ? try store.keptFile($0.position) : nil }
         }
     }
@@ -858,7 +876,7 @@ public actor Messenger {
     ///
     /// - Throws: `StoreError.system` when a write to the descriptor fails.
     public func writeContents(_ position: Int64, to descriptor: Int32) async throws -> Bool {
-        try await withStore { store in
+        try await withStore(holding: position) { store in
             guard let file = try store.files(ofMessageAt: position).first, file.kept else {
                 return false
             }
@@ -939,7 +957,10 @@ public actor Messenger {
             try ClientStore.overwriteAndRemove(URL(fileURLWithPath: store + ClientStore.plainSuffix))
         }
         let manager = FileManager.default
-        let names = [ClientStore.fileName, ClientStore.fileName + "-journal", StoreKeys.fileName, notesFile]
+        let names = [
+            ClientStore.fileName, ClientStore.fileName + "-journal", Vault.fileName, Vault.fileName + "-journal", StoreKeys.fileName,
+            notesFile,
+        ]
         for name in names {
             let url = directory.appendingPathComponent(name)
             if manager.fileExists(atPath: url.path) { try manager.removeItem(at: url) }
@@ -956,6 +977,226 @@ public actor Messenger {
             connect()
         }
         await publish()
+    }
+
+    // MARK: Hidden chats
+
+    /// Tries the phrase on the vault (`Vault`): true when it opens, and its chats join the
+    /// state, marked hidden, until a lock or `closeVault`; the moves a stop cut short are
+    /// finished first, then the vault's client starts. A wrong phrase and a data folder that
+    /// holds only the decoy give false alike, after the same key derivation; so does a
+    /// messenger without a transport.
+    public func openVault(_ phrase: String) async throws -> Bool {
+        guard try await startVault(phrase) else {
+            return false
+        }
+        vaultShown = true
+        await publish()
+        return true
+    }
+
+    /// `openVault` without showing the vault's chats, which a hide keeps off the screen.
+    private func startVault(_ phrase: String) async throws -> Bool {
+        guard let transport, try await transport.openVault(phrase) else {
+            return false
+        }
+        guard vaultNotes == nil else {
+            return true
+        }
+        do {
+            vaultNotes = try await transport.withVault { try Notes.load($0) } ?? Notes()
+            for move in try await transport.vaultMoves() {
+                try await self.move(move.contact, hiding: move.hiding)
+            }
+            try await transport.startVault()
+        } catch {
+            await closeVault()
+            throw error
+        }
+        flush()
+        return true
+    }
+
+    /// Hides the chat behind the phrase: every row of it moves into the vault, so it leaves
+    /// the main store and the list. A phrase that does not open the vault gives false and
+    /// changes nothing, unless `makeNew`: then a new vault is made under the phrase in place
+    /// of any other, and whatever was hidden under another phrase is erased. A vault that was
+    /// closed before, or was made now, is closed after, so the chat disappears.
+    ///
+    /// - Throws: `NotConnectedError` without a transport.
+    public func hideChat(_ userID: String, phrase: String, makeNew: Bool = false) async throws -> Bool {
+        guard let transport else {
+            throw NotConnectedError()
+        }
+        let contact = try Identity.decodeUserID(userID)
+        var keepOpen = vaultShown
+        if try await !startVault(phrase) {
+            guard makeNew else {
+                return false
+            }
+            await closeVault()
+            try await transport.makeVault(phrase)
+            guard try await startVault(phrase) else {
+                throw StoreError.wrongKey
+            }
+            keepOpen = false
+        }
+        try await move(contact, hiding: true)
+        if !keepOpen {
+            await closeVault()
+        }
+        await publish()
+        return true
+    }
+
+    /// Moves a chat of the open vault back into the main store.
+    ///
+    /// - Throws: `VaultClosedError` while the vault is closed.
+    public func unhideChat(_ userID: String) async throws {
+        try await move(Identity.decodeUserID(userID), hiding: false)
+        await publish()
+    }
+
+    /// Closes the vault: its chats leave the state, its key leaves memory with its connection.
+    public func closeVault() async {
+        await transport?.closeVault()
+        vaultNotes = nil
+        vaultShown = false
+        await publish()
+    }
+
+    /// Moves every row of a contact into the open vault or out of it, with what the notes
+    /// keep of its chat; both stores' notes are written with the rows (`Vault.hide`), and no
+    /// other write of them happens meanwhile.
+    private func move(_ contact: Data, hiding: Bool) async throws {
+        guard let transport, let hidden = vaultNotes else {
+            throw VaultClosedError()
+        }
+        let userID = try Identity.encodeUserID(contact)
+        moving = true
+        moves += 1
+        var failure: Error?
+        do {
+            let before = try await positions(of: contact, inVault: !hiding)
+            var source = hiding ? notes : hidden
+            var target = hiding ? hidden : notes
+            target.add(source.take(userID, positions: before), as: userID)
+            let (main, vault) = hiding ? (source, target) : (target, source)
+            if hiding {
+                try await transport.hide(contact, mainNotes: main.encoded(), vaultNotes: vault.encoded())
+            } else {
+                try await transport.unhide(contact, mainNotes: main.encoded(), vaultNotes: vault.encoded())
+            }
+            let positions = try await before + positions(of: contact, inVault: hiding)
+            if hiding {
+                let chat = notes.take(userID, positions: positions)
+                vaultNotes?.add(chat, as: userID)
+            } else if var current = vaultNotes {
+                notes.add(current.take(userID, positions: positions), as: userID)
+                vaultNotes = current
+            }
+        } catch {
+            failure = error
+        }
+        moving = false
+        moves += 1
+        notesWaiting = false
+        try saveNotes()
+        try await saveVaultNotes()
+        if let failure {
+            throw failure
+        }
+    }
+
+    private func positions(of contact: Data, inVault: Bool) async throws -> [Int64] {
+        try await transport?.withStores { main, vault in
+            try (inVault ? vault : main)?.messages(contact).map(\.position) ?? []
+        } ?? []
+    }
+
+    /// Where the chat of a user id lives: true in the open vault, false in the main store, nil
+    /// in neither, such as a sender who is no contact or a chat of a closed vault.
+    private func inVault(_ userID: String) async -> Bool? {
+        guard let contact = try? Identity.decodeUserID(userID) else {
+            return nil
+        }
+        guard let transport else {
+            return false
+        }
+        return try? await transport.withStores { main, vault -> Bool? in
+            if try main.isContact(contact) {
+                return false
+            }
+            return try vault?.isContact(contact) == true ? true : nil
+        }
+    }
+
+    /// The notes of the chat change: the vault's for a hidden chat, the main store's for
+    /// another, none for a chat in neither store. Returns whether anything changed; only
+    /// then are they written.
+    @discardableResult
+    private func changeNotes(of userID: String, _ change: (inout Notes) -> Void) async throws -> Bool {
+        try await changeNotes(inVault: inVault(userID), change)
+    }
+
+    @discardableResult
+    private func changeNotes(inVault: Bool?, _ change: (inout Notes) -> Void) async throws -> Bool {
+        guard let inVault else {
+            return false
+        }
+        if inVault {
+            // A vault closed meanwhile keeps its notes to itself.
+            guard var changed = vaultNotes else {
+                return false
+            }
+            change(&changed)
+            guard changed != vaultNotes else {
+                return false
+            }
+            vaultNotes = changed
+            try await saveVaultNotes()
+        } else {
+            var changed = notes
+            change(&changed)
+            guard changed != notes else {
+                return false
+            }
+            notes = changed
+            try saveNotes()
+        }
+        return true
+    }
+
+    /// Forgets the times of messages that are gone, in both stores' notes.
+    private func forgetTimes(_ positions: [Int64]) async throws {
+        let keys = positions.map(String.init)
+        if keys.contains(where: { notes.times[$0] != nil }) {
+            keys.forEach { notes.times[$0] = nil }
+            try saveNotes()
+        }
+        if let hidden = vaultNotes, keys.contains(where: { hidden.times[$0] != nil }) {
+            keys.forEach { vaultNotes?.times[$0] = nil }
+            try await saveVaultNotes()
+        }
+    }
+
+    /// Writes the notes of the main store, unless a move runs: it writes them itself.
+    private func saveNotes() throws {
+        guard !moving else {
+            return notesWaiting = true
+        }
+        try notes.save(notesStore)
+    }
+
+    private func saveVaultNotes() async throws {
+        guard let vaultNotes, let transport else {
+            return
+        }
+        guard !moving else {
+            return notesWaiting = true
+        }
+        let data = try vaultNotes.encoded()
+        try await transport.withVault { store in try store.transaction { try store.setAppNotes(data) } }
     }
 
     // MARK: Checks
@@ -1080,6 +1321,8 @@ public actor Messenger {
         // Closed here, not when the last task lets go of the transport.
         await transport?.closeStore()
         transport = nil
+        vaultNotes = nil
+        vaultShown = false
         client?.store.close()
         client = nil
         link = .idle
@@ -1096,23 +1339,22 @@ public actor Messenger {
             // where it is.
             guard let userID = try? Identity.encodeUserID(sender) else { break }
             if received.result == CryptoError.identityKeyMismatch.result {
-                noteRefusedKey(sender)
+                await noteRefusedKey(sender)
             }
-            var changed = received.isANewMessage && notes.arrived(userID)
-            if let seconds = received.timer {
-                notes.timerChanges[userID, default: []].append(TimerNote(at: Self.milliseconds(Date()), seconds: seconds, own: false))
-                changed = true
-            }
-            if received.deleted, let position = received.position {
-                notes.times[String(position)] = nil
-                changed = true
-            }
-            if changed {
-                try? notes.save(notesStore)
+            let timer = received.timer.map { TimerNote(at: Self.milliseconds(Date()), seconds: $0, own: false) }
+            try? await changeNotes(of: userID) { notes in
+                if received.isANewMessage {
+                    _ = notes.arrived(userID)
+                }
+                if let timer {
+                    notes.timerChanges[userID, default: []].append(timer)
+                }
+                if received.deleted, let position = received.position {
+                    notes.times[String(position)] = nil
+                }
             }
         case .expired(let positions):
-            positions.forEach { notes.times[String($0)] = nil }
-            try? notes.save(notesStore)
+            try? await forgetTimes(positions)
         case .written, .sent: break
         case .refused, .transferFailed: break
         case .file(let update) where update.avatar:
@@ -1121,7 +1363,7 @@ public actor Messenger {
             }
         case .file(let update):
             if update.result == CryptoError.identityKeyMismatch.result {
-                noteRefusedKey(update.contact)
+                await noteRefusedKey(update.contact)
             }
             let moving = update.state == .sending || update.state == .receiving
             let made = Progress(done: update.done, total: update.total)
@@ -1141,10 +1383,10 @@ public actor Messenger {
 
     /// A key that the identity of the contact signed in place of the pinned one was refused
     /// (IDENTITY_KEY_MISMATCH): the chat warns about it until the user takes the warning off.
-    private func noteRefusedKey(_ contact: Data) {
+    private func noteRefusedKey(_ contact: Data) async {
         guard let userID = try? Identity.encodeUserID(contact) else { return }
-        notes.refusedKeys[userID] = Self.milliseconds(Date())
-        try? notes.save(notesStore)
+        let time = Self.milliseconds(Date())
+        try? await changeNotes(of: userID) { $0.refusedKeys[userID] = time }
     }
 
     /// Runs an action that may start a session with the contact; a refused key is noted
@@ -1153,7 +1395,7 @@ public actor Messenger {
         do {
             return try await action()
         } catch CryptoError.identityKeyMismatch {
-            noteRefusedKey(contact)
+            await noteRefusedKey(contact)
             await publish()
             throw CryptoError.identityKeyMismatch
         }
@@ -1171,8 +1413,7 @@ public actor Messenger {
         guard !positions.isEmpty else {
             return
         }
-        positions.forEach { notes.times[String($0)] = nil }
-        try? notes.save(notesStore)
+        try? await forgetTimes(positions)
         await publish()
     }
 
@@ -1198,7 +1439,7 @@ public actor Messenger {
     /// becomes the time of its logged message.
     private func drain(_ transport: Transport) async {
         while !Task.isCancelled {
-            guard let rows = try? await transport.withClient({ try $0.store.pending() }) else {
+            guard let rows = try? await transport.withStores({ main, vault in try main.pending() + (vault?.pending() ?? []) }) else {
                 break
             }
             guard let row = rows.first(where: { $0.failure == nil }) else {
@@ -1210,7 +1451,7 @@ public actor Messenger {
             }
             do {
                 // A text that waited for a session answers its message only while that one is there.
-                let replyTo = try await transport.withClient { client in
+                let replyTo = try await transport.withClient(for: row.contact) { client in
                     try row.replyTo.flatMap { try client.store.message($0)?.contact == row.contact ? $0 : nil }
                 }
                 let messageID: Data
@@ -1220,21 +1461,20 @@ public actor Messenger {
                     // The quoted message went while the bundle was fetched: the text goes alone.
                     messageID = try await transport.sendText(row.contact, row.text, pending: row.position)
                 }
-                let logged = try await transport.withClient {
+                let logged = try await transport.withClient(for: row.contact) {
                     try $0.store.messages(row.contact).last { $0.messageID == messageID }
                 }
                 if let logged {
-                    notes.times[String(logged.position)] = row.madeAt
-                    try notes.save(notesStore)
+                    try await changeNotes(of: Identity.encodeUserID(row.contact)) { $0.times[String(logged.position)] = row.madeAt }
                 }
             } catch is CancellationError {
                 break
             } catch {
                 if error as? CryptoError == .identityKeyMismatch {
-                    noteRefusedKey(row.contact)
+                    await noteRefusedKey(row.contact)
                 }
                 let reason = (error as? RefusedError).map { Self.refusal($0.result) } ?? Self.describe(error)
-                try? await transport.withClient { client in
+                try? await transport.withClient(for: row.contact) { client in
                     try client.store.transaction { try client.store.failPending(row.position, reason: reason) }
                 }
             }
@@ -1247,13 +1487,43 @@ public actor Messenger {
         _ = try? await state()
     }
 
+    /// The local names by user id, of the open vault's contacts too.
     private func savedNames() async throws -> [String: String] {
-        let contacts = try await withClient { try $0.store.contacts() }
+        let contacts: [Contact]
+        if let transport {
+            contacts = try await transport.withStores { main, vault in try main.contacts() + (vault?.contacts() ?? []) }
+        } else {
+            contacts = try await withClient { try $0.store.contacts() }
+        }
         var saved: [String: String] = [:]
         for contact in contacts {
             saved[try Identity.encodeUserID(contact.identityKey)] = contact.name ?? ""
         }
         return saved
+    }
+
+    /// `withClient` with the client that has the contact: the vault's for a hidden chat.
+    private func withClient<T: Sendable>(for contact: Data, _ body: @escaping @Sendable (Client) throws -> T) async throws -> T {
+        if let transport {
+            return try await transport.withClient(for: contact, body)
+        }
+        return try await withClient(body)
+    }
+
+    /// `withClient` with the client that has the message at the position, or the pending text
+    /// at its negation: the vault's for a hidden chat.
+    private func withClient<T: Sendable>(holding position: Int64, _ body: @escaping @Sendable (Client) throws -> T) async throws -> T {
+        if let transport {
+            return try await transport.withClient(holding: position, body)
+        }
+        return try await withClient(body)
+    }
+
+    private func withStore<T: Sendable>(holding position: Int64, _ body: @escaping @Sendable (ClientStore) throws -> T) async throws -> T {
+        if transport != nil || client != nil {
+            return try await withClient(holding: position) { try body($0.store) }
+        }
+        return try body(notesStore)
     }
 
     @discardableResult
@@ -1267,8 +1537,12 @@ public actor Messenger {
         throw NotConnectedError()
     }
 
-    private func read() async throws -> Rows {
-        try await withStore { try Rows(store: $0) }
+    /// The rows of the main store and of the open vault.
+    private func read() async throws -> (Rows, Rows?) {
+        if let transport {
+            return try await transport.withStores { main, vault in (try Rows(store: main), try vault.map(Rows.init)) }
+        }
+        return (try await withStore { try Rows(store: $0) }, nil)
     }
 
     /// Runs `body` on the store of the transport or of the client, else on the notes' own.
@@ -1475,7 +1749,7 @@ struct Rows: Sendable {
 
 /// The notes of the app, kept in the store: times are milliseconds since 1970, message keys
 /// are log positions. A version before kept them in `app.json`.
-struct Notes: Codable, Equatable {
+struct Notes: Codable, Equatable, Sendable {
     var relay: String?
     var read: [String: Int64] = [:]
     var added: [String: Int64] = [:]
@@ -1558,10 +1832,47 @@ struct Notes: Codable, Equatable {
     }
 
     func save(_ store: ClientStore) throws {
+        let data = try encoded()
+        try store.transaction { try store.setAppNotes(data) }
+    }
+
+    func encoded() throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
-        let data = try encoder.encode(self)
-        try store.transaction { try store.setAppNotes(data) }
+        return try encoder.encode(self)
+    }
+
+    /// Takes out what is kept of a chat, the times of the messages at `positions` included.
+    mutating func take(_ userID: String, positions: [Int64]) -> ChatNotes {
+        var chat = ChatNotes()
+        chat.read = read.removeValue(forKey: userID)
+        chat.added = added.removeValue(forKey: userID)
+        for key in positions.map(String.init) {
+            if let time = times.removeValue(forKey: key) {
+                chat.times[key] = time
+            }
+        }
+        chat.draft = drafts.removeValue(forKey: userID)
+        chat.pinned = pins.contains(userID)
+        pin(userID, false)
+        chat.muted = muted.remove(userID) != nil
+        chat.archived = archived.remove(userID) != nil
+        chat.timerChanges = timerChanges.removeValue(forKey: userID)
+        chat.refusedKey = refusedKeys.removeValue(forKey: userID)
+        return chat
+    }
+
+    /// Keeps what `take` took out of the notes of another store.
+    mutating func add(_ chat: ChatNotes, as userID: String) {
+        read[userID] = chat.read ?? read[userID]
+        added[userID] = chat.added ?? added[userID]
+        times.merge(chat.times) { _, moved in moved }
+        drafts[userID] = chat.draft ?? drafts[userID]
+        if chat.pinned { pin(userID, true) }
+        if chat.muted { muted.insert(userID) }
+        if chat.archived { archived.insert(userID) }
+        timerChanges[userID] = chat.timerChanges ?? timerChanges[userID]
+        refusedKeys[userID] = chat.refusedKey ?? refusedKeys[userID]
     }
 
     /// The notes of `app.json` of a version that kept them there; nil without the file.
@@ -1571,13 +1882,26 @@ struct Notes: Codable, Equatable {
     }
 }
 
+/// What the notes keep of one chat, moved with it into the vault and out of it.
+struct ChatNotes: Equatable, Sendable {
+    var read: Int64?
+    var added: Int64?
+    var times: [String: Int64] = [:]
+    var draft: String?
+    var pinned = false
+    var muted = false
+    var archived = false
+    var timerChanges: [TimerNote]?
+    var refusedKey: Int64?
+}
+
 /// What `app.json` keeps: what the app shows before the store is unlocked.
 struct LaunchNotes: Codable, Equatable {
     var theme: AppSettings.Theme?
 }
 
 /// A change of the timer of a chat as the notes keep it: the time in milliseconds.
-struct TimerNote: Codable, Equatable {
+struct TimerNote: Codable, Equatable, Sendable {
     var at: Int64
     var seconds: Int
     var own: Bool

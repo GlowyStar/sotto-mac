@@ -236,7 +236,7 @@ extension MessengerRelayTests {
 
         #expect(!FileManager.default.fileExists(atPath: downloads.path), "nothing went to the download folder")
         let files = filesUnder(appDirectory)
-        #expect(Set(files.map(\.0.lastPathComponent)) == [ClientStore.fileName, StoreKeys.fileName, Messenger.notesFile])
+        #expect(Set(files.map(\.0.lastPathComponent)) == [ClientStore.fileName, StoreKeys.fileName, Vault.fileName, Messenger.notesFile])
         let secrets = markers.map { Data($0.utf8) } + [Data("a received file marker".utf8), picture.subdata(in: 100..<164)]
         for (url, data) in files {
             #expect(!secrets.contains { data.range(of: $0) != nil }, "\(url.lastPathComponent) holds a text of the chat or the picture")

@@ -7,6 +7,17 @@ public struct Alert: Equatable, Sendable {
     public let title: String
     public let body: String
     public let sound: Bool
+    /// The chat is hidden (`Chat.hidden`): the notification carries no id of it.
+    public var hidden = false
+
+    /// The group of the notification: the chat, or one group for every hidden chat.
+    public var thread: String {
+        hidden ? Alerts.hiddenThread : chatID
+    }
+
+    public var identifier: String {
+        Alerts.identifier(thread, messageID)
+    }
 }
 
 /// What the app tells about new messages outside the window: notifications and the Dock
@@ -14,11 +25,13 @@ public struct Alert: Equatable, Sendable {
 public enum Alerts {
     public static let hiddenTitle = "Sotto"
     public static let hiddenBody = "New message"
+    /// The group of the notifications of every hidden chat, in place of a chat's id.
+    public static let hiddenThread = "hidden"
 
     /// A notification for each chat with incoming messages in `new` that `old` did not hold,
     /// about the newest of them. None at launch (`old` is nil), none for `quietChat` (the
     /// chat open in the front window), none for a muted chat. `locked` is true while the lock
-    /// screen covers the window.
+    /// screen covers the window. A hidden chat never shows its name or its text.
     public static func make(
         old: MessengerState?, new: MessengerState, settings: AppSettings, quietChat: String?, locked: Bool
     ) -> [Alert] {
@@ -34,23 +47,25 @@ public enum Alerts {
                 alerts.append(Alert(
                     chatID: chat.userID,
                     messageID: message.id,
-                    title: hide || !settings.notificationSender ? hiddenTitle : chat.name,
-                    body: hide || !settings.notificationPreview ? hiddenBody : preview(message),
-                    sound: settings.sound
+                    title: hide || chat.hidden || !settings.notificationSender ? hiddenTitle : chat.name,
+                    body: hide || chat.hidden || !settings.notificationPreview ? hiddenBody : preview(message),
+                    sound: settings.sound,
+                    hidden: chat.hidden
                 ))
             }
         }
         return alerts
     }
 
-    /// The identifier of the notification of a message.
-    public static func identifier(_ chatID: String, _ messageID: Int64) -> String {
-        "\(chatID)-\(messageID)"
+    /// The identifier of the notification of a message, by its group.
+    public static func identifier(_ thread: String, _ messageID: Int64) -> String {
+        "\(thread)-\(messageID)"
     }
 
     /// The notifications to take away: of the incoming messages of `old` that `new` does not
     /// hold (deleted for both or expired, protocol sections 39.4 and 39.6) or holds with
-    /// another text (edited, 39.3), so that their text stays in no notification.
+    /// another text (edited, 39.3), so that their text stays in no notification; a vault that
+    /// closed takes the notifications of its chats with it.
     public static func changed(old: MessengerState?, new: MessengerState) -> [String] {
         guard let old else { return [] }
         var ids: [String] = []
@@ -58,7 +73,7 @@ public enum Alerts {
             let now = new.chats.first { $0.userID == before.userID }
             let texts = Dictionary((now?.messages ?? []).map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
             for message in before.messages where !message.outgoing && texts[message.id] != message.text {
-                ids.append(identifier(before.userID, message.id))
+                ids.append(identifier(before.hidden ? hiddenThread : before.userID, message.id))
             }
         }
         return ids

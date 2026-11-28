@@ -154,7 +154,9 @@ func replayedInitialMessageGivesNoSecondText(oneTimeCount: Int) throws {
         for delivered in [real, garbage] {
             #expect(try bob.receive(delivered) == Received(ack: true, text: nil, result: "NOT_A_CONTACT"))
         }
-        #expect(try rows(bob.store) == storeBefore)
+        let (unchanged, sealed) = try outsideTheSealedInbox(bob.store, before: storeBefore)
+        #expect(unchanged)
+        #expect(sealed == 2, "each envelope of a stranger is kept sealed for a vault")
     }
 }
 
